@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>lexis</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="main.js" defer></script>
+  </head>
+  <body>
+    <nav class="rail">
+      <h1 class="wordmark">lexis<span class="stop">.</span></h1>
+      <div class="rail-links">
+        <button class="rail-link active" data-view="bank">bank<span class="rail-count" id="count-bank"></span></button>
+        <button class="rail-link" data-view="today">today<span class="rail-count" id="count-today"></span></button>
+        <button class="rail-link" data-view="review">review<span class="rail-count" id="count-review"></span></button>
+        <button class="rail-link" data-view="essay">essay</button>
+      </div>
+      <p class="rail-foot">definitions from Wiktionary<br />everything else stays on this device</p>
+    </nav>
+
+    <main>
+      <!-- bank -->
+      <section id="view-bank" class="view active">
+        <p class="guide-words" id="guide-words" hidden></p>
+        <form id="add-form" class="add-form" autocomplete="off">
+          <input id="add-input" type="text" placeholder="add a word, e.g. demise" spellcheck="false" aria-label="Add a word" />
+        </form>
+        <p id="add-status" class="add-status" hidden></p>
+        <div id="word-list" class="word-list"></div>
+        <p id="bank-empty" class="empty" hidden>
+          No words yet. Add one above — lexis fetches its dictionary definition and suggests
+          essay-ready synonyms.
+        </p>
+      </section>
+
+      <!-- today -->
+      <section id="view-today" class="view">
+        <header class="view-head">
+          <p class="eyebrow" id="today-date"></p>
+          <p class="lede" id="today-lede"></p>
+        </header>
+        <div id="today-list" class="today-list"></div>
+        <p id="today-empty" class="empty" hidden>
+          Nothing to practise today. Add words to your bank first.
+        </p>
+      </section>
+
+      <!-- review -->
+      <section id="view-review" class="view">
+        <div id="review-area"></div>
+      </section>
+
+      <!-- essay -->
+      <section id="view-essay" class="view">
+        <header class="view-head">
+          <p class="eyebrow">essay check</p>
+          <p class="lede">
+            Paste a draft, or open a .txt file. lexis reads it on this device and reports which
+            bank words you used and how.
+          </p>
+        </header>
+        <textarea id="essay-text" spellcheck="false" placeholder="Paste your essay here…"></textarea>
+        <div class="essay-actions">
+          <label class="file-label">
+            open a file<input type="file" id="essay-file" accept=".txt,.md,text/plain" hidden />
+          </label>
+          <span class="essay-count" id="essay-count"></span>
+          <button id="essay-check" class="button-primary" type="button">check essay</button>
+        </div>
+        <div id="essay-report"></div>
+      </section>
+    </main>
+  </body>
+</html>

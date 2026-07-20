@@ -1,0 +1,641 @@
+/* lexis — a minimalist word bank.
+   Palette: paper, ink, and one marking-pen red. Serif carries the words;
+   a quiet sans carries the chrome. */
+
+:root {
+  --paper: #fcfcfa;
+  --ink: #1c1b1a;
+  --faint: #6e6a64;
+  --hairline: #e4e1db;
+  --wash: #f4f3ef;
+  --pen: #b42318;
+  --serif: Charter, "Bitstream Charter", Cambria, Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #191817;
+    --ink: #e8e5e0;
+    --faint: #98938b;
+    --hairline: #2e2c29;
+    --wash: #211f1e;
+    --pen: #e5484d;
+  }
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  display: flex;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--pen);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ---- rail (thumb index) ---- */
+
+.rail {
+  flex: 0 0 172px;
+  display: flex;
+  flex-direction: column;
+  padding: 30px 24px;
+  border-right: 1px solid var(--hairline);
+}
+
+.wordmark {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 23px;
+  margin-bottom: 40px;
+}
+
+.wordmark .stop {
+  color: var(--pen);
+  font-style: normal;
+}
+
+.rail-links {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rail-link {
+  text-align: left;
+  padding: 5px 8px 5px 0;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+  border-left: 2px solid transparent;
+  padding-left: 10px;
+  margin-left: -12px;
+  transition: color 120ms ease;
+}
+
+.rail-link:hover {
+  color: var(--ink);
+}
+
+.rail-link.active {
+  color: var(--ink);
+  border-left-color: var(--pen);
+}
+
+.rail-count {
+  color: var(--pen);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: super;
+  margin-left: 4px;
+}
+
+.rail-foot {
+  margin-top: auto;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--faint);
+}
+
+/* ---- main column ---- */
+
+main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 30px 48px 64px;
+}
+
+.view {
+  display: none;
+  max-width: 620px;
+}
+
+.view.active {
+  display: block;
+}
+
+.view-head {
+  margin-bottom: 26px;
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+
+.lede {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--ink);
+  max-width: 46ch;
+}
+
+.empty {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--faint);
+  margin-top: 34px;
+  max-width: 44ch;
+}
+
+/* ---- bank ---- */
+
+.guide-words {
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  font-variant: small-caps;
+  color: var(--faint);
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 8px;
+  margin-bottom: 22px;
+}
+
+.add-form {
+  margin-bottom: 6px;
+}
+
+#add-input {
+  width: 100%;
+  font-family: var(--serif);
+  font-size: 21px;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  padding: 6px 0 10px;
+  user-select: text;
+}
+
+#add-input::placeholder {
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+#add-input:focus {
+  outline: none;
+  border-bottom-color: var(--ink);
+}
+
+#add-input:disabled {
+  opacity: 0.5;
+}
+
+.add-status {
+  font-size: 13px;
+  color: var(--faint);
+  margin: 8px 0 0;
+}
+
+.add-status.error {
+  color: var(--pen);
+}
+
+.word-list {
+  margin-top: 26px;
+}
+
+.entry {
+  border-bottom: 1px solid var(--hairline);
+  padding: 18px 0;
+}
+
+.entry-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+}
+
+.headword {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 20px;
+}
+
+.phonetic {
+  font-family: var(--serif);
+  font-size: 14px;
+  color: var(--faint);
+}
+
+.entry-pos {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14px;
+  color: var(--faint);
+}
+
+.entry-due {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.entry-due.due-now {
+  color: var(--pen);
+}
+
+.entry-body {
+  margin-top: 10px;
+}
+
+.sense {
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.55;
+  padding-left: 1.6em;
+  text-indent: -1.6em;
+  margin-bottom: 6px;
+  user-select: text;
+  cursor: text;
+}
+
+.sense-num {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  padding-right: 0.55em;
+}
+
+.sense-pos {
+  font-style: italic;
+  color: var(--faint);
+  padding-right: 0.4em;
+}
+
+.sense-example {
+  display: block;
+  text-indent: 0;
+  font-style: italic;
+  color: var(--faint);
+  font-size: 14.5px;
+  margin: 2px 0 0 0;
+}
+
+.synonyms {
+  font-family: var(--serif);
+  font-size: 15px;
+  margin-top: 12px;
+  user-select: text;
+}
+
+.synonyms .syn-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding-right: 0.6em;
+}
+
+.synonyms .syn-note {
+  display: block;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 3px;
+}
+
+.entry-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.entry-meta a,
+.link-quiet {
+  color: var(--faint);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-size: 11.5px;
+}
+
+.link-quiet:hover {
+  color: var(--pen);
+}
+
+/* ---- today ---- */
+
+.today-list {
+  margin-top: 4px;
+}
+
+.today-item {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.tick {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid var(--faint);
+  border-radius: 2px;
+  position: relative;
+  top: 3px;
+  transition: border-color 120ms ease;
+}
+
+.tick:hover {
+  border-color: var(--ink);
+}
+
+.today-item.ticked .tick {
+  border-color: var(--pen);
+}
+
+.today-item.ticked .tick::after {
+  content: "\2713";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pen);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.today-word {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 17px;
+  white-space: nowrap;
+}
+
+.today-def {
+  font-family: var(--serif);
+  font-size: 14.5px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-item.ticked .today-word,
+.today-item.ticked .today-def {
+  color: var(--faint);
+}
+
+/* ---- review ---- */
+
+.review-stage {
+  min-height: 380px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+}
+
+.review-progress {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 26px;
+}
+
+.card-word {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: 42px;
+}
+
+.card-phonetic {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--faint);
+}
+
+.card-back {
+  margin-top: 22px;
+  max-width: 48ch;
+  animation: settle 180ms ease;
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.card-back .sense {
+  text-align: left;
+}
+
+.reveal-hint {
+  margin-top: 30px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.grade-row {
+  display: flex;
+  gap: 26px;
+  margin-top: 34px;
+}
+
+.grade {
+  font-size: 14px;
+  color: var(--faint);
+  padding: 6px 2px;
+  border-bottom: 2px solid transparent;
+  transition: color 120ms ease;
+}
+
+.grade:hover {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.grade.grade-again:hover {
+  color: var(--pen);
+  border-bottom-color: var(--pen);
+}
+
+/* ---- essay ---- */
+
+#essay-text {
+  width: 100%;
+  min-height: 240px;
+  resize: vertical;
+  font-family: var(--serif);
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--wash);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 16px 18px;
+  user-select: text;
+}
+
+#essay-text:focus {
+  outline: none;
+  border-color: var(--faint);
+}
+
+.essay-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+.file-label {
+  font-size: 13px;
+  color: var(--faint);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.file-label:hover {
+  color: var(--ink);
+}
+
+.essay-count {
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.button-primary {
+  font-size: 14px;
+  padding: 8px 18px;
+  border: 1px solid var(--ink);
+  border-radius: 3px;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.button-primary:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+#essay-report {
+  margin-top: 34px;
+}
+
+.report-summary {
+  font-family: var(--serif);
+  font-size: 16px;
+  margin-bottom: 20px;
+  max-width: 50ch;
+}
+
+.report-section {
+  margin-bottom: 24px;
+}
+
+.report-word {
+  border-bottom: 1px solid var(--hairline);
+  padding: 12px 0;
+}
+
+.report-word-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.report-word-head .headword {
+  font-size: 16px;
+}
+
+.report-count {
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.flag {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--pen);
+}
+
+.report-sentence {
+  font-family: var(--serif);
+  font-size: 14.5px;
+  color: var(--faint);
+  margin-top: 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--hairline);
+  user-select: text;
+}
+
+.note-list {
+  font-family: var(--serif);
+  font-size: 15px;
+  list-style: none;
+}
+
+.note-list li {
+  padding-left: 16px;
+  text-indent: -16px;
+  margin-bottom: 6px;
+}
+
+.note-list li::before {
+  content: "\2013\00a0";
+  color: var(--pen);
+}
