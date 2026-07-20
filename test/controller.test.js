@@ -120,6 +120,17 @@ async function flush() {
   for (let i = 0; i < 25; i++) await new Promise((r) => setImmediate(r));
 }
 
+// Wait until a condition holds, yielding to the event loop between checks. The
+// retry under test finishes on a *real* crypto+fetch round trip, which takes an
+// unpredictable number of turns under load; polling to a generous bound is
+// deterministic where a fixed count of flushes races that work and flakes.
+async function waitFor(predicate, tries = 1000) {
+  for (let i = 0; i < tries; i++) {
+    if (predicate()) return;
+    await new Promise((r) => setImmediate(r));
+  }
+}
+
 beforeEach(() => {
   server.reset();
   localStorage.clear();
@@ -143,7 +154,7 @@ test("a downed link schedules a retry that recovers when the link returns", asyn
     // The network is down: the first sync fails and must schedule a retry.
     globalThis.fetch = () => Promise.reject(new TypeError("Failed to fetch"));
     await controller.now();
-    await flush();
+    await waitFor(() => statuses.at(-1)?.kind === "error");
 
     const failed = statuses.at(-1);
     assert.equal(failed.kind, "error");
@@ -152,7 +163,7 @@ test("a downed link schedules a retry that recovers when the link returns", asyn
     // Bring the network back and let the scheduled retry (~5s) fire.
     globalThis.fetch = (url, init) => baseFetch(url, init);
     mock.timers.tick(7000);
-    await flush();
+    await waitFor(() => statuses.at(-1)?.kind === "ok");
 
     const recovered = statuses.at(-1);
     assert.equal(recovered.kind, "ok", "the scheduled retry carried the sync through");
