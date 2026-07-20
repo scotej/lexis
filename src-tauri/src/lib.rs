@@ -7,7 +7,7 @@ use bank::{Bank, Store, TodayList, Word};
 use chrono::{Local, NaiveDate};
 use serde::Serialize;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const TODAY_TARGET: usize = 10;
 
@@ -238,11 +238,65 @@ fn analyze_essay(
     Ok(essay::analyze(&text, &bank_words, &today_words))
 }
 
+#[derive(Serialize, Clone)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateInfo {
+            version: update.version.clone(),
+            notes: update.body.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Downloads and installs the pending update, emitting `update-progress`
+/// (0–100) along the way, then relaunches the app.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("you're already on the latest version")?;
+
+    let progress_app = app.clone();
+    let mut downloaded: u64 = 0;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let pct = total
+                    .map(|t| (downloaded as f64 / t as f64 * 100.0).min(100.0) as u32)
+                    .unwrap_or(0);
+                let _ = progress_app.emit("update-progress", pct);
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
             let dir = app.path().app_data_dir()?;
             app.manage(Mutex::new(Store::load(dir)));
             Ok(())
@@ -255,7 +309,9 @@ pub fn run() {
             tick_word,
             due_words,
             grade_word,
-            analyze_essay
+            analyze_essay,
+            check_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

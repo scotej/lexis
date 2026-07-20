@@ -124,11 +124,32 @@ button {
   margin-left: 4px;
 }
 
+.update-line {
+  margin-top: auto;
+  text-align: left;
+  font-size: 12px;
+  color: var(--pen);
+  padding: 6px 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.update-line:disabled {
+  color: var(--faint);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
 .rail-foot {
   margin-top: auto;
   font-size: 11px;
   line-height: 1.6;
   color: var(--faint);
+}
+
+.update-line + .rail-foot {
+  margin-top: 10px;
 }
 
 /* ---- main column ---- */

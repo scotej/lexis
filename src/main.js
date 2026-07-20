@@ -371,6 +371,42 @@ $("essay-check").addEventListener("click", async () => {
   }
 });
 
+/* ---- updates ---- */
+
+async function offerUpdate() {
+  const line = $("update-line");
+  let update;
+  try {
+    update = await invoke("check_update");
+  } catch {
+    return; // offline or endpoint unreachable — try again next launch
+  }
+  if (!update) return;
+
+  line.textContent = `v${update.version} available — update`;
+  line.hidden = false;
+  await tauri.event.listen("update-progress", (e) => {
+    line.textContent = `updating… ${e.payload}%`;
+  });
+
+  let installing = false;
+  line.addEventListener("click", async () => {
+    if (installing) return;
+    installing = true;
+    line.disabled = true;
+    line.textContent = "updating…";
+    try {
+      await invoke("install_update"); // relaunches on success
+      line.textContent = "restarting…";
+    } catch (err) {
+      installing = false;
+      line.disabled = false;
+      line.textContent = "update failed — try again";
+      console.error(err);
+    }
+  });
+}
+
 /* ---- boot ---- */
 
 if (!invoke) {
@@ -381,4 +417,5 @@ if (!invoke) {
   renderBank();
   refreshCounts();
   addInput.focus();
+  setTimeout(offerUpdate, 2500); // check quietly after the app settles
 }
