@@ -293,17 +293,32 @@ document.addEventListener("keydown", (e) => {
 const essayText = $("essay-text");
 const essayCount = $("essay-count");
 
+// The draft survives restarts (including update relaunches).
+const DRAFT_KEY = "lexis-essay-draft";
+
+function saveEssayDraft() {
+  try {
+    localStorage.setItem(DRAFT_KEY, essayText.value);
+  } catch {
+    /* storage full or unavailable — the draft simply isn't kept */
+  }
+}
+
 function updateEssayCount() {
   const n = essayText.value.split(/\s+/).filter(Boolean).length;
   essayCount.textContent = n ? `${n} words` : "";
 }
-essayText.addEventListener("input", updateEssayCount);
+essayText.addEventListener("input", () => {
+  updateEssayCount();
+  saveEssayDraft();
+});
 
 $("essay-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   essayText.value = await file.text();
   updateEssayCount();
+  saveEssayDraft();
 });
 
 $("essay-check").addEventListener("click", async () => {
@@ -386,7 +401,9 @@ async function offerUpdate() {
   line.textContent = `v${update.version} available — update`;
   line.hidden = false;
   await tauri.event.listen("update-progress", (e) => {
-    line.textContent = `updating… ${e.payload}%`;
+    // At 100% the installer takes over and the app relaunches itself,
+    // so the invoke below never resolves on success.
+    line.textContent = e.payload >= 100 ? "installing…" : `updating… ${e.payload}%`;
   });
 
   let installing = false;
@@ -395,13 +412,15 @@ async function offerUpdate() {
     installing = true;
     line.disabled = true;
     line.textContent = "updating…";
+    saveEssayDraft();
     try {
-      await invoke("install_update"); // relaunches on success
-      line.textContent = "restarting…";
+      await invoke("install_update");
     } catch (err) {
       installing = false;
       line.disabled = false;
-      line.textContent = "update failed — try again";
+      line.textContent = /read-only|os error 30/i.test(String(err))
+        ? "move lexis to Applications, then update"
+        : "update failed — try again";
       console.error(err);
     }
   });
@@ -414,6 +433,8 @@ if (!invoke) {
     el("p", "empty", "lexis needs to run inside the desktop app.")
   );
 } else {
+  essayText.value = localStorage.getItem(DRAFT_KEY) ?? "";
+  updateEssayCount();
   renderBank();
   refreshCounts();
   addInput.focus();

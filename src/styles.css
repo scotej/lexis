@@ -148,7 +148,7 @@ button {
   color: var(--faint);
 }
 
-.update-line + .rail-foot {
+.update-line:not([hidden]) + .rail-foot {
   margin-top: 10px;
 }
 

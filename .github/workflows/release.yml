@@ -10,6 +10,9 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # Serialized: parallel tauri-action jobs race on merging latest.json
+      # into the release, which can drop a platform from the updater manifest.
+      max-parallel: 1
       matrix:
         include:
           - platform: macos-latest
@@ -49,5 +52,18 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'lexis ${{ github.ref_name }}'
           releaseBody: 'Download the bundle for your platform below.'
-          releaseDraft: false
+          # Stays a draft until every platform has uploaded, so the
+          # releases/latest updater endpoint never serves a partial manifest.
+          releaseDraft: true
           prerelease: false
+
+  publish:
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: publish the completed draft release
+        run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false
