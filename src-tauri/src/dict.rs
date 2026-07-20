@@ -238,13 +238,24 @@ pub fn sophistication_score(word: &str, freq: f64) -> f64 {
     score
 }
 
-pub async fn fetch_synonyms(word: &str) -> Vec<Synonym> {
-    let url = format!("https://api.datamuse.com/words?rel_syn={}&md=f&max=40", word);
+async fn datamuse(query: &str) -> Vec<DmWord> {
+    let url = format!("https://api.datamuse.com/words?{}&md=f&max=40", query);
     let Ok(client) = client() else { return Vec::new() };
     let Ok(resp) = client.get(&url).send().await else { return Vec::new() };
-    let Ok(words) = resp.json::<Vec<DmWord>>().await else { return Vec::new() };
+    resp.json::<Vec<DmWord>>().await.unwrap_or_default()
+}
 
-    let mut ranked: Vec<Synonym> = words
+pub async fn fetch_synonyms(word: &str) -> Vec<Synonym> {
+    let mut candidates = datamuse(&format!("rel_syn={}", word)).await;
+    // Strict synonym lists run thin for many words; pad with Datamuse's
+    // means-like results, which stay corpus-driven rather than generative.
+    if candidates.len() < 6 {
+        let mut related = datamuse(&format!("ml={}", word)).await;
+        related.retain(|r| !candidates.iter().any(|c| c.word == r.word));
+        candidates.append(&mut related);
+    }
+
+    let mut ranked: Vec<Synonym> = candidates
         .into_iter()
         .filter(|w| {
             w.word != word
