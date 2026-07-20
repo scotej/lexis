@@ -10,6 +10,13 @@ import { mergeBanks } from "./merge.js";
 const DEBOUNCE_MS = 4000;
 const POLL_MS = 5 * 60 * 1000;
 
+// When a sync fails on a bad network, waiting the full poll interval to try
+// again leaves the two ends out of step for minutes. Instead retry quickly and
+// back off — so a link that flickers back recovers in seconds, while a link
+// that stays down doesn't hammer GitHub. Reset to the base on any success.
+const RETRY_BASE_MS = 5000;
+const RETRY_MAX_MS = 60 * 1000;
+
 export function createSyncController({ app, onStatus = () => {}, onApplied = () => {} }) {
   let key = null;
   let config = null;
@@ -17,6 +24,8 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
   let queued = false;
   let timer = null;
   let poll = null;
+  let retryTimer = null;
+  let backoff = 0;
   let lastError = null;
 
   function status(text, kind = "idle") {
@@ -44,11 +53,23 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
       // picks up has already queued its own push via schedule().
       await app.replaceBank(mergeBanks(app.getBank(), bank));
       lastError = null;
+      // The network came back (or never left): stand down the fast-retry ladder.
+      clearTimeout(retryTimer);
+      backoff = 0;
       status(syncedLabel(), "ok");
       onApplied(bank);
     } catch (err) {
       lastError = err;
-      status(offline(err) ? "offline — will retry" : String(err.message ?? err), "error");
+      if (offline(err)) {
+        // A transient network problem — schedule our own quick, backing-off
+        // retry rather than waiting for the next poll.
+        status("offline — will retry", "error");
+        scheduleRetry();
+      } else {
+        // A real error (bad token, wrong password, oversized file): retrying
+        // fast won't help, so leave it to the poll or the user.
+        status(String(err.message ?? err), "error");
+      }
     } finally {
       running = false;
       if (queued) {
@@ -66,7 +87,19 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
   }
 
   function offline(err) {
-    return err instanceof TypeError || /failed to fetch|networkerror/i.test(String(err.message ?? err));
+    return (
+      err?.offline === true ||
+      err instanceof TypeError ||
+      err?.name === "AbortError" ||
+      /failed to fetch|networkerror/i.test(String(err?.message ?? err))
+    );
+  }
+
+  function scheduleRetry() {
+    clearTimeout(retryTimer);
+    const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** backoff) + Math.random() * 1000;
+    backoff++;
+    retryTimer = setTimeout(run, delay);
   }
 
   return {
@@ -80,6 +113,8 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
     enable(k, cfg) {
       key = k;
       config = cfg;
+      clearTimeout(retryTimer);
+      backoff = 0;
       status("sync on", "idle");
       clearInterval(poll);
       poll = setInterval(() => run(), POLL_MS);
@@ -89,7 +124,9 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
       key = null;
       config = null;
       clearTimeout(timer);
+      clearTimeout(retryTimer);
       clearInterval(poll);
+      backoff = 0;
       status("sync off", "idle");
     },
 

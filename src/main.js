@@ -782,6 +782,9 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") sync?.now();
   });
+  // Regaining connectivity — leaving a captive portal, Wi-Fi reconnecting — is
+  // the moment to sync at once rather than waiting out a backoff.
+  globalThis.addEventListener("online", () => sync?.now());
 }
 
 boot();

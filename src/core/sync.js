@@ -51,9 +51,141 @@ function describeError(status, body) {
   return `GitHub returned ${status}${body ? ` — ${body}` : ""}`;
 }
 
+/**
+ * Network-resilience knobs. Hostile networks — captive portals, flaky Wi-Fi,
+ * throttling proxies — fail in ways a single fetch() can't survive: requests
+ * that hang forever, drops mid-flight, 5xx blips, and rate limiting. So every
+ * request runs under a timeout and a bounded, backing-off retry.
+ *
+ * The defaults suit real use; tests shrink them with setNetworkOptions().
+ */
+const net = {
+  timeoutMs: 15000, // abort a request that stalls this long — sync must never wedge
+  retries: 3, // total attempts per request for *transient* failures
+  backoffMs: 500, // base of the exponential backoff between attempts
+  maxBackoffMs: 4000, // never hold a single request open longer than this
+};
+
+/** Override the network knobs (used by tests to run fast). */
+export function setNetworkOptions(partial) {
+  Object.assign(net, partial);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A retryable "the network, not GitHub, is the problem" error. Tagged so the
+ * sync controller keeps trying with its own backoff instead of surfacing a
+ * dead end the user can do nothing about.
+ */
+function offlineError(message, cause) {
+  const err = new Error(message);
+  err.offline = true;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+// 5xx and 429 are transient by definition; retrying is the correct response.
+function isRetryableStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+// GitHub signals throttling as 429 (secondary limits) or 403 (primary), always
+// with a Retry-After header or x-ratelimit-remaining: 0. A permission 403 has
+// neither — which is how we tell a throttle from a genuinely forbidden token
+// and avoid reporting "the token lacks permission" to someone behind a proxy.
+function isRateLimited(resp) {
+  if (resp.status === 429) return true;
+  if (resp.status !== 403) return false;
+  if (resp.headers.get("retry-after")) return true;
+  return resp.headers.get("x-ratelimit-remaining") === "0";
+}
+
+// Prefer the server's own guidance — Retry-After seconds, or the epoch at which
+// the rate-limit window resets — over a blind guess. Returns ms, or null.
+function retryAfterMs(resp) {
+  const ra = resp.headers.get("retry-after");
+  if (ra != null && ra !== "") {
+    const secs = Number(ra);
+    if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  }
+  const reset = resp.headers.get("x-ratelimit-reset");
+  if (reset) {
+    const delta = Number(reset) * 1000 - Date.now();
+    if (Number.isFinite(delta) && delta > 0) return delta;
+  }
+  return null;
+}
+
+function backoffDelay(attempt) {
+  const base = Math.min(net.maxBackoffMs, net.backoffMs * 2 ** (attempt - 1));
+  return base + Math.random() * net.backoffMs; // jitter so two devices don't lock step
+}
+
+// A single fetch that cannot hang: an internal timeout aborts a stalled
+// request, and any caller-supplied signal is honoured too.
+async function fetchWithTimeout(url, init) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), net.timeoutMs);
+  const outer = init.signal;
+  if (outer) {
+    if (outer.aborted) ctrl.abort();
+    else outer.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A GitHub request that survives a hostile network. Network failures, our own
+ * timeout, 5xx, and rate limiting are retried with exponential backoff; a
+ * server that asks us to wait longer than one backoff window hands off to the
+ * caller's slower retry rather than holding the request open. Everything else
+ * — 2xx, 401, 404, 409, 422, a genuine permission 403 — is returned untouched
+ * for the caller to interpret.
+ */
 async function ghFetch(url, token, init = {}) {
-  const resp = await fetch(url, { ...init, headers: { ...headers(token), ...(init.headers ?? {}) } });
-  return resp;
+  const merged = { ...init, headers: { ...headers(token), ...(init.headers ?? {}) } };
+
+  for (let attempt = 1; attempt <= net.retries; attempt++) {
+    const last = attempt >= net.retries;
+    let resp;
+    try {
+      resp = await fetchWithTimeout(url, merged);
+    } catch (err) {
+      // fetch() rejects with TypeError on a network drop and AbortError when
+      // our timeout fires; both mean "try again in a moment".
+      if (last) {
+        throw offlineError(
+          err?.name === "AbortError"
+            ? "GitHub didn’t respond in time (a slow or blocked network)."
+            : "Couldn’t reach GitHub (network problem).",
+          err
+        );
+      }
+      await sleep(backoffDelay(attempt));
+      continue;
+    }
+
+    if (isRetryableStatus(resp.status) || isRateLimited(resp)) {
+      const message = isRateLimited(resp)
+        ? "GitHub is rate-limiting requests on this network."
+        : `GitHub is temporarily unavailable (${resp.status}).`;
+      const wait = retryAfterMs(resp);
+      // Out of attempts, or told to wait longer than we hold a request open:
+      // surface a retryable error and let the controller pace the next try.
+      if (last || (wait != null && wait > net.maxBackoffMs)) throw offlineError(message);
+      await sleep(wait ?? backoffDelay(attempt));
+      continue;
+    }
+
+    return resp;
+  }
+  // Unreachable: every path above returns or throws.
+  throw offlineError("Couldn’t reach GitHub.");
 }
 
 /** Reads the remote envelope. Returns `null` content when the file doesn't exist yet. */
