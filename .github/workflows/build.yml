@@ -22,11 +22,20 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+
+      # The shared core carries the app logic now, so its tests are the ones
+      # that matter most; cargo covers the storage layer that remains.
+      - name: test the shared core
+        run: npm test
 
       - name: cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml

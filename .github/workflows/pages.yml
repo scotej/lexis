@@ -1,0 +1,60 @@
+name: pages
+
+# Publishes the web build to GitHub Pages. The frontend is plain HTML/CSS/JS
+# with no bundler, so "building" is copying `src/` — the same directory the
+# desktop app bundles, which is what keeps the two ends identical.
+#
+# Nothing secret is involved. The GitHub token that syncs your bank is typed
+# into the running page and stored encrypted on your own device; it is never
+# committed, and never available to this workflow.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy midway; queue instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: test the shared core
+        run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: assemble the site
+        run: |
+          mkdir -p _site
+          cp -r src/. _site/
+          # Tell Pages to serve the tree verbatim rather than running Jekyll.
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

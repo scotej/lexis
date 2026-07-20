@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "lexis",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "identifier": "com.scott.lexis",
   "build": {
     "frontendDist": "../src"
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.dictionaryapi.dev https://api.datamuse.com https://en.wiktionary.org https://api.github.com"
     }
   },
   "plugins": {

@@ -30,6 +30,14 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute is how this app shows and conceals everything, and
+   any rule that sets `display` would otherwise out-specify the browser's
+   default `[hidden] { display: none }`. Keep this ahead of the components
+   that set `display: flex`. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -659,4 +667,195 @@ main {
 .note-list li::before {
   content: "\2013\00a0";
   color: var(--pen);
+}
+
+/* ---- gate (web: the password screen) ----
+   The page itself is public — GitHub Pages cannot serve a private site on a
+   free account — so this is not a curtain over the interface. The password
+   derives the key that decrypts the token and the bank; without it there is
+   nothing here to look at. */
+
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  background: var(--paper);
+  overflow-y: auto;
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 380px;
+}
+
+.gate-mark {
+  margin-bottom: 22px;
+}
+
+.gate-lede {
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--faint);
+  margin-bottom: 20px;
+}
+
+.gate-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.gate-form input {
+  width: 100%;
+  font: inherit;
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--wash);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 9px 11px;
+  user-select: text;
+}
+
+.gate-form input::placeholder {
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+.gate-form input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field > span {
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--faint);
+}
+
+.field small {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.field em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+.gate-form .button-primary {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+.gate-error {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--pen);
+}
+
+.gate-form .link-quiet {
+  align-self: flex-start;
+  text-align: left;
+}
+
+.gate-foot {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--faint);
+}
+
+.gate-foot em {
+  font-style: italic;
+  color: var(--ink);
+}
+
+/* ---- sync ---- */
+
+.sync-line {
+  margin-top: auto;
+  text-align: left;
+  font-size: 12px;
+  padding: 6px 0;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-line.sync-ok {
+  color: var(--faint);
+}
+
+.sync-line.sync-busy {
+  color: var(--ink);
+}
+
+.sync-line.sync-error {
+  color: var(--pen);
+}
+
+.sync-line:not([hidden]) + .update-line {
+  margin-top: 8px;
+}
+
+.sync-facts {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.sync-facts > div {
+  display: flex;
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.sync-facts dt {
+  flex: 0 0 96px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  padding-top: 2px;
+}
+
+.sync-facts dd {
+  font-family: var(--serif);
+  user-select: text;
+}
+
+.sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 24px;
+}
+
+.sync-note {
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--faint);
+  max-width: 46ch;
+}
+
+.sync-form {
+  max-width: 380px;
+  margin-top: 4px;
 }

@@ -1,6 +1,6 @@
 [package]
 name = "lexis"
-version = "0.2.1"
+version = "0.3.0"
 description = "A minimalist word bank for essay writers"
 authors = ["scotej"]
 edition = "2021"
@@ -18,12 +18,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# The backend stores bytes and runs the updater; all app logic lives in the
+# shared JavaScript core (src/core), so the HTTP, date, and JSON crates the
+# old Rust implementation needed are no longer pulled in.
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
+# Not used directly, but `tauri::generate_context!` expands to code that
+# expects it in scope.
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

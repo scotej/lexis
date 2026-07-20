@@ -1,5 +1,14 @@
-const tauri = window.__TAURI__;
-const invoke = tauri?.core?.invoke;
+/**
+ * The interface. Platform-agnostic: it talks to the shared core through the
+ * app service, and to the host (desktop or browser) through a small adapter.
+ */
+
+import { createApp } from "./core/app.js";
+import { createSyncController } from "./core/sync-controller.js";
+import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
+import { createWebPlatform } from "./platform/web.js";
+import { hasVault, unlockVault, createVault, clearVault } from "./core/vault.js";
+import { cryptoAvailable } from "./core/crypto.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -11,6 +20,31 @@ function el(tag, className, text) {
 
 const $ = (id) => document.getElementById(id);
 
+let platform = null;
+let app = null;
+let sync = null;
+
+/**
+ * Runs a bank mutation, surfacing failures instead of swallowing them.
+ *
+ * Every one of these writes to storage, and a write can fail — a full disk, a
+ * revoked permission, a locked web platform. Without this the promise rejects
+ * into nothing and the interface simply stops responding, which is the worst
+ * possible way to tell someone their work isn't being saved.
+ */
+async function mutate(action) {
+  try {
+    await action();
+  } catch (err) {
+    console.error(err);
+    applySyncStatus({
+      text: `couldn’t save — ${String(err.message ?? err)}`,
+      kind: "error",
+      enabled: true,
+    });
+  }
+}
+
 /* ---- navigation ---- */
 
 const railLinks = document.querySelectorAll(".rail-link");
@@ -19,6 +53,9 @@ railLinks.forEach((btn) => {
 });
 
 function switchView(name) {
+  // The gate overlays the rail but doesn't inert it, so a keyboard user can
+  // still reach these buttons before the app exists.
+  if (!app) return;
   railLinks.forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("active", v.id === `view-${name}`);
@@ -27,15 +64,14 @@ function switchView(name) {
   if (name === "today") renderToday();
   if (name === "review") startReview();
   if (name === "essay") updateEssayCount();
+  if (name === "sync") renderSync();
 }
 
 async function refreshCounts() {
   try {
-    const [words, due, today] = await Promise.all([
-      invoke("list_words"),
-      invoke("due_words"),
-      invoke("today_list"),
-    ]);
+    const words = app.listWords();
+    const due = app.dueWords();
+    const today = await app.todayList();
     $("count-bank").textContent = words.length || "";
     $("count-review").textContent = due.length || "";
     $("count-today").textContent = today.remaining || "";
@@ -95,15 +131,15 @@ function entryNode(word, expanded) {
   const meta = el("div", "entry-meta");
   meta.append(el("span", null, `${word.source} · practised ${word.times_used}×`));
   const src = el("button", "link-quiet", "view source");
-  src.addEventListener("click", () => {
-    tauri?.opener?.openUrl(word.source_url).catch(() => {});
-  });
+  src.addEventListener("click", () => platform.openUrl(word.source_url));
   const del = el("button", "link-quiet", "remove");
-  del.addEventListener("click", async () => {
-    await invoke("delete_word", { word: word.word });
-    renderBank();
-    refreshCounts();
-  });
+  del.addEventListener("click", () =>
+    mutate(async () => {
+      await app.deleteWord(word.word);
+      renderBank();
+      refreshCounts();
+    })
+  );
   meta.append(src, del);
   body.append(meta);
   wrap.append(body);
@@ -117,7 +153,7 @@ function entryNode(word, expanded) {
 let expandedWord = null;
 
 async function renderBank() {
-  const words = await invoke("list_words");
+  const words = app.listWords();
   const list = $("word-list");
   list.replaceChildren();
   words.forEach((w) => list.append(entryNode(w, w.word === expandedWord)));
@@ -147,13 +183,13 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
-    const entry = await invoke("add_word", { word });
+    const entry = await app.addWord(word);
     expandedWord = entry.word;
     addInput.value = "";
     addStatus.hidden = true;
     await renderBank();
   } catch (err) {
-    addStatus.textContent = String(err);
+    addStatus.textContent = String(err.message ?? err);
     addStatus.classList.add("error");
   } finally {
     addInput.disabled = false;
@@ -164,7 +200,7 @@ addForm.addEventListener("submit", async (e) => {
 /* ---- today ---- */
 
 async function renderToday() {
-  const view = await invoke("today_list");
+  const view = await app.todayList();
   const date = new Date(`${view.date}T00:00:00`);
   $("today-date").textContent = date
     .toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })
@@ -188,11 +224,13 @@ async function renderToday() {
     const tick = el("button", "tick");
     tick.setAttribute("aria-label", `mark ${item.word} as used`);
     tick.setAttribute("aria-pressed", String(item.ticked));
-    tick.addEventListener("click", async () => {
-      await invoke("tick_word", { word: item.word, ticked: !item.ticked });
-      renderToday();
-      refreshCounts();
-    });
+    tick.addEventListener("click", () =>
+      mutate(async () => {
+        await app.tickWord(item.word, !item.ticked);
+        renderToday();
+        refreshCounts();
+      })
+    );
     row.append(tick, el("span", "today-word", item.word), el("span", "today-def", item.def));
     list.append(row);
   });
@@ -203,8 +241,8 @@ async function renderToday() {
 let queue = [];
 let reviewed = 0;
 
-async function startReview() {
-  queue = await invoke("due_words");
+function startReview() {
+  queue = app.dueWords();
   reviewed = 0;
   renderCard();
 }
@@ -259,13 +297,15 @@ function renderCard() {
       ["easy", "grade"],
     ].forEach(([g, cls]) => {
       const btn = el("button", cls, g);
-      btn.addEventListener("click", async (e) => {
+      btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        await invoke("grade_word", { word: word.word, grade: g });
-        queue.shift();
-        if (g === "again") queue.push(word); // Anki-style: lapses return this session
-        reviewed += 1;
-        renderCard();
+        mutate(async () => {
+          await app.gradeWord(word.word, g);
+          queue.shift();
+          if (g === "again") queue.push(word); // Anki-style: lapses return this session
+          reviewed += 1;
+          renderCard();
+        });
       });
       grades.append(btn);
     });
@@ -282,7 +322,8 @@ let currentReveal = null;
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
   const reviewActive = $("view-review").classList.contains("active");
-  if (reviewActive && currentReveal && document.activeElement.tagName !== "TEXTAREA") {
+  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  if (reviewActive && currentReveal && !typing) {
     e.preventDefault();
     currentReveal();
   }
@@ -294,13 +335,30 @@ const essayText = $("essay-text");
 const essayCount = $("essay-count");
 
 // The draft survives restarts (including update relaunches).
+//
+// On the desktop it persists; in the browser it lives in sessionStorage
+// instead, so an unfinished essay isn't left in plaintext on a shared or
+// borrowed computer after the tab closes. Everything else the web build
+// stores is encrypted, and the draft shouldn't be the exception.
 const DRAFT_KEY = "lexis-essay-draft";
+
+function draftStore() {
+  return platform?.kind === "web" ? sessionStorage : localStorage;
+}
 
 function saveEssayDraft() {
   try {
-    localStorage.setItem(DRAFT_KEY, essayText.value);
+    draftStore().setItem(DRAFT_KEY, essayText.value);
   } catch {
     /* storage full or unavailable — the draft simply isn't kept */
+  }
+}
+
+function loadEssayDraft() {
+  try {
+    return draftStore().getItem(DRAFT_KEY) ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -323,7 +381,7 @@ $("essay-file").addEventListener("change", async (e) => {
 
 $("essay-check").addEventListener("click", async () => {
   const text = essayText.value;
-  const report = await invoke("analyze_essay", { text });
+  const report = app.analyzeEssay(text);
   const out = $("essay-report");
   out.replaceChildren();
 
@@ -375,24 +433,111 @@ $("essay-check").addEventListener("click", async () => {
   const usedToday = report.used.filter((u) => u.in_today);
   if (usedToday.length) {
     const mark = el("button", "button-primary", "mark these as practised");
-    mark.addEventListener("click", async () => {
-      for (const u of usedToday) {
-        await invoke("tick_word", { word: u.word, ticked: true });
-      }
-      mark.replaceWith(el("p", "report-summary", "Marked. They’ll return on schedule."));
-      refreshCounts();
-    });
+    mark.addEventListener("click", () =>
+      mutate(async () => {
+        for (const u of usedToday) {
+          await app.tickWord(u.word, true);
+        }
+        mark.replaceWith(el("p", "report-summary", "Marked. They’ll return on schedule."));
+        refreshCounts();
+      })
+    );
     out.append(mark);
   }
 });
 
-/* ---- updates ---- */
+/* ---- sync view ---- */
+
+function renderSync() {
+  const connected = Boolean(sync?.enabled);
+  // Desktop can be configured-but-locked: settings exist, password not yet given.
+  const locked = Boolean(desktopUnlockForm);
+  $("sync-connected").hidden = !connected;
+  $("sync-setup").hidden = connected || locked;
+  $("sync-lede").textContent = connected
+    ? "This device is syncing with GitHub. Your bank is encrypted with your password before it is stored."
+    : locked
+      ? "Sync is set up on this device but locked."
+      : platform.kind === "desktop"
+        ? "Connect this app to a private GitHub repository to share your bank with the web version."
+        : "Connect to a private GitHub repository to sync this browser with your desktop app.";
+
+  if (connected && syncConfig) {
+    $("sync-repo").textContent = `${syncConfig.owner}/${syncConfig.repo}`;
+    $("sync-path").textContent = syncConfig.path;
+  }
+}
+
+let syncConfig = null;
+
+function applySyncStatus({ text, kind, enabled }) {
+  const line = $("sync-line");
+  line.hidden = !enabled;
+  line.textContent = text;
+  line.className = `sync-line sync-${kind}`;
+  const status = $("sync-status");
+  if (status) status.textContent = text;
+}
+
+$("sync-line").addEventListener("click", () => {
+  switchView("sync");
+  sync?.now();
+});
+
+$("sync-now").addEventListener("click", () => sync?.now());
+
+$("sync-disconnect").addEventListener("click", async () => {
+  sync?.disable();
+  clearVault();
+  syncConfig = null;
+  if (platform.kind === "web") {
+    platform.clearCache();
+    location.reload();
+  } else {
+    $("sync-line").hidden = true;
+    renderSync();
+  }
+});
+
+$("sync-setup").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("ds-error");
+  err.hidden = true;
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = "connecting…";
+  try {
+    const { key, config, salt } = await createVault({
+      password: $("ds-password").value,
+      token: $("ds-token").value.trim(),
+      owner: $("ds-owner").value.trim(),
+      repo: $("ds-repo").value.trim(),
+      path: $("ds-path").value.trim() || "bank.lexis.json",
+    });
+    syncConfig = { ...config, salt };
+    sync.enable(key, syncConfig);
+    $("ds-token").value = "";
+    $("ds-password").value = "";
+    await sync.now();
+    await renderBank();
+    renderSync();
+  } catch (e2) {
+    err.textContent = String(e2.message ?? e2);
+    err.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "connect";
+  }
+});
+
+/* ---- updates (desktop only) ---- */
 
 async function offerUpdate() {
+  if (!platform.updates?.supported) return;
   const line = $("update-line");
   let update;
   try {
-    update = await invoke("check_update");
+    update = await platform.updates.check();
   } catch {
     return; // offline or endpoint unreachable — try again next launch
   }
@@ -400,10 +545,10 @@ async function offerUpdate() {
 
   line.textContent = `v${update.version} available — update`;
   line.hidden = false;
-  await tauri.event.listen("update-progress", (e) => {
+  await platform.updates.onProgress((pct) => {
     // At 100% the installer takes over and the app relaunches itself,
-    // so the invoke below never resolves on success.
-    line.textContent = e.payload >= 100 ? "installing…" : `updating… ${e.payload}%`;
+    // so the install call below never resolves on success.
+    line.textContent = pct >= 100 ? "installing…" : `updating… ${pct}%`;
   });
 
   let installing = false;
@@ -413,8 +558,10 @@ async function offerUpdate() {
     line.disabled = true;
     line.textContent = "updating…";
     saveEssayDraft();
+    // Push local work before the app restarts underneath us.
+    if (sync?.enabled) await sync.now().catch(() => {});
     try {
-      await invoke("install_update");
+      await platform.updates.install();
     } catch (err) {
       installing = false;
       line.disabled = false;
@@ -426,17 +573,215 @@ async function offerUpdate() {
   });
 }
 
+/* ---- the gate (web only) ---- */
+
+function showGate(which) {
+  $("gate").hidden = false;
+  $("gate-unlock").hidden = which !== "unlock";
+  $("gate-setup").hidden = which !== "setup";
+  const focus = which === "unlock" ? $("unlock-password") : $("setup-owner");
+  setTimeout(() => focus.focus(), 0);
+}
+
+function hideGate() {
+  $("gate").hidden = true;
+}
+
+$("gate-unlock").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("unlock-error");
+  err.hidden = true;
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = "unlocking…";
+  try {
+    const { key, config } = await unlockVault($("unlock-password").value);
+    $("unlock-password").value = "";
+    await startWeb(key, config);
+  } catch (e2) {
+    err.textContent = String(e2.message ?? e2);
+    err.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "unlock";
+  }
+});
+
+$("gate-reset").addEventListener("click", () => {
+  clearVault();
+  platform.clearCache?.();
+  location.reload();
+});
+
+$("gate-setup").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("setup-error");
+  err.hidden = true;
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = "connecting…";
+  try {
+    const { key, config, salt, warning } = await createVault({
+      password: $("setup-password").value,
+      token: $("setup-token").value.trim(),
+      owner: $("setup-owner").value.trim(),
+      repo: $("setup-repo").value.trim(),
+      path: $("setup-path").value.trim() || "bank.lexis.json",
+    });
+    if (warning) console.warn(warning);
+    $("setup-token").value = "";
+    $("setup-password").value = "";
+    await startWeb(key, { ...config, salt });
+  } catch (e2) {
+    err.textContent = String(e2.message ?? e2);
+    err.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "connect";
+  }
+});
+
 /* ---- boot ---- */
 
-if (!invoke) {
-  document.body.replaceChildren(
-    el("p", "empty", "lexis needs to run inside the desktop app.")
-  );
-} else {
-  essayText.value = localStorage.getItem(DRAFT_KEY) ?? "";
+function wireApp() {
+  app = createApp(platform.storage, () => sync?.schedule());
+  sync = createSyncController({
+    app,
+    onStatus: applySyncStatus,
+    onApplied: () => {
+      // A sync can change anything; redraw whatever is on screen.
+      const active = document.querySelector(".rail-link.active")?.dataset.view;
+      if (active === "bank") renderBank();
+      else if (active === "today") renderToday();
+      else refreshCounts();
+    },
+  });
+}
+
+async function startWeb(key, config) {
+  platform.setKey(key);
+  hideGate();
+  wireApp();
+  syncConfig = config;
+  await app.init();
+  sync.enable(key, config);
+  essayText.value = loadEssayDraft();
   updateEssayCount();
-  renderBank();
-  refreshCounts();
+  await renderBank();
   addInput.focus();
+  await sync.now(); // pull whatever the desktop app left behind
+  await renderBank();
+}
+
+async function startDesktop() {
+  wireApp();
+  await app.init();
+  essayText.value = loadEssayDraft();
+  updateEssayCount();
+  await renderBank();
+  addInput.focus();
+
+  // Sync is opt-in on desktop; the app works fully without it.
+  if (hasVault()) {
+    // Ask for the password only to unlock sync — the bank itself is already
+    // on disk, so the app stays usable if the prompt is never answered.
+    const line = $("sync-line");
+    line.hidden = false;
+    line.textContent = "sync — unlock";
+    line.className = "sync-line sync-idle";
+    buildDesktopUnlock();
+  }
   setTimeout(offerUpdate, 2500); // check quietly after the app settles
 }
+
+/**
+ * Desktop's sync panel needs its own password prompt. Built here rather than
+ * in the markup because the gate's form is web-only and its ids must stay
+ * unique in the document.
+ */
+let desktopUnlockForm = null;
+
+function buildDesktopUnlock() {
+  const form = el("form", "gate-form sync-form");
+  form.autocomplete = "off";
+  form.append(
+    el("p", "gate-lede", "Enter your password to turn sync back on for this device.")
+  );
+
+  const pw = el("input");
+  pw.type = "password";
+  pw.placeholder = "password";
+  pw.autocomplete = "current-password";
+  pw.setAttribute("aria-label", "Password");
+
+  const submit = el("button", "button-primary", "unlock sync");
+  submit.type = "submit";
+
+  const errNode = el("p", "gate-error");
+  errNode.hidden = true;
+
+  const forget = el("button", "link-quiet", "forget these sync settings");
+  forget.type = "button";
+  forget.addEventListener("click", () => {
+    clearVault();
+    form.remove();
+    desktopUnlockForm = null;
+    $("sync-line").hidden = true;
+    renderSync();
+  });
+
+  form.append(pw, submit, errNode, forget);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errNode.hidden = true;
+    submit.disabled = true;
+    submit.textContent = "unlocking…";
+    try {
+      const { key, config } = await unlockVault(pw.value);
+      pw.value = "";
+      syncConfig = config;
+      sync.enable(key, config);
+      form.remove();
+      desktopUnlockForm = null;
+      await sync.now();
+      await renderBank();
+      renderSync();
+    } catch (e2) {
+      errNode.textContent = String(e2.message ?? e2);
+      errNode.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "unlock sync";
+    }
+  });
+
+  desktopUnlockForm = form;
+  $("view-sync").append(form);
+}
+
+async function boot() {
+  if (isDesktop()) {
+    platform = createDesktopPlatform();
+    $("rail-privacy").textContent = "your bank stays on this device";
+    await startDesktop();
+  } else {
+    platform = createWebPlatform();
+    $("rail-privacy").textContent = "encrypted before it leaves this device";
+    if (!cryptoAvailable()) {
+      document.body.replaceChildren(
+        el("p", "empty", "lexis needs a browser with Web Crypto (and a secure https connection).")
+      );
+      return;
+    }
+    showGate(hasVault() ? "unlock" : "setup");
+  }
+
+  // Coming back to the tab is the moment another device's work is most
+  // likely to be waiting.
+  globalThis.addEventListener("focus", () => sync?.now());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") sync?.now();
+  });
+}
+
+boot();

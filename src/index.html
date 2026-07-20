@@ -4,10 +4,93 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>lexis</title>
+    <!-- Inline so the page stays self-contained and makes no extra request. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='25' x='2' font-size='24' font-family='Georgia,serif' font-style='italic'%3El%3C/text%3E%3Ccircle cx='20' cy='24' r='3' fill='%23b42318'/%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="styles.css" />
     <script type="module" src="main.js" defer></script>
   </head>
   <body>
+    <!-- gate: web only, shown until the password unlocks the vault -->
+    <div id="gate" class="gate" hidden>
+      <div class="gate-card">
+        <h1 class="wordmark gate-mark">lexis<span class="stop">.</span></h1>
+
+        <!-- returning visit -->
+        <form id="gate-unlock" class="gate-form" hidden autocomplete="off">
+          <p class="gate-lede">Enter your password to unlock this device.</p>
+          <input
+            id="unlock-password"
+            type="password"
+            placeholder="password"
+            autocomplete="current-password"
+            aria-label="Password"
+          />
+          <button class="button-primary" type="submit">unlock</button>
+          <p id="unlock-error" class="gate-error" hidden></p>
+          <button id="gate-reset" class="link-quiet" type="button">
+            use a different account on this device
+          </button>
+        </form>
+
+        <!-- first visit -->
+        <form id="gate-setup" class="gate-form" hidden autocomplete="off">
+          <p class="gate-lede">
+            lexis keeps your bank in a private GitHub repository, encrypted with your
+            password before it leaves this device.
+          </p>
+
+          <label class="field">
+            <span>GitHub owner</span>
+            <input id="setup-owner" type="text" placeholder="your-username" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>private repository</span>
+            <input id="setup-repo" type="text" placeholder="lexis-data" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>file path</span>
+            <input id="setup-path" type="text" value="bank.lexis.json" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>fine-grained token</span>
+            <input
+              id="setup-token"
+              type="password"
+              placeholder="github_pat_…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <small>Needs only <em>Contents: Read and write</em> on that one repository.</small>
+          </label>
+          <label class="field">
+            <span>password</span>
+            <input
+              id="setup-password"
+              type="password"
+              placeholder="at least 8 characters"
+              autocomplete="new-password"
+            />
+            <small>
+              Encrypts your token and everything synced. Use the same password on every
+              device. It cannot be reset — nothing can decrypt without it.
+            </small>
+          </label>
+
+          <button class="button-primary" type="submit">connect</button>
+          <p id="setup-error" class="gate-error" hidden></p>
+        </form>
+
+        <p class="gate-foot">
+          This page is public — GitHub Pages cannot serve a private site for free. Your
+          <em>data</em> is private: it is encrypted here, with your password, before it is
+          stored. Reading this page's source reveals nothing about your bank.
+        </p>
+      </div>
+    </div>
+
     <nav class="rail">
       <h1 class="wordmark">lexis<span class="stop">.</span></h1>
       <div class="rail-links">
@@ -15,9 +98,11 @@
         <button class="rail-link" data-view="today">today<span class="rail-count" id="count-today"></span></button>
         <button class="rail-link" data-view="review">review<span class="rail-count" id="count-review"></span></button>
         <button class="rail-link" data-view="essay">essay</button>
+        <button class="rail-link" data-view="sync">sync</button>
       </div>
+      <button id="sync-line" class="sync-line" hidden></button>
       <button id="update-line" class="update-line" hidden></button>
-      <p class="rail-foot">definitions from Wiktionary<br />everything else stays on this device</p>
+      <p class="rail-foot">definitions from Wiktionary<br /><span id="rail-privacy"></span></p>
     </nav>
 
     <main>
@@ -70,6 +155,59 @@
           <button id="essay-check" class="button-primary" type="button">check essay</button>
         </div>
         <div id="essay-report"></div>
+      </section>
+
+      <!-- sync -->
+      <section id="view-sync" class="view">
+        <header class="view-head">
+          <p class="eyebrow">sync</p>
+          <p class="lede" id="sync-lede"></p>
+        </header>
+
+        <!-- connected -->
+        <div id="sync-connected" hidden>
+          <dl class="sync-facts">
+            <div><dt>repository</dt><dd id="sync-repo"></dd></div>
+            <div><dt>file</dt><dd id="sync-path"></dd></div>
+            <div><dt>status</dt><dd id="sync-status">—</dd></div>
+          </dl>
+          <div class="sync-actions">
+            <button id="sync-now" class="button-primary" type="button">sync now</button>
+            <button id="sync-disconnect" class="link-quiet" type="button">disconnect this device</button>
+          </div>
+          <p class="sync-note">
+            Your bank is encrypted with your password before it is written to GitHub. The
+            repository holds ciphertext; GitHub never has the key.
+          </p>
+        </div>
+
+        <!-- not connected (desktop, or web after disconnect) -->
+        <form id="sync-setup" class="gate-form sync-form" hidden autocomplete="off">
+          <label class="field">
+            <span>GitHub owner</span>
+            <input id="ds-owner" type="text" placeholder="your-username" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>private repository</span>
+            <input id="ds-repo" type="text" placeholder="lexis-data" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>file path</span>
+            <input id="ds-path" type="text" value="bank.lexis.json" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>fine-grained token</span>
+            <input id="ds-token" type="password" placeholder="github_pat_…" autocomplete="off" spellcheck="false" />
+            <small>Needs only <em>Contents: Read and write</em> on that one repository.</small>
+          </label>
+          <label class="field">
+            <span>password</span>
+            <input id="ds-password" type="password" placeholder="at least 8 characters" autocomplete="new-password" />
+            <small>Must match the password you use on your other devices.</small>
+          </label>
+          <button class="button-primary" type="submit">connect</button>
+          <p id="ds-error" class="gate-error" hidden></p>
+        </form>
       </section>
     </main>
   </body>

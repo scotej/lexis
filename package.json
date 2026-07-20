@@ -1,12 +1,17 @@
 {
   "name": "lexis",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "node --test test/*.test.js",
+    "web": "npx --yes http-server src -p 5173 -c-1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
