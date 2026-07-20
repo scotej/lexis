@@ -59,3 +59,16 @@ Rust (Tauri 2).
 Every push to `main` compiles the app for macOS, Windows, and Linux via
 GitHub Actions (bundles are attached as workflow artifacts). Pushing a tag
 like `v0.1.0` publishes a GitHub release with installers.
+
+### "lexis is damaged" on macOS
+
+The app isn't damaged — it's unsigned (signing requires a paid Apple
+Developer account), and macOS quarantines unsigned apps downloaded from the
+internet. After copying `lexis.app` to Applications, clear the flag once:
+
+```sh
+xattr -cr /Applications/lexis.app
+```
+
+Building locally with `npm run tauri build` avoids this entirely — apps you
+build on your own machine are never quarantined.
