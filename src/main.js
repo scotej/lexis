@@ -488,10 +488,10 @@ $("sync-now").addEventListener("click", () => sync?.now());
 
 $("sync-disconnect").addEventListener("click", async () => {
   sync?.disable();
-  clearVault();
+  await clearVault();
   syncConfig = null;
   if (platform.kind === "web") {
-    platform.clearCache();
+    await platform.clearCache();
     location.reload();
   } else {
     $("sync-line").hidden = true;
@@ -607,9 +607,9 @@ $("gate-unlock").addEventListener("submit", async (e) => {
   }
 });
 
-$("gate-reset").addEventListener("click", () => {
-  clearVault();
-  platform.clearCache?.();
+$("gate-reset").addEventListener("click", async () => {
+  await clearVault();
+  await platform.clearCache?.();
   location.reload();
 });
 
@@ -669,8 +669,31 @@ async function startWeb(key, config) {
   updateEssayCount();
   await renderBank();
   addInput.focus();
+  requestPersistence(); // upgrade local durability now that we have a gesture
   await sync.now(); // pull whatever the desktop app left behind
   await renderBank();
+}
+
+/**
+ * Ask the browser to keep our storage instead of evicting it under pressure or
+ * after a week away. Fire-and-forget and best-effort: the app works either way,
+ * and the copy on GitHub stays the backstop, so this only ever upgrades things.
+ * Called from within the unlock/setup submit — a user gesture — because that is
+ * when a browser is most willing to grant persistence.
+ */
+async function requestPersistence() {
+  try {
+    const result = await platform.requestPersistence?.();
+    if (result?.supported) {
+      console.info(
+        result.persisted
+          ? "local storage is persistent — the browser will keep your bank"
+          : "local storage is best-effort — the browser may evict it under pressure"
+      );
+    }
+  } catch {
+    /* durability is an upgrade, never a requirement */
+  }
 }
 
 async function startDesktop() {
@@ -682,7 +705,7 @@ async function startDesktop() {
   addInput.focus();
 
   // Sync is opt-in on desktop; the app works fully without it.
-  if (hasVault()) {
+  if (await hasVault()) {
     // Ask for the password only to unlock sync — the bank itself is already
     // on disk, so the app stays usable if the prompt is never answered.
     const line = $("sync-line");
@@ -722,8 +745,8 @@ function buildDesktopUnlock() {
 
   const forget = el("button", "link-quiet", "forget these sync settings");
   forget.type = "button";
-  forget.addEventListener("click", () => {
-    clearVault();
+  forget.addEventListener("click", async () => {
+    await clearVault();
     form.remove();
     desktopUnlockForm = null;
     $("sync-line").hidden = true;
@@ -773,7 +796,7 @@ async function boot() {
       );
       return;
     }
-    showGate(hasVault() ? "unlock" : "setup");
+    showGate((await hasVault()) ? "unlock" : "setup");
   }
 
   // Coming back to the tab is the moment another device's work is most

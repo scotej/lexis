@@ -314,7 +314,7 @@ test("a bank encrypted under another password cannot be read", async () => {
 
 test("clearing the vault leaves no trace of the token", async () => {
   await createVault({ password: PASSWORD, ...CONFIG });
-  clearVault();
+  await clearVault();
   assert.equal(localStorage.getItem("lexis-vault"), null);
   await assert.rejects(() => unlockVault(PASSWORD), /No sync is set up/);
 });

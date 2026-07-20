@@ -10,22 +10,21 @@
 import { deriveKey, encryptJSON, decryptJSON, randomSalt, ITERATIONS } from "./crypto.js";
 import { fetchRemote, checkAccess, claimSalt } from "./sync.js";
 import { emptyBank } from "./bank.js";
+import { storeGet, storeSet, storeRemove } from "../platform/store.js";
 
 const VAULT_KEY = "lexis-vault";
 
-export function hasVault() {
+export async function hasVault() {
   try {
-    return Boolean(localStorage.getItem(VAULT_KEY));
+    return Boolean(await storeGet(VAULT_KEY));
   } catch {
     return false;
   }
 }
 
-function readVault() {
-  const raw = localStorage.getItem(VAULT_KEY);
-  if (!raw) return null;
+async function readVault() {
   try {
-    return JSON.parse(raw);
+    return await storeGet(VAULT_KEY);
   } catch {
     return null;
   }
@@ -33,14 +32,11 @@ function readVault() {
 
 async function writeVault(key, salt, config) {
   const payload = await encryptJSON(key, config);
-  localStorage.setItem(
-    VAULT_KEY,
-    JSON.stringify({ v: 1, salt, iterations: ITERATIONS, ...payload })
-  );
+  await storeSet(VAULT_KEY, { v: 1, salt, iterations: ITERATIONS, ...payload });
 }
 
-export function clearVault() {
-  localStorage.removeItem(VAULT_KEY);
+export async function clearVault() {
+  await storeRemove(VAULT_KEY);
 }
 
 /**
@@ -99,7 +95,7 @@ async function adopt(envelope, password, config, warning) {
 
 /** Unlocks an existing vault. A wrong password fails the AES-GCM tag check. */
 export async function unlockVault(password) {
-  const vault = readVault();
+  const vault = await readVault();
   if (!vault) throw new Error("No sync is set up on this device yet.");
   const key = await deriveKey(password, vault.salt, vault.iterations ?? ITERATIONS);
   let config;

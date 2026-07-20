@@ -1,13 +1,18 @@
 /**
- * Web adapter — storage in localStorage, encrypted under the session key.
+ * Web adapter — storage in IndexedDB, encrypted under the session key.
  *
  * The browser copy is a cache of the synced bank, not a separate store: it
  * is written with the same password-derived key that protects the copy on
  * GitHub, so a shared or borrowed computer never leaves readable data behind
  * in the origin's storage.
+ *
+ * Where that copy lives is the store's concern (`./store.js`): IndexedDB when
+ * the browser offers it, localStorage otherwise, and — either way — marked
+ * persistent so the browser doesn't evict a bank you haven't opened in a while.
  */
 
 import { encryptJSON, decryptJSON } from "../core/crypto.js";
+import { storeGet, storeSet, storeRemove, requestPersistentStorage } from "./store.js";
 
 const BANK_KEY = "lexis-bank";
 
@@ -25,10 +30,10 @@ export function createWebPlatform() {
     storage: {
       async load() {
         if (!key) throw new Error("locked");
-        const raw = localStorage.getItem(BANK_KEY);
-        if (!raw) return null;
+        const envelope = await storeGet(BANK_KEY);
+        if (!envelope) return null;
         try {
-          return await decryptJSON(key, JSON.parse(raw));
+          return await decryptJSON(key, envelope);
         } catch {
           // Written under a different password (or corrupt). Treat as empty
           // and let the next sync repopulate from GitHub — the authoritative
@@ -39,12 +44,21 @@ export function createWebPlatform() {
       },
       async save(bank) {
         if (!key) throw new Error("locked");
-        localStorage.setItem(BANK_KEY, JSON.stringify(await encryptJSON(key, bank)));
+        await storeSet(BANK_KEY, await encryptJSON(key, bank));
       },
     },
 
-    clearCache() {
-      localStorage.removeItem(BANK_KEY);
+    async clearCache() {
+      await storeRemove(BANK_KEY);
+    },
+
+    /**
+     * Ask the browser to keep this origin's storage instead of evicting it.
+     * Best invoked from a user gesture (unlock/setup), so this is called from
+     * there rather than at boot.
+     */
+    requestPersistence() {
+      return requestPersistentStorage();
     },
 
     openUrl(url) {
