@@ -132,6 +132,13 @@ button {
   margin-left: 4px;
 }
 
+.rail-hint {
+  color: var(--faint);
+  font-size: 11px;
+  vertical-align: super;
+  margin-left: 4px;
+}
+
 .update-line {
   margin-top: auto;
   text-align: left;
@@ -667,6 +674,71 @@ main {
 .note-list li::before {
   content: "\2013\00a0";
   color: var(--pen);
+}
+
+/* ---- quick lookup ---- */
+
+.lookup {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 11vh 24px 32px;
+  background: rgba(12, 11, 10, 0.35);
+}
+
+.lookup-card {
+  width: 100%;
+  max-width: 480px;
+  max-height: 74vh;
+  overflow-y: auto;
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 20px 24px 18px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
+}
+
+#lookup-input {
+  width: 100%;
+  font-family: var(--serif);
+  font-size: 21px;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  padding: 6px 0 10px;
+  user-select: text;
+}
+
+#lookup-input::placeholder {
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+#lookup-input:focus {
+  outline: none;
+  border-bottom-color: var(--ink);
+}
+
+.lookup-word {
+  margin: 18px 0 8px;
+}
+
+.lookup-word .phonetic {
+  margin-left: 9px;
+}
+
+#lookup-result .entry-meta {
+  margin-top: 14px;
+}
+
+.lookup-hint {
+  margin-top: 16px;
+  font-size: 11px;
+  color: var(--faint);
 }
 
 /* ---- gate (web: the password screen) ----

@@ -34,6 +34,10 @@ entirely on this device: which bank words you used, in which sentences,
 what's overused, and what's still waiting on today's list. One click marks
 the used words as practised.
 
+**Quick lookup.** Press `/` (or `⌘K`) anywhere for a definition without
+commitment: type a word, read its senses, `esc` to close — or add it to the
+bank after all. The five views answer to the keys `1`–`5`.
+
 ## Two ends, one app
 
 lexis runs as a desktop app and as a web app, with the same features in both.

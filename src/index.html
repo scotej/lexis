@@ -99,6 +99,7 @@
         <button class="rail-link" data-view="review">review<span class="rail-count" id="count-review"></span></button>
         <button class="rail-link" data-view="essay">essay</button>
         <button class="rail-link" data-view="sync">sync</button>
+        <button class="rail-link" id="rail-lookup" title="shortcut: /">lookup<span class="rail-hint">/</span></button>
       </div>
       <button id="sync-line" class="sync-line" hidden></button>
       <button id="update-line" class="update-line" hidden></button>
@@ -210,5 +211,23 @@
         </form>
       </section>
     </main>
+
+    <!-- quick lookup: “/” or ⌘K — a definition without adding to the bank -->
+    <div id="lookup" class="lookup" hidden>
+      <div class="lookup-card" role="dialog" aria-modal="true" aria-label="Quick lookup">
+        <form id="lookup-form" autocomplete="off">
+          <input
+            id="lookup-input"
+            type="text"
+            placeholder="look up a word…"
+            spellcheck="false"
+            aria-label="Look up a word"
+          />
+        </form>
+        <p id="lookup-status" class="add-status" hidden></p>
+        <div id="lookup-result"></div>
+        <p class="lookup-hint">enter to look up · esc to close</p>
+      </div>
+    </div>
   </body>
 </html>

@@ -4,6 +4,7 @@
  */
 
 import { createApp } from "./core/app.js";
+import { fetchDefinition } from "./core/dict.js";
 import { createSyncController } from "./core/sync-controller.js";
 import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
 import { createWebPlatform } from "./platform/web.js";
@@ -47,9 +48,11 @@ async function mutate(action) {
 
 /* ---- navigation ---- */
 
-const railLinks = document.querySelectorAll(".rail-link");
-railLinks.forEach((btn) => {
+const railLinks = document.querySelectorAll(".rail-link[data-view]");
+railLinks.forEach((btn, i) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
+  btn.title = `shortcut: ${i + 1}`;
+  btn.setAttribute("aria-keyshortcuts", String(i + 1));
 });
 
 function switchView(name) {
@@ -66,6 +69,18 @@ function switchView(name) {
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
 }
+
+// 1–5 jump straight to a view, top to bottom, matching the rail. Bare digits
+// rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
+// tabs, and bare Space already works this way during review.
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
+  if (!$("lookup").hidden) return;
+  const digit = /^Digit([1-5])$/.exec(e.code);
+  if (!digit) return;
+  switchView(railLinks[Number(digit[1]) - 1].dataset.view);
+});
 
 async function refreshCounts() {
   try {
@@ -323,7 +338,7 @@ document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
   const reviewActive = $("view-review").classList.contains("active");
   const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
-  if (reviewActive && currentReveal && !typing) {
+  if (reviewActive && currentReveal && !typing && $("lookup").hidden) {
     e.preventDefault();
     currentReveal();
   }
@@ -445,6 +460,107 @@ $("essay-check").addEventListener("click", async () => {
     out.append(mark);
   }
 });
+
+/* ---- quick lookup ----
+   A definition without commitment: “/” (or ⌘K) opens a small overlay that
+   fetches the meaning of any word, with the option to bank it after all. */
+
+const lookupBox = $("lookup");
+const lookupInput = $("lookup-input");
+const lookupStatus = $("lookup-status");
+const lookupResult = $("lookup-result");
+let lookupSeq = 0; // a stale response must not overwrite a newer one
+
+function openLookup() {
+  // Same guard as the rail: on the web the gate may still be up.
+  if (!app) return;
+  lookupBox.hidden = false;
+  lookupInput.select();
+  lookupInput.focus();
+}
+
+$("rail-lookup").addEventListener("click", openLookup);
+
+lookupBox.addEventListener("click", (e) => {
+  if (e.target === lookupBox) lookupBox.hidden = true;
+});
+
+document.addEventListener("keydown", (e) => {
+  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
+  if (
+    (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) ||
+    (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey) && !e.altKey)
+  ) {
+    e.preventDefault();
+    openLookup();
+  } else if (e.key === "Escape" && !lookupBox.hidden) {
+    lookupBox.hidden = true;
+  }
+});
+
+$("lookup-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const word = lookupInput.value.trim().toLowerCase();
+  if (!word) return;
+  const seq = ++lookupSeq;
+  lookupResult.replaceChildren();
+  lookupStatus.hidden = false;
+  lookupStatus.classList.remove("error");
+  lookupStatus.textContent = `finding “${word}”…`;
+  try {
+    const dict = await fetchDefinition(word);
+    if (seq !== lookupSeq) return;
+    lookupStatus.hidden = true;
+    renderLookupResult(word, dict);
+  } catch (err) {
+    if (seq !== lookupSeq) return;
+    lookupStatus.textContent = String(err.message ?? err);
+    lookupStatus.classList.add("error");
+  }
+});
+
+function renderLookupResult(word, dict) {
+  lookupResult.replaceChildren();
+
+  const head = el("p", "lookup-word");
+  head.append(el("span", "headword", word));
+  if (dict.phonetic) head.append(el("span", "phonetic", dict.phonetic));
+  lookupResult.append(head);
+
+  dict.senses.forEach((s, i) => lookupResult.append(senseNode(s, i)));
+
+  const meta = el("div", "entry-meta");
+  meta.append(el("span", null, dict.source));
+  const src = el("button", "link-quiet", "view source");
+  src.addEventListener("click", () => platform.openUrl(dict.source_url));
+  meta.append(src);
+
+  if (app.listWords().some((w) => w.word === word)) {
+    meta.append(el("span", null, "in your bank"));
+  } else {
+    const add = el("button", "link-quiet", "add to bank");
+    add.addEventListener("click", async () => {
+      add.disabled = true;
+      lookupStatus.hidden = false;
+      lookupStatus.classList.remove("error");
+      lookupStatus.textContent = `adding “${word}”…`;
+      try {
+        await app.addWord(word);
+        expandedWord = word;
+        await renderBank();
+        lookupStatus.textContent = `“${word}” is in your bank now`;
+        add.replaceWith(el("span", null, "in your bank"));
+      } catch (err) {
+        lookupStatus.textContent = String(err.message ?? err);
+        lookupStatus.classList.add("error");
+        add.disabled = false;
+      }
+    });
+    meta.append(add);
+  }
+  lookupResult.append(meta);
+}
 
 /* ---- sync view ---- */
 
