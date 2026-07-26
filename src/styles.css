@@ -415,7 +415,10 @@ main {
   border: 1.5px solid var(--faint);
   border-radius: 2px;
   position: relative;
-  top: 3px;
+  /* Geometry, not baseline: WebKit moves a button's baseline to the ✓ glyph
+     once the ::after appears, which sank completed boxes below their row. */
+  align-self: flex-start;
+  top: 5px;
   transition: border-color 120ms ease;
 }
 
