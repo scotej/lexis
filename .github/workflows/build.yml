@@ -103,3 +103,32 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/release/bundle/rpm/*.rpm
+
+  cachyos:
+    name: CachyOS / Arch AppImage smoke test
+    needs: build
+    runs-on: ubuntu-22.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lexis-ubuntu-22.04
+          path: dist
+
+      - name: install CachyOS runtime dependencies
+        run: pacman -Syu --noconfirm --needed fontconfig fribidi fuse2 harfbuzz libglvnd
+
+      - name: verify the AppImage on an Arch userspace
+        shell: bash
+        run: |
+          appimage="$(find dist -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          "$appimage" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/lexis
+          links="$(ldd squashfs-root/usr/bin/lexis)"
+          printf '%s\n' "$links"
+          if grep -F 'not found' <<< "$links"; then
+            exit 1
+          fi

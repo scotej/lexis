@@ -1,6 +1,6 @@
 [package]
 name = "lexis"
-version = "0.4.1"
+version = "0.4.2"
 description = "A minimalist word bank for essay writers"
 authors = ["scotej"]
 edition = "2021"

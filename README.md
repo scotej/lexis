@@ -50,6 +50,22 @@ browser storage on the web.
 The web version lives on GitHub Pages and is optional. The desktop app works
 on its own, offline, exactly as before.
 
+## CachyOS / Arch Linux
+
+Use the signed `amd64.AppImage` from the
+[latest release](https://github.com/scotej/lexis/releases/latest). The AppImage
+is the cross-distribution build and keeps in-app updates working when it is
+stored in a user-writable location. CachyOS is currently supported on x86_64.
+
+```sh
+sudo pacman -S --needed fuse2
+install -Dm755 lexis_*_amd64.AppImage ~/.local/bin/lexis.AppImage
+~/.local/bin/lexis.AppImage
+```
+
+`fuse2` is only needed to mount AppImages; skip the first command if it is
+already installed.
+
 ## Sync
 
 Sync is opt-in and costs nothing to run: GitHub hosts the page, and your bank
@@ -122,8 +138,10 @@ Web Crypto needs a secure context, so the web build requires `https://` or
 ## Releases
 
 Every push to `main` compiles the app for macOS, Windows, and Linux via
-GitHub Actions (bundles are attached as workflow artifacts). Pushing a tag
-like `v0.1.0` publishes a GitHub release with installers.
+GitHub Actions (bundles are attached as workflow artifacts). A version commit
+whose subject matches the version in `package.json` (for example `v0.4.2`)
+is tested, tagged, and published automatically. Pushing a matching tag also
+publishes a release.
 
 The same push deploys the web build to GitHub Pages. To turn that on once:
 **Settings → Pages → Source → GitHub Actions**. The workflow runs the test
