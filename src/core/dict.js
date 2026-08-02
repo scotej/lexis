@@ -107,7 +107,7 @@ async function fetchWiktionary(word) {
   };
 }
 
-export async function fetchDefinition(word) {
+async function fetchRawDefinition(word) {
   try {
     return await fetchDictionaryApi(word);
   } catch (first) {
@@ -119,6 +119,155 @@ export async function fetchDefinition(word) {
       );
     }
   }
+}
+
+// Wiktionary sometimes defines a derived adverb only through its adjective:
+// "fervently" is merely "In a fervent manner." Looking up the adjective's
+// first sense is unsafe: for example, the first gloss of "strict" is the old
+// physical sense "strained; drawn close; tight", not the ordinary meaning of
+// "strictly". Cross-check two independent lexical relations instead: a result
+// must be both means-like the queried adverb and derived from an exact synonym
+// of the referenced adjective. This rejects sense leakage such as "purely" for
+// "strictly" while retaining "rigorously", "rigidly", and "sternly". If that
+// evidence is weak or unavailable, preserve the original editor-written text.
+
+const OPAQUE_ADVERB = /^in an? ([a-z][a-z'-]*) manner[.!]?$/i;
+const MIN_CLARIFICATION_FREQ = 0.05;
+const MAX_CLARIFICATION_WORDS = 3;
+
+function referencedAdjective(sense) {
+  if ((sense.pos ?? "").toLowerCase() !== "adverb") return null;
+  return sense.def?.trim().match(OPAQUE_ADVERB)?.[1]?.toLowerCase() ?? null;
+}
+
+/** Plausible adjective lemmas for a regular English -ly adverb. */
+export function adjectiveFormsForAdverb(word) {
+  const value = word.trim().toLowerCase();
+  const forms = new Set();
+  if (!value.endsWith("ly") || value.length <= 2) return forms;
+
+  const stem = value.slice(0, -2);
+  forms.add(stem);
+  forms.add(`${stem}e`); // truly -> true; wholly -> whole
+  forms.add(`${stem}le`); // gently -> gentle; idly -> idle
+  if (stem.endsWith("l")) forms.add(`${stem}l`); // fully -> full
+  if (value.endsWith("ily")) forms.add(`${value.slice(0, -3)}y`); // happily -> happy
+  if (value.endsWith("bly")) forms.add(`${value.slice(0, -3)}ble`); // terribly -> terrible
+  if (value.endsWith("ically")) forms.add(`${value.slice(0, -6)}ic`); // basically -> basic
+  return forms;
+}
+
+/** Build a concise clarification supported by both Datamuse relations. */
+export function adverbClarification(word, candidates, adjectiveSynonyms) {
+  const original = word.trim().toLowerCase();
+  const exactAdjectives = new Set();
+  for (const candidate of adjectiveSynonyms ?? []) {
+    const value =
+      typeof candidate?.word === "string" ? candidate.word.trim().toLowerCase() : "";
+    const tags = Array.isArray(candidate?.tags) ? candidate.tags : [];
+    if (value && tags.includes("adj") && /^[a-z][a-z'-]*$/.test(value)) {
+      exactAdjectives.add(value);
+    }
+  }
+
+  const words = [];
+
+  for (const candidate of candidates ?? []) {
+    const value =
+      typeof candidate?.word === "string" ? candidate.word.trim().toLowerCase() : "";
+    const tags = Array.isArray(candidate?.tags) ? candidate.tags : [];
+    if (
+      !value ||
+      value === original ||
+      !tags.includes("adv") ||
+      parseFreq(tags) < MIN_CLARIFICATION_FREQ ||
+      !/^[a-z][a-z'-]*$/.test(value) ||
+      ![...adjectiveFormsForAdverb(value)].some((form) => exactAdjectives.has(form)) ||
+      words.includes(value)
+    ) {
+      continue;
+    }
+    words.push(value);
+    if (words.length === MAX_CLARIFICATION_WORDS) break;
+  }
+
+  // One nearby word is too fragile to replace a human-edited definition.
+  if (words.length < 2) return null;
+  if (words.length === 2) {
+    return `Depending on context: ${words[0]} or ${words[1]}.`;
+  }
+  return `Depending on context: ${words[0]}, ${words[1]}, or ${words[2]}.`;
+}
+
+/**
+ * Replace only completely opaque adverb formulas. `lookup` is injected so the
+ * semantic filtering and failure behaviour can be tested without the network.
+ */
+export async function expandDerivativeDefinitions(
+  word,
+  dictionary,
+  lookupRelatedAdverbs,
+  lookupAdjectiveSynonyms
+) {
+  const bases = [
+    ...new Set((dictionary.senses ?? []).map(referencedAdjective).filter(Boolean)),
+  ];
+  if (!bases.length) return dictionary;
+
+  const relatedPromise = Promise.resolve()
+    .then(() => lookupRelatedAdverbs(word))
+    .catch(() => []);
+  const synonymPromises = new Map(
+    bases.map((base) => [
+      base,
+      Promise.resolve()
+        .then(() => lookupAdjectiveSynonyms(base))
+        .catch(() => []),
+    ])
+  );
+  const relatedAdverbs = await relatedPromise;
+  const synonymsByBase = new Map(
+    await Promise.all(
+      [...synonymPromises].map(async ([base, request]) => [base, await request])
+    )
+  );
+
+  let changed = false;
+  const senses = (dictionary.senses ?? []).map((sense) => {
+    const base = referencedAdjective(sense);
+    if (!base) return sense;
+    let clarification;
+    try {
+      clarification = adverbClarification(
+        word,
+        relatedAdverbs,
+        synonymsByBase.get(base)
+      );
+    } catch {
+      return sense;
+    }
+    if (!clarification) return sense;
+    changed = true;
+    return { ...sense, def: clarification };
+  });
+  if (!changed) return dictionary;
+
+  return {
+    ...dictionary,
+    senses,
+    source: "Wiktionary · clarification via Datamuse",
+    clarification_url: datamuseUrl("ml", word),
+  };
+}
+
+export async function fetchDefinition(word) {
+  const dictionary = await fetchRawDefinition(word);
+  return await expandDerivativeDefinitions(
+    word,
+    dictionary,
+    (query) => datamuse(`ml=${encodeURIComponent(query)}`),
+    (adjective) => datamuse(`rel_syn=${encodeURIComponent(adjective)}`)
+  );
 }
 
 // ---- Synonyms: Datamuse (corpus statistics, not AI) + local sophistication scoring ----
@@ -168,12 +317,38 @@ export function sophisticationScore(word, freq) {
   return score;
 }
 
+const DATAMUSE_CACHE_LIMIT = 64;
+const DATAMUSE_CACHE_TTL_MS = 10 * 60 * 1000;
+const datamuseCache = new Map();
+
+function datamuseUrl(relation, word) {
+  return `https://api.datamuse.com/words?${relation}=${encodeURIComponent(word)}&md=pf&max=40`;
+}
+
 async function datamuse(query) {
-  try {
-    return await getJSON(`https://api.datamuse.com/words?${query}&md=f&max=40`);
-  } catch {
-    return [];
+  const now = Date.now();
+  let cached = datamuseCache.get(query);
+  if (cached && cached.expires <= now) {
+    datamuseCache.delete(query);
+    cached = null;
   }
+  if (!cached) {
+    if (datamuseCache.size >= DATAMUSE_CACHE_LIMIT) {
+      datamuseCache.delete(datamuseCache.keys().next().value);
+    }
+    cached = {
+      expires: now + DATAMUSE_CACHE_TTL_MS,
+      request: getJSON(`https://api.datamuse.com/words?${query}&md=pf&max=40`).catch(
+        () => []
+      ),
+    };
+    datamuseCache.set(query, cached);
+  }
+  const response = await cached.request;
+  const result = Array.isArray(response) ? response : [];
+  // Do not let a transient outage poison this word for the rest of the session.
+  if (!result.length && datamuseCache.get(query) === cached) datamuseCache.delete(query);
+  return result;
 }
 
 export async function fetchSynonyms(word) {

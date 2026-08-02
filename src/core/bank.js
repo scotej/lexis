@@ -180,6 +180,7 @@ export function newWord(word, dict, synonyms, today) {
     synonyms,
     source: dict.source,
     source_url: dict.source_url,
+    clarification_url: dict.clarification_url ?? null,
     added: today,
     srs: newSrs(today),
     times_used: 0,

@@ -145,8 +145,12 @@ function entryNode(word, expanded) {
 
   const meta = el("div", "entry-meta");
   meta.append(el("span", null, `${word.source} · practised ${word.times_used}×`));
-  const src = el("button", "link-quiet", "view source");
+  const src = el("button", "link-quiet", "view definition");
   src.addEventListener("click", () => platform.openUrl(word.source_url));
+  const clarification = word.clarification_url
+    ? el("button", "link-quiet", "view clarification")
+    : null;
+  clarification?.addEventListener("click", () => platform.openUrl(word.clarification_url));
   const del = el("button", "link-quiet", "remove");
   del.addEventListener("click", () =>
     mutate(async () => {
@@ -155,7 +159,9 @@ function entryNode(word, expanded) {
       refreshCounts();
     })
   );
-  meta.append(src, del);
+  meta.append(src);
+  if (clarification) meta.append(clarification);
+  meta.append(del);
   body.append(meta);
   wrap.append(body);
 
@@ -532,9 +538,16 @@ function renderLookupResult(word, dict) {
 
   const meta = el("div", "entry-meta");
   meta.append(el("span", null, dict.source));
-  const src = el("button", "link-quiet", "view source");
+  const src = el("button", "link-quiet", "view definition");
   src.addEventListener("click", () => platform.openUrl(dict.source_url));
   meta.append(src);
+  if (dict.clarification_url) {
+    const clarification = el("button", "link-quiet", "view clarification");
+    clarification.addEventListener("click", () =>
+      platform.openUrl(dict.clarification_url)
+    );
+    meta.append(clarification);
+  }
 
   if (app.listWords().some((w) => w.word === word)) {
     meta.append(el("span", null, "in your bank"));

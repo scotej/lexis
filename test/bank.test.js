@@ -225,7 +225,13 @@ test("a word already reviewed today is not advanced again by a tick", () => {
 
 test("a genuine re-add gets a fresh created stamp", () => {
   const b = bank.emptyBank();
-  const w = bank.newWord("demise", { senses: [], source: "t", source_url: "u" }, [], DAY);
+  const w = bank.newWord(
+    "demise",
+    { senses: [], source: "t", source_url: "u", clarification_url: "c" },
+    [],
+    DAY
+  );
   assert.equal(typeof w.created, "number");
   assert.equal(w.created, w.updated);
+  assert.equal(w.clarification_url, "c");
 });

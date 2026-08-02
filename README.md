@@ -11,9 +11,11 @@ Built for VCE English, useful anywhere precise vocabulary matters.
 
 **Bank.** Type a word — say *demise* — and lexis looks it up in Wiktionary
 (via [dictionaryapi.dev](https://dictionaryapi.dev), falling back to the
-Wiktionary REST API). Definitions are written by human editors, never
-generated. Entries render like a print dictionary: headword, IPA, part of
-speech, numbered senses.
+Wiktionary REST API). Definitions come from human-edited entries, never a
+language model. When an entry only restates an adverb as “in a … manner”,
+lexis clarifies it with common same-part-of-speech results from Datamuse
+instead of guessing which of the adjective's senses applies. Entries render
+like a print dictionary: headword, IPA, part of speech, numbered senses.
 
 **Synonyms for essays.** Each word also gets a short run of synonyms drawn
 from [Datamuse](https://www.datamuse.com/api/) (corpus statistics, not AI) and
