@@ -8,7 +8,7 @@
  */
 
 import { deriveKey, encryptJSON, decryptJSON, randomSalt, ITERATIONS } from "./crypto.js";
-import { fetchRemote, checkAccess, claimSalt } from "./sync.js";
+import { fetchRemote, checkAccess, claimSalt, assertSupportedEnvelope } from "./sync.js";
 import { emptyBank } from "./bank.js";
 import { storeGet, storeSet, storeRemove } from "../platform/store.js";
 
@@ -79,6 +79,7 @@ export async function createVault({ password, token, owner, repo, path }) {
  * silently divergent bank.
  */
 async function adopt(envelope, password, config, warning) {
+  assertSupportedEnvelope(envelope);
   const salt = envelope.kdf?.salt;
   if (!salt) throw new Error("The synced file is missing its key settings.");
   const key = await deriveKey(password, salt, envelope.kdf.iterations ?? ITERATIONS);

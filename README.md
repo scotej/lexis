@@ -25,7 +25,8 @@ writing, deliberately *not* added to the bank.
 
 **Today.** Every day lexis picks about ten words — most overdue first — and
 asks you to work them into that day's writing. Ticking a word counts as a
-successful review.
+successful review. If you want a different selection, **refresh list** rotates
+in the next due words without erasing anything you have already practised.
 
 **Review.** Classic flashcards over the same schedule: see the word, recall
 the meaning, grade yourself *again / hard / good / easy*. Scheduling is SM-2,
@@ -33,8 +34,10 @@ the algorithm behind Anki, simplified to whole days.
 
 **Essay check.** Paste a draft (or open a `.txt` file) and lexis reads it
 entirely on this device: which bank words you used, in which sentences,
-what's overused, and what's still waiting on today's list. One click marks
-the used words as practised.
+what's overused, and what's still waiting on today's list. Logging the checked
+draft adds every matched occurrence — including bank words outside today's
+list — to that word's separate essay-use total. Matches from today's list are
+also marked as practised and scheduled to return.
 
 **Quick lookup.** Press `/` (or `⌘K`) anywhere for a definition without
 commitment: type a word, read its senses, `esc` to close — or add it to the

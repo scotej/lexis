@@ -144,7 +144,13 @@ function entryNode(word, expanded) {
   }
 
   const meta = el("div", "entry-meta");
-  meta.append(el("span", null, `${word.source} · practised ${word.times_used}×`));
+  meta.append(
+    el(
+      "span",
+      null,
+      `${word.source} · practised ${word.times_used}× · essay uses ${word.essay_uses ?? 0}×`
+    )
+  );
   const src = el("button", "link-quiet", "view definition");
   src.addEventListener("click", () => platform.openUrl(word.source_url));
   const clarification = word.clarification_url
@@ -230,6 +236,10 @@ async function renderToday() {
   const list = $("today-list");
   list.replaceChildren();
   $("today-empty").hidden = view.items.length > 0;
+  $("today-refresh").disabled = !view.can_refresh;
+  $("today-refresh").title = view.can_refresh
+    ? "replace this list with other words from your bank"
+    : "add more than ten words to rotate today’s list";
 
   if (view.items.length) {
     $("today-lede").textContent =
@@ -256,6 +266,19 @@ async function renderToday() {
     list.append(row);
   });
 }
+
+$("today-refresh").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  await mutate(async () => {
+    await app.refreshTodayList();
+    await renderToday();
+    await refreshCounts();
+  });
+  // A failed save leaves the button in place; let the user retry. A successful
+  // render decides whether another rotation is possible.
+  if (button.isConnected && button.title.startsWith("replace")) button.disabled = false;
+});
 
 /* ---- review ---- */
 
@@ -387,9 +410,15 @@ function updateEssayCount() {
   const n = essayText.value.split(/\s+/).filter(Boolean).length;
   essayCount.textContent = n ? `${n} words` : "";
 }
+
+function clearEssayReport() {
+  $("essay-report").replaceChildren();
+}
+
 essayText.addEventListener("input", () => {
   updateEssayCount();
   saveEssayDraft();
+  clearEssayReport();
 });
 
 $("essay-file").addEventListener("change", async (e) => {
@@ -398,6 +427,7 @@ $("essay-file").addEventListener("change", async (e) => {
   essayText.value = await file.text();
   updateEssayCount();
   saveEssayDraft();
+  clearEssayReport();
 });
 
 $("essay-check").addEventListener("click", async () => {
@@ -452,18 +482,26 @@ $("essay-check").addEventListener("click", async () => {
   }
 
   const usedToday = report.used.filter((u) => u.in_today);
-  if (usedToday.length) {
-    const mark = el("button", "button-primary", "mark these as practised");
-    mark.addEventListener("click", () =>
-      mutate(async () => {
-        for (const u of usedToday) {
-          await app.tickWord(u.word, true);
-        }
-        mark.replaceWith(el("p", "report-summary", "Marked. They’ll return on schedule."));
-        refreshCounts();
-      })
-    );
-    out.append(mark);
+  if (report.used.length) {
+    const label = usedToday.length
+      ? "log essay uses & mark today’s words"
+      : "log essay uses";
+    const log = el("button", "button-primary", label);
+    log.addEventListener("click", async () => {
+      log.disabled = true;
+      await mutate(async () => {
+        const result = await app.logEssay(text);
+        const confirmation = result.practised_today
+          ? "Logged every match. Today’s matching words were also marked as practised."
+          : "Logged every match to each word’s essay-use total.";
+        log.replaceWith(el("p", "report-summary", confirmation));
+        await refreshCounts();
+      });
+      // Re-enable only when the mutation failed and the original button is
+      // still present. A successful log replaces it, preventing double-clicks.
+      if (log.isConnected) log.disabled = false;
+    });
+    out.append(log);
   }
 });
 

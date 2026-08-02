@@ -15,7 +15,15 @@ import { mergeBanks, stable } from "./merge.js";
 import { migrate } from "./bank.js";
 
 const API = "https://api.github.com";
-const ENVELOPE_VERSION = 1;
+export const ENVELOPE_VERSION = 2;
+
+export function assertSupportedEnvelope(envelope) {
+  if ((envelope?.lexis ?? 0) > ENVELOPE_VERSION) {
+    throw new Error(
+      "This file was written by a newer version of lexis. Update this device first."
+    );
+  }
+}
 
 function headers(token) {
   return {
@@ -323,11 +331,7 @@ export async function syncOnce({ config, key, localBank, onStatus = () => {} }) 
 
     let remoteBank = null;
     if (envelope) {
-      if (envelope.lexis > ENVELOPE_VERSION) {
-        throw new Error(
-          "This file was written by a newer version of lexis. Update this device first."
-        );
-      }
+      assertSupportedEnvelope(envelope);
       try {
         remoteBank = await decryptJSON(key, envelope);
       } catch {
@@ -346,7 +350,11 @@ export async function syncOnce({ config, key, localBank, onStatus = () => {} }) 
     lastMerged = merged;
 
     // Nothing to push if the remote already matches the merge result.
-    if (remoteBank && sameBank(remoteBank, merged)) {
+    if (
+      remoteBank &&
+      envelope.lexis === ENVELOPE_VERSION &&
+      sameBank(remoteBank, merged)
+    ) {
       onStatus("up to date");
       return { bank: merged, pushed: false };
     }

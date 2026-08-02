@@ -396,6 +396,23 @@ main {
 
 /* ---- today ---- */
 
+.today-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.today-heading .link-quiet {
+  flex: 0 0 auto;
+}
+
+.today-heading .link-quiet:disabled {
+  color: var(--hairline);
+  cursor: default;
+  text-decoration: none;
+}
+
 .today-list {
   margin-top: 4px;
 }
@@ -607,6 +624,13 @@ main {
 .button-primary:hover {
   background: var(--ink);
   color: var(--paper);
+}
+
+.button-primary:disabled {
+  color: var(--faint);
+  background: transparent;
+  border-color: var(--faint);
+  cursor: wait;
 }
 
 #essay-report {

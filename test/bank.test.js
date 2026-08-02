@@ -17,6 +17,7 @@ function entry(name, due = DAY) {
     added: DAY,
     srs: { ...newSrs(DAY), due },
     times_used: 0,
+    essay_uses: 0,
     updated: Date.now(),
     created: Date.now(),
   };
@@ -112,10 +113,12 @@ test("migrating a v1 bank dates its words from when they were added", () => {
   const migrated = bank.migrate({
     words: [{ word: "demise", added: "2026-07-01", srs: newSrs("2026-07-01"), senses: [] }],
   });
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.words[0].updated, Date.parse("2026-07-01T00:00:00Z"));
   assert.equal(migrated.words[0].created, Date.parse("2026-07-01T00:00:00Z"));
   assert.equal(migrated.words[0].times_used, 0);
+  assert.equal(migrated.words[0].essay_uses, 0);
+  assert.deepEqual(migrated.words[0].essay_use_events, {});
   assert.deepEqual(migrated.deleted, []);
 });
 
@@ -234,4 +237,113 @@ test("a genuine re-add gets a fresh created stamp", () => {
   assert.equal(typeof w.created, "number");
   assert.equal(w.created, w.updated);
   assert.equal(w.clarification_url, "c");
+  assert.equal(w.essay_uses, 0);
+  assert.deepEqual(w.essay_use_events, {});
+});
+
+test("manually refreshing today rotates in words outside the current list", () => {
+  const b = bank.emptyBank();
+  b.words = Array.from({ length: 15 }, (_, i) => entry(`w${String(i).padStart(2, "0")}`));
+  bank.ensureTodayList(b, DAY);
+  const original = [...b.today.words];
+  bank.tick(b, original[0], true, DAY);
+
+  assert.equal(bank.refreshTodayList(b, DAY), true);
+  assert.equal(b.today.words.length, bank.TODAY_TARGET);
+  assert.notDeepEqual(b.today.words, original);
+  assert.deepEqual(
+    b.today.words.slice(0, 5),
+    ["w10", "w11", "w12", "w13", "w14"],
+    "unseen words lead the refreshed list in due order"
+  );
+  assert.equal(
+    bank.todayView(b).items.find((item) => item.word === original[0])?.ticked,
+    true,
+    "a completed word remains completed if the circular page includes it"
+  );
+  assert.deepEqual(b.today.ticked, [original[0]], "completion remains in today's history");
+  assert.equal(bank.find(b, original[0]).times_used, 1, "its practice history is preserved");
+  assert.ok(b.today.refreshed > 0);
+});
+
+test("refreshing with no alternative words is a no-op", () => {
+  const b = bank.emptyBank();
+  b.words = [entry("demise"), entry("cessation")];
+  bank.ensureTodayList(b, DAY);
+  bank.tick(b, "demise", true, DAY);
+  const before = structuredClone(b.today);
+
+  assert.equal(bank.refreshTodayList(b, DAY), false);
+  assert.deepEqual(b.today, before);
+});
+
+test("a manual refresh after midnight builds the new day's first list before rotating", () => {
+  const b = bank.emptyBank();
+  b.words = Array.from({ length: 15 }, (_, i) => entry(`w${String(i).padStart(2, "0")}`));
+  bank.ensureTodayList(b, "2026-07-19");
+
+  assert.equal(bank.refreshTodayList(b, DAY), true);
+  assert.equal(b.today.date, DAY);
+  assert.deepEqual(b.today.words, ["w00", "w01", "w02", "w03", "w04", "w05", "w06", "w07", "w08", "w09"]);
+  assert.equal(b.today.refreshed, 0, "the automatic new-day selection is not a manual rotation");
+});
+
+test("repeated refreshes cycle through the entire bank before wrapping", () => {
+  const b = bank.emptyBank();
+  b.words = Array.from({ length: 25 }, (_, i) => entry(`w${String(i).padStart(2, "0")}`));
+  bank.ensureTodayList(b, DAY);
+  assert.deepEqual(b.today.words, ["w00", "w01", "w02", "w03", "w04", "w05", "w06", "w07", "w08", "w09"]);
+
+  bank.refreshTodayList(b, DAY);
+  assert.deepEqual(b.today.words, ["w10", "w11", "w12", "w13", "w14", "w15", "w16", "w17", "w18", "w19"]);
+
+  bank.refreshTodayList(b, DAY);
+  assert.deepEqual(b.today.words, ["w20", "w21", "w22", "w23", "w24", "w00", "w01", "w02", "w03", "w04"]);
+});
+
+test("a tick remains completed after its word rotates out and back in", () => {
+  const b = bank.emptyBank();
+  b.words = Array.from({ length: 20 }, (_, i) => entry(`w${String(i).padStart(2, "0")}`));
+  bank.ensureTodayList(b, DAY);
+  bank.tick(b, "w00", true, DAY);
+
+  bank.refreshTodayList(b, DAY);
+  assert.ok(!b.today.words.includes("w00"));
+  bank.refreshTodayList(b, DAY);
+  const returned = bank.todayView(b).items.find((item) => item.word === "w00");
+  assert.equal(returned?.ticked, true);
+});
+
+test("essay uses are cumulative metadata and do not alter review state", () => {
+  const b = bank.emptyBank();
+  const demise = entry("demise");
+  demise.updated = 12345;
+  b.words = [demise];
+  const schedule = structuredClone(demise.srs);
+
+  const logged = bank.logEssayUses(
+    b,
+    [
+      { word: "demise", count: 2 },
+      { word: "demise", count: 1 },
+      { word: "missing", count: 9 },
+      { word: "demise", count: 0 },
+    ],
+    "essay-a"
+  );
+
+  assert.deepEqual(logged, [{ word: "demise", count: 3, total: 3 }]);
+  assert.equal(demise.essay_uses, 3);
+  assert.deepEqual(demise.essay_use_events, { "essay-a": 3 });
+  assert.equal(demise.times_used, 0);
+  assert.equal(demise.updated, 12345, "essay metadata cannot win whole-word sync by recency");
+  assert.deepEqual(demise.srs, schedule);
+});
+
+test("the same essay event id is idempotent", () => {
+  const b = bank.emptyBank();
+  b.words = [entry("demise")];
+  bank.logEssayUses(b, [{ word: "demise", count: 2 }], "essay-a");
+  bank.logEssayUses(b, [{ word: "demise", count: 2 }], "essay-a");
+  assert.equal(bank.find(b, "demise").essay_uses, 2);
 });

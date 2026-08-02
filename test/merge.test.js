@@ -22,6 +22,8 @@ function word(name, updated, extra = {}) {
     added: DAY,
     srs: newSrs(DAY),
     times_used: 0,
+    essay_uses: 0,
+    essay_use_events: {},
     updated,
     created: updated,
     ...extra,
@@ -158,7 +160,7 @@ test("a v1 bank with no sync fields merges without losing words", () => {
   };
   const merged = mergeBanks(legacy, { words: [] }, DAY);
   assert.deepEqual(merged.words.map((w) => w.word), ["demise"]);
-  assert.equal(merged.version, 2);
+  assert.equal(merged.version, 3);
   assert.ok(typeof merged.words[0].updated === "number");
 });
 
@@ -250,4 +252,128 @@ test("tied timestamps converge instead of diverging forever", () => {
   // And it stays converged: re-merging changes nothing on either side.
   assert.deepEqual(mergeBanks(ab, bank([a]), DAY), ab);
   assert.deepEqual(mergeBanks(ba, bank([b]), DAY), ba);
+});
+
+test("essay usage merges independently without replacing a newer schedule", () => {
+  const current = word("demise", t(900), {
+    essay_uses: 1,
+    essay_use_events: { current: 1 },
+    phonetic: "/new/",
+    srs: { reps: 4, lapses: 0, ease: 2.5, interval: 12, due: "2026-08-01", last: DAY },
+  });
+  const staleWithMoreUses = word("demise", t(100), {
+    essay_uses: 7,
+    essay_use_events: { stale: 7 },
+    phonetic: "/old/",
+  });
+
+  const merged = mergeBanks(bank([current]), bank([staleWithMoreUses]), DAY).words[0];
+  assert.equal(merged.phonetic, "/new/", "the newer base record still wins");
+  assert.equal(merged.srs.reps, 4, "its SRS history is not replaced by essay metadata");
+  assert.equal(merged.essay_uses, 8, "independent essay events are merged separately");
+});
+
+test("concurrent offline essay logs are additive and shared events are not doubled", () => {
+  const local = word("demise", t(200), {
+    essay_uses: 7,
+    essay_use_events: { shared: 5, local: 2 },
+  });
+  const remote = word("demise", t(100), {
+    essay_uses: 8,
+    essay_use_events: { shared: 5, remote: 3 },
+  });
+
+  const merged = mergeBanks(bank([local]), bank([remote]), DAY).words[0];
+  assert.deepEqual(merged.essay_use_events, { local: 2, remote: 3, shared: 5 });
+  assert.equal(merged.essay_uses, 10);
+});
+
+test("essay-only metadata cannot make an older base word beat a newer one", () => {
+  const newer = word("demise", t(900), { phonetic: "/new/" });
+  const older = word("demise", t(100), {
+    phonetic: "/old/",
+    essay_uses: 5,
+    essay_use_events: { oldLog: 5 },
+  });
+
+  const merged = mergeBanks(bank([newer]), bank([older]), DAY).words[0];
+  assert.equal(merged.phonetic, "/new/");
+  assert.equal(merged.essay_uses, 5);
+});
+
+test("a manual same-day refresh replaces a stale selection during sync", () => {
+  const words = [word("demise", t(100)), word("cessation", t(100)), word("hubris", t(100))];
+  const stale = bank(words, [], {
+    date: DAY,
+    words: ["demise", "hubris"],
+    ticked: ["hubris"],
+    updated: t(200),
+    refreshed: 0,
+  });
+  const refreshed = bank(words, [], {
+    date: DAY,
+    words: ["cessation", "hubris"],
+    ticked: ["cessation"],
+    updated: t(300),
+    refreshed: t(300),
+  });
+
+  for (const merged of [
+    mergeBanks(stale, refreshed, DAY),
+    mergeBanks(refreshed, stale, DAY),
+  ]) {
+    assert.deepEqual(merged.today.words, ["cessation", "hubris"]);
+    assert.deepEqual(merged.today.ticked.sort(), ["cessation", "hubris"]);
+    assert.equal(merged.today.refreshed, t(300));
+  }
+});
+
+test("equal refresh stamps converge to one bounded checklist in either direction", () => {
+  const words = Array.from({ length: 12 }, (_, i) => word(`w${i}`, t(100)));
+  const a = bank(words, [], {
+    date: DAY,
+    words: words.slice(0, 10).map((item) => item.word),
+    ticked: ["w1"],
+    updated: t(300),
+    refreshed: t(250),
+  });
+  const b = bank(words, [], {
+    date: DAY,
+    words: words.slice(2, 12).map((item) => item.word),
+    ticked: ["w2"],
+    updated: t(300),
+    refreshed: t(250),
+  });
+
+  const ab = mergeBanks(a, b, DAY);
+  const ba = mergeBanks(b, a, DAY);
+  assert.deepEqual(ab.today, ba.today);
+  assert.equal(ab.today.words.length, 10);
+  assert.deepEqual(ab.today.ticked, ["w1", "w2"], "day-wide completion history is retained");
+});
+
+test("identical refreshed lists with different cursors still converge", () => {
+  const words = Array.from({ length: 12 }, (_, i) => word(`w${i}`, t(100)));
+  const list = words.slice(0, 10).map((item) => item.word);
+  const a = bank(words, [], {
+    date: DAY,
+    words: list,
+    ticked: [],
+    updated: t(300),
+    refreshed: t(250),
+    cursor: 1,
+  });
+  const b = bank(words, [], {
+    date: DAY,
+    words: list,
+    ticked: [],
+    updated: t(300),
+    refreshed: t(250),
+    cursor: 7,
+  });
+
+  const ab = mergeBanks(a, b, DAY);
+  const ba = mergeBanks(b, a, DAY);
+  assert.deepEqual(ab, ba);
+  assert.equal(ab.today.cursor, 7);
 });

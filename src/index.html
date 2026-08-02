@@ -124,7 +124,10 @@
       <!-- today -->
       <section id="view-today" class="view">
         <header class="view-head">
-          <p class="eyebrow" id="today-date"></p>
+          <div class="today-heading">
+            <p class="eyebrow" id="today-date"></p>
+            <button id="today-refresh" class="link-quiet" type="button">refresh list</button>
+          </div>
           <p class="lede" id="today-lede"></p>
         </header>
         <div id="today-list" class="today-list"></div>
@@ -144,7 +147,8 @@
           <p class="eyebrow">essay check</p>
           <p class="lede">
             Paste a draft, or open a .txt file. lexis reads it on this device and reports which
-            bank words you used and how.
+            bank words you used and how. Log a checked draft to add every match to each word’s
+            essay-use total.
           </p>
         </header>
         <textarea id="essay-text" spellcheck="false" placeholder="Paste your essay here…"></textarea>

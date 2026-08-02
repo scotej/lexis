@@ -168,7 +168,7 @@ test("first device creates the file and stores nothing in plaintext", async () =
   assert.ok(!stored.includes(PASSWORD));
 
   const envelope = JSON.parse(stored);
-  assert.equal(envelope.lexis, 1);
+  assert.equal(envelope.lexis, 2);
   assert.equal(envelope.kdf.algo, "PBKDF2-SHA256");
   assert.ok(envelope.ct.length > 0);
 });
@@ -288,6 +288,41 @@ test("syncing with no changes does not write again", async () => {
   const { pushed } = await syncOnce({ config: cfg, key: a.key, localBank: local });
   assert.equal(pushed, false);
   assert.equal(server.writes, writesAfterFirst, "no redundant commit was made");
+});
+
+test("a legacy envelope is accepted and rewritten at the current compatibility version", async () => {
+  const a = await createVault({ password: PASSWORD, ...CONFIG });
+  const cfg = { ...CONFIG, salt: a.salt };
+  const local = bank([word("demise", Date.now())]);
+  await syncOnce({ config: cfg, key: a.key, localBank: local });
+
+  const legacy = JSON.parse(server.file.content);
+  legacy.lexis = 1;
+  server.file.content = JSON.stringify(legacy);
+  const writesBeforeUpgrade = server.writes;
+
+  const { pushed } = await syncOnce({ config: cfg, key: a.key, localBank: local });
+  assert.equal(pushed, true, "a no-op data sync still upgrades the envelope");
+  assert.equal(JSON.parse(server.file.content).lexis, 2);
+  assert.equal(server.writes, writesBeforeUpgrade + 1);
+});
+
+test("a newer sync envelope is rejected before it can be overwritten", async () => {
+  const a = await createVault({ password: PASSWORD, ...CONFIG });
+  const cfg = { ...CONFIG, salt: a.salt };
+  const local = bank([word("demise", Date.now())]);
+  await syncOnce({ config: cfg, key: a.key, localBank: local });
+
+  const future = JSON.parse(server.file.content);
+  future.lexis = 3;
+  server.file.content = JSON.stringify(future);
+  const writesBefore = server.writes;
+
+  await assert.rejects(
+    () => syncOnce({ config: cfg, key: a.key, localBank: local }),
+    /newer version of lexis/
+  );
+  assert.equal(server.writes, writesBefore);
 });
 
 test("a bank encrypted under another password cannot be read", async () => {

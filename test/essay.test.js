@@ -28,6 +28,18 @@ test("tracks unused words from today's list", () => {
   assert.deepEqual(report.unused_today, ["cessation"]);
 });
 
+test("identifies bank-word matches outside today's list", () => {
+  const report = analyze("The town's demise was inevitable.", ["demise"], []);
+  assert.equal(report.used[0].word, "demise");
+  assert.equal(report.used[0].count, 1);
+  assert.equal(report.used[0].in_today, false);
+});
+
+test("an exact bank word owns a token instead of also counting it as another word's variant", () => {
+  const report = analyze("She argued fervently.", ["fervent", "fervently"], []);
+  assert.deepEqual(report.used.map((usage) => [usage.word, usage.count]), [["fervently", 1]]);
+});
+
 test("notices a word repeated inside one sentence", () => {
   const report = analyze("The demise foretold another demise entirely.", ["demise"], []);
   assert.ok(report.notes.some((n) => n.includes("repeated within a single sentence")));

@@ -57,13 +57,45 @@ export function analyze(text, bankWords, todayWords) {
   const sents = sentences(text);
   const today = new Set(todayWords);
 
+  // A token belongs to at most one bank entry. Prefer an exact headword match
+  // over a generated inflection, then the longest matching lemma. Without
+  // ownership, a bank containing both "fervent" and "fervently" would count
+  // the single token "fervently" once for each word and permanently inflate
+  // both essay-use totals.
+  const candidates = bankWords.map((word) => ({ word, key: word.toLowerCase(), forms: variants(word) }));
+  const exact = new Map(candidates.map((candidate) => [candidate.key, candidate.word]));
+  const ownerCache = new Map();
+  function ownerOf(token) {
+    if (ownerCache.has(token)) return ownerCache.get(token);
+    let owner = exact.get(token) ?? null;
+    if (!owner) {
+      for (const candidate of candidates) {
+        if (!candidate.forms.has(token)) continue;
+        if (
+          !owner ||
+          candidate.key.length > owner.length ||
+          (candidate.key.length === owner.length && candidate.word < owner)
+        ) {
+          owner = candidate.word;
+        }
+      }
+    }
+    ownerCache.set(token, owner);
+    return owner;
+  }
+
+  const counts = new Map();
+  for (const token of tokens) {
+    const owner = ownerOf(token);
+    if (owner) counts.set(owner, (counts.get(owner) ?? 0) + 1);
+  }
+
   const used = [];
   for (const word of bankWords) {
-    const forms = variants(word);
-    const count = tokens.filter((t) => forms.has(t)).length;
+    const count = counts.get(word) ?? 0;
     if (count === 0) continue;
     const examples = sents
-      .filter((s) => tokenize(s).some((t) => forms.has(t)))
+      .filter((s) => tokenize(s).some((token) => ownerOf(token) === word))
       .slice(0, 3);
     used.push({
       word,
@@ -83,9 +115,8 @@ export function analyze(text, bankWords, todayWords) {
     if (u.overused) {
       notes.push(`“${u.word}” appears ${u.count} times — consider varying it.`);
     }
-    const forms = variants(u.word);
     for (const s of u.sentences) {
-      if (tokenize(s).filter((t) => forms.has(t)).length >= 2) {
+      if (tokenize(s).filter((token) => ownerOf(token) === u.word).length >= 2) {
         notes.push(`“${u.word}” is repeated within a single sentence.`);
         break;
       }

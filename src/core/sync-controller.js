@@ -5,7 +5,6 @@
  */
 
 import { syncOnce } from "./sync.js";
-import { mergeBanks } from "./merge.js";
 
 const DEBOUNCE_MS = 4000;
 const POLL_MS = 5 * 60 * 1000;
@@ -40,10 +39,11 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
     }
     running = true;
     try {
+      const localBank = await app.getBankSnapshot();
       const { bank } = await syncOnce({
         config,
         key,
-        localBank: app.getBank(),
+        localBank,
         onStatus: (t) => status(t, "busy"),
       });
       // A sync takes a second or two, and the user keeps working during it.
@@ -51,7 +51,7 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
       // means a word added mid-flight isn't discarded by the swap. The merge is
       // idempotent, so this costs nothing when nothing changed; any edit it
       // picks up has already queued its own push via schedule().
-      await app.replaceBank(mergeBanks(app.getBank(), bank));
+      await app.mergeBank(bank);
       lastError = null;
       // The network came back (or never left): stand down the fast-retry ladder.
       clearTimeout(retryTimer);

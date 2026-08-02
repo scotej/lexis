@@ -107,8 +107,14 @@ function fakeApp(initial) {
   let b = initial;
   return {
     getBank: () => b,
+    getBankSnapshot: async () => structuredClone(b),
     replaceBank: async (next) => {
       b = next;
+      return b;
+    },
+    mergeBank: async (next) => {
+      const { mergeBanks } = await import("../src/core/merge.js");
+      b = mergeBanks(b, next);
       return b;
     },
   };

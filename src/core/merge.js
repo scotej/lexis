@@ -25,13 +25,31 @@
  * near-simultaneous edits to the *same word* is superseded.
  */
 
-import { migrate, pruneTombstones, SCHEMA_VERSION } from "./bank.js";
+import { migrate, pruneTombstones, SCHEMA_VERSION, TODAY_TARGET } from "./bank.js";
 import { todayISO } from "./srs.js";
 
-/** A word that has never been reviewed or used carries no history to lose. */
+/** A word that has never been reviewed carries no scheduling history to lose. */
 function pristine(w) {
   const s = w.srs ?? {};
   return !s.last && (s.reps ?? 0) === 0 && (s.lapses ?? 0) === 0 && (w.times_used ?? 0) === 0;
+}
+
+function mergeEssayUseEvents(a, b) {
+  const ids = [...new Set([
+    ...Object.keys(a.essay_use_events ?? {}),
+    ...Object.keys(b.essay_use_events ?? {}),
+  ])].sort();
+  const events = {};
+  for (const id of ids) {
+    events[id] = Math.max(a.essay_use_events?.[id] ?? 0, b.essay_use_events?.[id] ?? 0);
+  }
+  return events;
+}
+
+/** Stable, bounded union for derived checklist state. */
+function mergeChecklistWords(a, b) {
+  const [first, second] = stable(a) >= stable(b) ? [a, b] : [b, a];
+  return [...new Set([...first, ...second])].slice(0, TODAY_TARGET);
 }
 
 /**
@@ -94,7 +112,20 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const words = new Map();
   for (const w of [...local.words, ...remote.words]) {
     const prev = words.get(w.word);
-    if (!prev || beats(w, prev)) words.set(w.word, w);
+    if (!prev) {
+      words.set(w.word, { ...w });
+      continue;
+    }
+    const winner = beats(w, prev) ? w : prev;
+    // Essay usage is unionable metadata, not part of the LWW word edit. Each
+    // explicit essay log has a random id, so concurrent offline logs survive
+    // while the same event observed twice is counted only once.
+    const events = mergeEssayUseEvents(w, prev);
+    words.set(w.word, {
+      ...winner,
+      essay_use_events: events,
+      essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
+    });
   }
 
   // Apply tombstones, and drop the ones the word has outlived (re-added).
@@ -121,11 +152,32 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const rt = remote.today;
   if (lt && rt) {
     if (lt.date === rt.date) {
+      const localRefresh = lt.refreshed ?? 0;
+      const remoteRefresh = rt.refreshed ?? 0;
+      const words =
+        localRefresh === remoteRefresh
+          ? mergeChecklistWords(lt.words, rt.words)
+          : localRefresh > remoteRefresh
+            ? [...lt.words]
+            : [...rt.words];
+      const localPreferred = stable(lt.words) >= stable(rt.words);
+      const cursor =
+        localRefresh === remoteRefresh
+          ? stable(lt.words) === stable(rt.words)
+            ? Math.max(lt.cursor ?? 0, rt.cursor ?? 0)
+            : localPreferred
+              ? lt.cursor ?? 0
+              : rt.cursor ?? 0
+          : localRefresh > remoteRefresh
+            ? lt.cursor ?? 0
+            : rt.cursor ?? 0;
       todayList = {
         date: lt.date,
-        words: [...new Set([...lt.words, ...rt.words])],
-        ticked: [...new Set([...lt.ticked, ...rt.ticked])],
+        words,
+        ticked: [...new Set([...lt.ticked, ...rt.ticked])].sort(),
         updated: Math.max(lt.updated ?? 0, rt.updated ?? 0),
+        refreshed: Math.max(localRefresh, remoteRefresh),
+        cursor,
       };
     } else {
       todayList = lt.date > rt.date ? lt : rt;
