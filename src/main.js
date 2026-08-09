@@ -55,6 +55,9 @@ railLinks.forEach((btn, i) => {
   btn.setAttribute("aria-keyshortcuts", String(i + 1));
 });
 
+const aboutDialog = $("about-dialog");
+$("rail-about").addEventListener("click", () => aboutDialog.showModal());
+
 function switchView(name) {
   // The gate overlays the rail but doesn't inert it, so a keyboard user can
   // still reach these buttons before the app exists.
@@ -952,11 +955,9 @@ function buildDesktopUnlock() {
 async function boot() {
   if (isDesktop()) {
     platform = createDesktopPlatform();
-    $("rail-privacy").textContent = "your bank stays on this device";
     await startDesktop();
   } else {
     platform = createWebPlatform();
-    $("rail-privacy").textContent = "encrypted before it leaves this device";
     if (!cryptoAvailable()) {
       document.body.replaceChildren(
         el("p", "empty", "lexis needs a browser with Web Crypto (and a secure https connection).")
