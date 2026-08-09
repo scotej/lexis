@@ -241,6 +241,66 @@ test("a genuine re-add gets a fresh created stamp", () => {
   assert.deepEqual(w.essay_use_events, {});
 });
 
+test("updating a definition preserves the word's review and usage history", () => {
+  const b = bank.emptyBank();
+  const w = entry("poignantly");
+  w.senses = [{ pos: "adverb", def: "In a poignant manner.", example: null }];
+  w.synonyms = [{ word: "movingly", score: 2 }];
+  w.times_used = 7;
+  w.essay_uses = 3;
+  w.essay_use_events = { essay: 3 };
+  w.srs = { ...w.srs, reps: 4, interval: 12, last: DAY };
+  w.created = 50;
+  w.updated = 100;
+  b.words = [w];
+  const history = structuredClone({
+    synonyms: w.synonyms,
+    times_used: w.times_used,
+    essay_uses: w.essay_uses,
+    essay_use_events: w.essay_use_events,
+    srs: w.srs,
+    added: w.added,
+    created: w.created,
+  });
+
+  assert.equal(
+    bank.updateDefinition(
+      b,
+      "poignantly",
+      {
+        senses: [
+          { pos: "adverb", def: "Depending on context: movingly or touchingly.", example: null },
+        ],
+        source: "Wiktionary · clarification via Datamuse",
+        source_url: "https://en.wiktionary.org/wiki/poignantly",
+        clarification_url: "https://api.datamuse.com/words?ml=poignantly",
+      },
+      500
+    ),
+    true
+  );
+
+  assert.equal(w.senses[0].def, "Depending on context: movingly or touchingly.");
+  assert.equal(w.clarification_url, "https://api.datamuse.com/words?ml=poignantly");
+  assert.equal(w.updated, 500);
+  assert.deepEqual(
+    {
+      synonyms: w.synonyms,
+      times_used: w.times_used,
+      essay_uses: w.essay_uses,
+      essay_use_events: w.essay_use_events,
+      srs: w.srs,
+      added: w.added,
+      created: w.created,
+    },
+    history
+  );
+
+  const updated = w.updated;
+  assert.equal(bank.updateDefinition(b, "poignantly", w, 900), false);
+  assert.equal(w.updated, updated, "an identical definition must not create a sync edit");
+});
+
 test("manually refreshing today rotates in words outside the current list", () => {
   const b = bank.emptyBank();
   b.words = Array.from({ length: 15 }, (_, i) => entry(`w${String(i).padStart(2, "0")}`));

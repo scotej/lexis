@@ -140,6 +140,11 @@ function referencedAdjective(sense) {
   return sense.def?.trim().match(OPAQUE_ADVERB)?.[1]?.toLowerCase() ?? null;
 }
 
+/** Whether a stored entry can benefit from the derived-adverb clarification. */
+export function needsDerivativeClarification(dictionary) {
+  return (dictionary?.senses ?? []).some((sense) => referencedAdjective(sense));
+}
+
 /** Plausible adjective lemmas for a regular English -ly adverb. */
 export function adjectiveFormsForAdverb(word) {
   const value = word.trim().toLowerCase();
@@ -262,6 +267,11 @@ export async function expandDerivativeDefinitions(
 
 export async function fetchDefinition(word) {
   const dictionary = await fetchRawDefinition(word);
+  return await clarifyDerivativeDefinitions(word, dictionary);
+}
+
+/** Apply the live lexical cross-check to an already-stored dictionary entry. */
+export async function clarifyDerivativeDefinitions(word, dictionary) {
   return await expandDerivativeDefinitions(
     word,
     dictionary,

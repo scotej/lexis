@@ -59,6 +59,15 @@ function entry(word, today) {
   );
 }
 
+function legacyAdverb(word, adjective, today) {
+  const value = entry(word, today);
+  value.senses = [
+    { pos: "adverb", def: `In a ${adjective} manner.`, example: null },
+  ];
+  value.synonyms = [{ word: `${adjective}ly`, score: 2 }];
+  return value;
+}
+
 function essayBank() {
   const today = todayISO();
   const names = [
@@ -78,6 +87,159 @@ function essayBank() {
   bank.words = names.map((name) => entry(name, today));
   return bank;
 }
+
+test("opening Today clarifies and persists definitions stored by older releases", async () => {
+  const today = todayISO();
+  const original = legacyAdverb("poignantly", "poignant", today);
+  original.times_used = 4;
+  original.srs = { ...original.srs, reps: 3, interval: 10, last: today };
+  const initial = bankModel.emptyBank();
+  initial.words = [original];
+  const storage = new MemoryStorage(initial);
+  const calls = [];
+  let changes = 0;
+  const app = createApp(
+    storage,
+    () => {
+      changes += 1;
+    },
+    {
+      async clarifyDerivativeDefinitions(word, dictionary) {
+        calls.push(word);
+        return {
+          ...dictionary,
+          senses: dictionary.senses.map((sense) => ({
+            ...sense,
+            def: "Depending on context: movingly or touchingly.",
+          })),
+          source: "Wiktionary · clarification via Datamuse",
+          clarification_url: "https://api.datamuse.com/words?ml=poignantly",
+        };
+      },
+    }
+  );
+  await app.init();
+
+  const view = await app.todayList({ clarifyDefinitions: true });
+  const upgraded = bankModel.find(app.getBank(), "poignantly");
+
+  assert.deepEqual(calls, ["poignantly"]);
+  assert.equal(view.items[0].def, "Depending on context: movingly or touchingly.");
+  assert.equal(upgraded.senses[0].def, view.items[0].def);
+  assert.equal(upgraded.source, "Wiktionary · clarification via Datamuse");
+  assert.match(upgraded.clarification_url, /ml=poignantly/);
+  assert.equal(upgraded.times_used, 4);
+  assert.equal(upgraded.srs.reps, 3);
+  assert.deepEqual(upgraded.synonyms, original.synonyms);
+  assert.equal(storage.value.words[0].senses[0].def, view.items[0].def);
+  assert.equal(storage.saves, 1, "the new checklist and clarification persist atomically");
+  assert.equal(changes, 1);
+});
+
+test("counting Today does not look up legacy definitions before the view is opened", async () => {
+  const today = todayISO();
+  const initial = bankModel.emptyBank();
+  initial.words = [legacyAdverb("poignantly", "poignant", today)];
+  const storage = new MemoryStorage(initial);
+  let calls = 0;
+  const app = createApp(storage, undefined, {
+    async clarifyDerivativeDefinitions() {
+      calls += 1;
+      throw new Error("should not run");
+    },
+  });
+  await app.init();
+
+  const view = await app.todayList();
+
+  assert.equal(calls, 0);
+  assert.equal(view.items[0].def, "In a poignant manner.");
+});
+
+test("Today only clarifies eligible words in the visible rotation", async () => {
+  const today = todayISO();
+  const initial = essayBank();
+  const zenith = bankModel.find(initial, "zenith");
+  Object.assign(zenith, legacyAdverb("zenith", "zenithal", today));
+  const storage = new MemoryStorage(initial);
+  const calls = [];
+  const app = createApp(storage, undefined, {
+    async clarifyDerivativeDefinitions(word, dictionary) {
+      calls.push(word);
+      return {
+        ...dictionary,
+        senses: [{ ...dictionary.senses[0], def: "At or near a zenith." }],
+      };
+    },
+  });
+  await app.init();
+
+  let view = await app.todayList({ clarifyDefinitions: true });
+  assert.equal(view.items.some((item) => item.word === "zenith"), false);
+  assert.deepEqual(calls, []);
+
+  await app.refreshTodayList();
+  view = await app.todayList({ clarifyDefinitions: true });
+  assert.equal(view.items.some((item) => item.word === "zenith"), true);
+  assert.deepEqual(calls, ["zenith"]);
+  assert.equal(bankModel.find(app.getBank(), "zenith").senses[0].def, "At or near a zenith.");
+});
+
+test("a failed legacy clarification leaves Today usable with its stored definition", async () => {
+  const today = todayISO();
+  const initial = bankModel.emptyBank();
+  initial.words = [legacyAdverb("poignantly", "poignant", today)];
+  const storage = new MemoryStorage(initial);
+  const app = createApp(storage, undefined, {
+    async clarifyDerivativeDefinitions() {
+      throw new Error("offline");
+    },
+  });
+  await app.init();
+
+  const view = await app.todayList({ clarifyDefinitions: true });
+
+  assert.equal(view.items[0].def, "In a poignant manner.");
+  assert.equal(storage.saves, 1, "the checklist still persists while offline");
+});
+
+test("a pending clarification cannot overwrite a newer synced definition", async () => {
+  const today = todayISO();
+  const initial = bankModel.emptyBank();
+  initial.words = [legacyAdverb("poignantly", "poignant", today)];
+  const storage = new MemoryStorage(initial);
+  let lookupStarted;
+  let releaseLookup;
+  const started = new Promise((resolve) => {
+    lookupStarted = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    releaseLookup = resolve;
+  });
+  const app = createApp(storage, undefined, {
+    async clarifyDerivativeDefinitions(word, dictionary) {
+      lookupStarted();
+      await gate;
+      return {
+        ...dictionary,
+        senses: [{ ...dictionary.senses[0], def: "A stale clarification." }],
+      };
+    },
+  });
+  await app.init();
+
+  const pending = app.todayList({ clarifyDefinitions: true });
+  await started;
+  const remote = structuredClone(initial);
+  remote.words[0].senses[0].def = "In a deeply moving way.";
+  remote.words[0].updated = Date.now() + 1000;
+  await app.mergeBank(remote);
+  releaseLookup();
+  const view = await pending;
+
+  assert.equal(view.items[0].def, "In a deeply moving way.");
+  assert.equal(bankModel.find(app.getBank(), "poignantly").senses[0].def, view.items[0].def);
+});
 
 test("logging an essay counts off-list words separately and practises today's matches", async () => {
   const storage = new MemoryStorage(essayBank());

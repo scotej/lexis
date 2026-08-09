@@ -294,6 +294,40 @@ export function newWord(word, dict, synonyms, today) {
   };
 }
 
+/**
+ * Replaces only a word's dictionary fields, preserving its review and usage
+ * history. Returns false for a stale/no-op result so callers avoid needless
+ * storage writes and sync pushes.
+ */
+export function updateDefinition(bank, word, dictionary, now = Date.now()) {
+  const entry = find(bank, word);
+  if (!entry) return false;
+
+  const next = {
+    phonetic: dictionary.phonetic ?? entry.phonetic ?? null,
+    senses: Array.isArray(dictionary.senses) ? dictionary.senses : entry.senses,
+    source: typeof dictionary.source === "string" ? dictionary.source : entry.source,
+    source_url:
+      typeof dictionary.source_url === "string" ? dictionary.source_url : entry.source_url,
+    clarification_url:
+      typeof dictionary.clarification_url === "string"
+        ? dictionary.clarification_url
+        : entry.clarification_url ?? null,
+  };
+  const current = {
+    phonetic: entry.phonetic ?? null,
+    senses: entry.senses,
+    source: entry.source,
+    source_url: entry.source_url,
+    clarification_url: entry.clarification_url ?? null,
+  };
+  if (JSON.stringify(next) === JSON.stringify(current)) return false;
+
+  Object.assign(entry, next);
+  entry.updated = Math.max(now, (entry.updated ?? 0) + 1);
+  return true;
+}
+
 export function removeWord(bank, word) {
   const had = bank.words.some((w) => w.word === word);
   bank.words = bank.words.filter((w) => w.word !== word);
