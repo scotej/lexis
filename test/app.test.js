@@ -372,3 +372,110 @@ test("overlapping add requests preserve request order without blocking unrelated
   assert.ok(bankModel.find(app.getBank(), "deontic"));
   assert.equal(storage.saves, 2);
 });
+
+test("a later same-word delete wins over an in-flight add", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  let lookupStartedResolve;
+  let releaseLookup;
+  const lookupStarted = new Promise((resolve) => {
+    lookupStartedResolve = resolve;
+  });
+  const lookupGate = new Promise((resolve) => {
+    releaseLookup = resolve;
+  });
+  const lexicon = {
+    async fetchDefinition(word) {
+      lookups.push(`definition:${word}`);
+      lookupStartedResolve();
+      await lookupGate;
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      lookups.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+  const app = createApp(storage, () => {}, lexicon);
+  await app.init();
+
+  const adding = app.addWord("deontic");
+  const rejected = assert.rejects(adding, /removed after this add was requested/);
+  await lookupStarted;
+
+  const remote = bankModel.emptyBank();
+  remote.words.push(entry("deontic", todayISO()));
+  await app.mergeBank(remote);
+  assert.ok(bankModel.find(app.getBank(), "deontic"));
+
+  await app.deleteWord("deontic");
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+
+  releaseLookup();
+  await rejected;
+
+  assert.deepEqual(lookups, ["definition:deontic", "synonyms:deontic"]);
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+  assert.equal(storage.saves, 2, "the cancelled add must not overwrite the merge and delete");
+});
+
+test("a delete supersedes an add that is still waiting behind an earlier add", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  let firstLookupStartedResolve;
+  let releaseFirstLookup;
+  const firstLookupStarted = new Promise((resolve) => {
+    firstLookupStartedResolve = resolve;
+  });
+  const firstLookupGate = new Promise((resolve) => {
+    releaseFirstLookup = resolve;
+  });
+  const lexicon = {
+    async fetchDefinition(word) {
+      lookups.push(`definition:${word}`);
+      if (word === "alpha") {
+        firstLookupStartedResolve();
+        await firstLookupGate;
+      }
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      lookups.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+  const app = createApp(storage, () => {}, lexicon);
+  await app.init();
+
+  const first = app.addWord("alpha");
+  await firstLookupStarted;
+  const queued = app.addWord("deontic");
+  const queuedRejected = assert.rejects(queued, /removed after this add was requested/);
+
+  const remote = bankModel.emptyBank();
+  remote.words.push(entry("deontic", todayISO()));
+  await app.mergeBank(remote);
+  await app.deleteWord("deontic");
+
+  releaseFirstLookup();
+  await first;
+  await queuedRejected;
+
+  assert.deepEqual(lookups, ["definition:alpha", "synonyms:alpha"]);
+  assert.ok(bankModel.find(app.getBank(), "alpha"));
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+  assert.equal(storage.saves, 3, "merge, delete, and the unrelated first add should be the only saves");
+});

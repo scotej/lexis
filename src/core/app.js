@@ -24,6 +24,7 @@ export function createApp(storage, onChange = () => {}, lexicon = {}) {
   let bank = bankModel.emptyBank();
   let mutationTail = Promise.resolve();
   let additionTail = Promise.resolve();
+  const deleteGenerations = new Map();
   const lookupDefinition = lexicon.fetchDefinition ?? fetchDefinition;
   const lookupSynonyms = lexicon.fetchSynonyms ?? fetchSynonyms;
 
@@ -102,6 +103,23 @@ export function createApp(storage, onChange = () => {}, lexicon = {}) {
     return new Error("those words are already in your bank");
   }
 
+  function deleteGeneration(word) {
+    return deleteGenerations.get(word) ?? 0;
+  }
+
+  function markDeleteRequested(word) {
+    const key = typeof word === "string" ? word.trim().toLowerCase() : word;
+    deleteGenerations.set(key, deleteGeneration(key) + 1);
+  }
+
+  function supersededAddition(words, generations) {
+    return words.find((word) => deleteGeneration(word) !== generations.get(word)) ?? null;
+  }
+
+  function additionSupersededError(word) {
+    return new Error(`couldn’t add “${word}”: it was removed after this add was requested`);
+  }
+
   return {
     async init() {
       return enqueueMutation(async () => {
@@ -150,13 +168,21 @@ export function createApp(storage, onChange = () => {}, lexicon = {}) {
      */
     async addWord(input) {
       const requested = normalizeWordInput(input);
+      const deleteState = new Map(
+        requested.map((word) => [word, deleteGeneration(word)])
+      );
 
       return enqueueAddition(async () => {
         const pending = requested.filter((word) => !bankModel.find(bank, word));
         if (!pending.length) throw alreadyStoredError(requested);
 
+        const staleBeforeLookup = supersededAddition(pending, deleteState);
+        if (staleBeforeLookup) throw additionSupersededError(staleBeforeLookup);
+
         const prepared = [];
         for (const word of pending) {
+          const stale = supersededAddition(pending, deleteState);
+          if (stale) throw additionSupersededError(stale);
           try {
             const dict = await lookupDefinition(word);
             const synonyms = await lookupSynonyms(word);
@@ -168,6 +194,12 @@ export function createApp(storage, onChange = () => {}, lexicon = {}) {
         }
 
         return enqueueMutation(async () => {
+          // A local delete requested after this add must win even if a sync made
+          // the word visible while its lookup was running. Without this guard,
+          // insertWord would clear the newer tombstone and resurrect the word.
+          const stale = supersededAddition(pending, deleteState);
+          if (stale) throw additionSupersededError(stale);
+
           // Sync or another mutation may have completed while the network
           // requests above were in flight. Re-check against a transactional
           // clone and add only candidates that are still absent.
@@ -202,6 +234,10 @@ export function createApp(storage, onChange = () => {}, lexicon = {}) {
     },
 
     async deleteWord(word) {
+      // Record intent before entering the mutation queue. An addition can be
+      // waiting on network I/O (or behind another addition) when this is called;
+      // request order, not eventual save timing, decides which operation wins.
+      markDeleteRequested(word);
       return enqueueMutation(async () => {
         bankModel.removeWord(bank, word);
         await persist();

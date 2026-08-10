@@ -237,11 +237,12 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
-    const entry = await app.addWord(word);
-    expandedWords.add(entry.word);
+    const result = await app.addWord(word);
+    const addedEntries = result.batch ?? [result];
+    for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
     await renderBank();
-    addStatus.textContent = `added “${entry.word}”`;
+    addStatus.textContent = `added “${addedEntries.map((entry) => entry.word).join(" · ")}”`;
     addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
