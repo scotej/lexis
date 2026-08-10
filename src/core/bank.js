@@ -14,6 +14,29 @@ export const TODAY_TARGET = 10;
 
 /** Tombstones older than this are pruned; well past any plausible offline gap. */
 const TOMBSTONE_TTL_DAYS = 180;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validISODate(value) {
+  if (typeof value !== "string" || !ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function reviewEventId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `review:${globalThis.crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  const suffix = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `review:${Date.now().toString(36)}:${suffix}`;
+}
+
+function recordReview(entry, today, id = reviewEventId()) {
+  entry.review_events ??= {};
+  entry.review_events[id] = today;
+}
 
 export function emptyBank() {
   return { version: SCHEMA_VERSION, words: [], deleted: [], today: null };
@@ -76,6 +99,29 @@ export function migrate(raw) {
     }
     w.essay_use_events = events;
     w.essay_uses = Object.values(events).reduce((sum, count) => sum + count, 0);
+
+    // Review history uses the same conflict-safe event-set pattern as essay
+    // logs. Old banks only retain `srs.last`, so preserve that one known event
+    // rather than inventing history we cannot reconstruct.
+    const reviewEvents = {};
+    if (
+      w.review_events &&
+      typeof w.review_events === "object" &&
+      !Array.isArray(w.review_events)
+    ) {
+      for (const [id, date] of Object.entries(w.review_events)) {
+        if (id && validISODate(date)) reviewEvents[id] = date;
+      }
+    }
+    const lastReview = w.srs?.last;
+    if (
+      validISODate(lastReview) &&
+      !Object.values(reviewEvents).some((date) => date === lastReview)
+    ) {
+      reviewEvents[`legacy:${lastReview}`] = lastReview;
+    }
+    w.review_events = reviewEvents;
+
     if (!Array.isArray(w.synonyms)) w.synonyms = [];
     if (!Array.isArray(w.senses)) w.senses = [];
   }
@@ -288,6 +334,7 @@ export function newWord(word, dict, synonyms, today) {
     times_used: 0,
     essay_uses: 0,
     essay_use_events: {},
+    review_events: {},
     // `updated` moves on every edit; `created` only when the word is added.
     updated: now,
     created: now,
@@ -310,6 +357,7 @@ export function grade(bank, word, g, today) {
   const entry = find(bank, word);
   if (!entry) throw new Error("word not found");
   applySrs(entry.srs, g, today);
+  recordReview(entry, today);
   entry.updated = Date.now();
   return entry;
 }
@@ -328,6 +376,7 @@ export function tick(bank, word, ticked, today) {
     if (entry && entry.srs.last !== today) {
       applySrs(entry.srs, "good", today);
       entry.times_used += 1;
+      recordReview(entry, today, `practice:${today}`);
       entry.updated = Date.now();
     }
     t.ticked.push(word);

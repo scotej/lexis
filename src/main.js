@@ -10,6 +10,7 @@ import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
 import { createWebPlatform } from "./platform/web.js";
 import { hasVault, unlockVault, createVault, clearVault } from "./core/vault.js";
 import { cryptoAvailable } from "./core/crypto.js";
+import { installStatsView, renderStatsView } from "./stats-view.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -54,6 +55,8 @@ async function mutate(action) {
 
 /* ---- navigation ---- */
 
+installStatsView();
+
 const railLinks = document.querySelectorAll(".rail-link[data-view]");
 railLinks.forEach((btn, i) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
@@ -75,11 +78,12 @@ function switchView(name) {
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
+  if (name === "stats") renderStatsView(app.getBank());
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
 }
 
-// 1–5 jump straight to a view, top to bottom, matching the rail. Bare digits
+// 1–6 jump straight to a view, top to bottom, matching the rail. Bare digits
 // rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
@@ -87,7 +91,7 @@ document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
   if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
-  const digit = /^Digit([1-5])$/.exec(e.code);
+  const digit = /^Digit([1-6])$/.exec(e.code);
   if (!digit) return;
   switchView(railLinks[Number(digit[1]) - 1].dataset.view);
 });
@@ -557,7 +561,6 @@ $("rail-lookup").addEventListener("click", openLookup);
 lookupBox.addEventListener("click", (e) => {
   if (e.target === lookupBox) lookupBox.hidden = true;
 });
-
 document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
   const typing = isEditingTarget();
@@ -850,6 +853,7 @@ function wireApp() {
       const active = document.querySelector(".rail-link.active")?.dataset.view;
       if (active === "bank") renderBank();
       else if (active === "today") renderToday();
+      else if (active === "stats") renderStatsView(app.getBank());
       else refreshCounts();
     },
   });

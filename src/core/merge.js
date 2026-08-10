@@ -31,7 +31,13 @@ import { todayISO } from "./srs.js";
 /** A word that has never been reviewed carries no scheduling history to lose. */
 function pristine(w) {
   const s = w.srs ?? {};
-  return !s.last && (s.reps ?? 0) === 0 && (s.lapses ?? 0) === 0 && (w.times_used ?? 0) === 0;
+  return (
+    !s.last &&
+    (s.reps ?? 0) === 0 &&
+    (s.lapses ?? 0) === 0 &&
+    (w.times_used ?? 0) === 0 &&
+    Object.keys(w.review_events ?? {}).length === 0
+  );
 }
 
 function mergeEssayUseEvents(a, b) {
@@ -42,6 +48,20 @@ function mergeEssayUseEvents(a, b) {
   const events = {};
   for (const id of ids) {
     events[id] = Math.max(a.essay_use_events?.[id] ?? 0, b.essay_use_events?.[id] ?? 0);
+  }
+  return events;
+}
+
+function mergeReviewEvents(a, b) {
+  const ids = [...new Set([
+    ...Object.keys(a.review_events ?? {}),
+    ...Object.keys(b.review_events ?? {}),
+  ])].sort();
+  const events = {};
+  for (const id of ids) {
+    const local = a.review_events?.[id];
+    const remote = b.review_events?.[id];
+    events[id] = !local ? remote : !remote ? local : local >= remote ? local : remote;
   }
   return events;
 }
@@ -117,14 +137,16 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
       continue;
     }
     const winner = beats(w, prev) ? w : prev;
-    // Essay usage is unionable metadata, not part of the LWW word edit. Each
-    // explicit essay log has a random id, so concurrent offline logs survive
-    // while the same event observed twice is counted only once.
-    const events = mergeEssayUseEvents(w, prev);
+    // Essay and review activity are unionable metadata, not part of the LWW
+    // word edit. Unique event ids preserve concurrent offline activity while
+    // an event observed on both devices is counted exactly once.
+    const essayEvents = mergeEssayUseEvents(w, prev);
+    const reviewEvents = mergeReviewEvents(w, prev);
     words.set(w.word, {
       ...winner,
-      essay_use_events: events,
-      essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
+      essay_use_events: essayEvents,
+      essay_uses: Object.values(essayEvents).reduce((sum, count) => sum + count, 0),
+      review_events: reviewEvents,
     });
   }
 
