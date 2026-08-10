@@ -25,6 +25,7 @@ function word(name, updated, extra = {}) {
     essay_uses: 0,
     essay_use_events: {},
     updated,
+    definition_updated: updated,
     created: updated,
     ...extra,
   };
@@ -53,6 +54,66 @@ test("edit direction does not depend on argument order", () => {
   const remote = bank([word("demise", t(200), { times_used: 5 })]);
   assert.equal(mergeBanks(local, remote, DAY).words[0].times_used, 5);
   assert.equal(mergeBanks(remote, local, DAY).words[0].times_used, 5);
+});
+
+test("dictionary refresh and review history merge independently", () => {
+  const clarifiedOnStaleDevice = word("poignantly", t(200), {
+    created: t(100),
+    definition_updated: t(900),
+    times_used: 2,
+    srs: {
+      reps: 2,
+      lapses: 0,
+      ease: 2.5,
+      interval: 6,
+      due: "2026-07-26",
+      last: "2026-07-19",
+    },
+    senses: [
+      {
+        pos: "adverb",
+        def: "Depending on context: movingly or touchingly.",
+        example: null,
+      },
+    ],
+    source: "Wiktionary · clarification via Datamuse",
+    source_url: "https://en.wiktionary.org/wiki/poignantly",
+    clarification_url: "https://api.datamuse.com/words?ml=poignantly",
+  });
+  const reviewedOnOtherDevice = word("poignantly", t(800), {
+    created: t(100),
+    definition_updated: t(100),
+    times_used: 8,
+    srs: {
+      reps: 6,
+      lapses: 1,
+      ease: 2.4,
+      interval: 40,
+      due: "2026-08-30",
+      last: DAY,
+    },
+    senses: [{ pos: "adverb", def: "In a poignant manner.", example: null }],
+    source: "Wiktionary",
+    source_url: "https://en.wiktionary.org/wiki/poignantly",
+  });
+
+  for (const merged of [
+    mergeBanks(bank([clarifiedOnStaleDevice]), bank([reviewedOnOtherDevice]), DAY),
+    mergeBanks(bank([reviewedOnOtherDevice]), bank([clarifiedOnStaleDevice]), DAY),
+  ]) {
+    const result = merged.words[0];
+    assert.equal(result.updated, t(800), "newer review/base state wins its own clock");
+    assert.equal(result.times_used, 8);
+    assert.equal(result.srs.reps, 6);
+    assert.equal(result.srs.interval, 40);
+    assert.equal(
+      result.senses[0].def,
+      "Depending on context: movingly or touchingly.",
+      "newer dictionary state survives independently"
+    );
+    assert.equal(result.source, "Wiktionary · clarification via Datamuse");
+    assert.equal(result.definition_updated, t(900));
+  }
 });
 
 test("a delete beats an older edit on the other device", () => {
@@ -162,6 +223,7 @@ test("a v1 bank with no sync fields merges without losing words", () => {
   assert.deepEqual(merged.words.map((w) => w.word), ["demise"]);
   assert.equal(merged.version, 3);
   assert.ok(typeof merged.words[0].updated === "number");
+  assert.equal(merged.words[0].definition_updated, merged.words[0].created);
 });
 
 test("an empty remote leaves the local bank untouched", () => {

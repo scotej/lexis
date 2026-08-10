@@ -10,7 +10,12 @@
 
 import * as bankModel from "./bank.js";
 import { analyze } from "./essay.js";
-import { fetchDefinition, fetchSynonyms } from "./dict.js";
+import {
+  clarifyDerivativeDefinitions,
+  fetchDefinition,
+  fetchSynonyms,
+  needsDerivativeClarification,
+} from "./dict.js";
 import { mergeBanks } from "./merge.js";
 import { todayISO } from "./srs.js";
 import { isGrade } from "./srs.js";
@@ -18,10 +23,15 @@ import { isGrade } from "./srs.js";
 /**
  * @param storage  `{ load(): Promise<object|null>, save(bank): Promise<void> }`
  * @param onChange called after every mutation, so the caller can schedule a sync
+ * @param services optional dictionary overrides for deterministic tests
  */
-export function createApp(storage, onChange = () => {}) {
+export function createApp(storage, onChange = () => {}, services = {}) {
   let bank = bankModel.emptyBank();
   let mutationTail = Promise.resolve();
+  const lookupDefinition = services.fetchDefinition ?? fetchDefinition;
+  const lookupSynonyms = services.fetchSynonyms ?? fetchSynonyms;
+  const clarifyDefinition =
+    services.clarifyDerivativeDefinitions ?? clarifyDerivativeDefinitions;
 
   /**
    * Storage and sync are asynchronous, but bank mutations must commit in the
@@ -50,6 +60,16 @@ export function createApp(storage, onChange = () => {}) {
     // The bank is deliberately JSON-only because it is encrypted and synced as
     // JSON. Cloning gives multi-field mutations transactional save semantics.
     return JSON.parse(JSON.stringify(bank));
+  }
+
+  function dictionaryFields(entry) {
+    return {
+      phonetic: entry.phonetic ?? null,
+      senses: entry.senses,
+      source: entry.source,
+      source_url: entry.source_url,
+      clarification_url: entry.clarification_url ?? null,
+    };
   }
 
   function newEssayLogId() {
@@ -105,8 +125,8 @@ export function createApp(storage, onChange = () => {}) {
       if (bankModel.find(bank, w)) {
         throw new Error(`“${w}” is already in your bank`);
       }
-      const dict = await fetchDefinition(w);
-      const synonyms = await fetchSynonyms(w);
+      const dict = await lookupDefinition(w);
+      const synonyms = await lookupSynonyms(w);
       return enqueueMutation(async () => {
         // Another lookup for the same word may have completed while the
         // network requests above were in flight.
@@ -132,11 +152,77 @@ export function createApp(storage, onChange = () => {}) {
       });
     },
 
-    async todayList() {
+    async todayList({ clarifyDefinitions = false } = {}) {
+      if (!clarifyDefinitions) {
+        return enqueueMutation(async () => {
+          // Only write when the list genuinely changed; this is called on every
+          // count refresh, and persisting unconditionally would queue a sync.
+          if (bankModel.ensureTodayList(bank, todayISO())) await persist();
+          return bankModel.todayView(bank);
+        });
+      }
+
+      // Build a candidate list from a clone, then release the mutation queue
+      // while the independent lexical requests run in parallel. A slow network
+      // must not prevent a tick, sync, or essay save from committing.
+      const candidates = await enqueueMutation(async () => {
+        const next = cloneBank();
+        const listChanged = bankModel.ensureTodayList(next, todayISO());
+        const entries = next.today.words
+          .map((word) => bankModel.find(next, word))
+          .filter((entry) => entry && needsDerivativeClarification(entry))
+          .map((entry) => {
+            const dictionary = dictionaryFields(entry);
+            return {
+              word: entry.word,
+              dictionary,
+              fingerprint: JSON.stringify(dictionary),
+            };
+          });
+
+        if (!entries.length) {
+          if (listChanged) await persistReplacement(next);
+          return null;
+        }
+        return entries;
+      });
+
+      if (!candidates) return bankModel.todayView(bank);
+
+      const clarified = await Promise.all(
+        candidates.map(async (candidate) => {
+          try {
+            return {
+              ...candidate,
+              dictionary: await clarifyDefinition(candidate.word, candidate.dictionary),
+            };
+          } catch {
+            // Clarification is an opportunistic upgrade. Offline Today remains
+            // fully usable with the original human-edited definition.
+            return null;
+          }
+        })
+      );
+
       return enqueueMutation(async () => {
-        // Only write when the list genuinely changed; this is called on every
-        // render, and persisting unconditionally would queue a sync each time.
-        if (bankModel.ensureTodayList(bank, todayISO())) await persist();
+        const next = cloneBank();
+        let changed = bankModel.ensureTodayList(next, todayISO());
+        const visible = new Set(next.today.words);
+        for (const result of clarified) {
+          if (!result || !visible.has(result.word)) continue;
+          const current = bankModel.find(next, result.word);
+          // A sync may have supplied a newer definition while the lookup was
+          // pending. Never overwrite it with a result based on stale senses.
+          if (
+            !current ||
+            !needsDerivativeClarification(current) ||
+            JSON.stringify(dictionaryFields(current)) !== result.fingerprint
+          ) {
+            continue;
+          }
+          changed = bankModel.updateDefinition(next, result.word, result.dictionary) || changed;
+        }
+        if (changed) await persistReplacement(next);
         return bankModel.todayView(bank);
       });
     },

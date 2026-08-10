@@ -27,6 +27,8 @@ writing, deliberately *not* added to the bank.
 asks you to work them into that day's writing. Ticking a word counts as a
 successful review. If you want a different selection, **refresh list** rotates
 in the next due words without erasing anything you have already practised.
+When an older stored adverb reaches Today, its opaque definition is upgraded
+with the same lexical clarification used for newly added words.
 
 **Review.** Classic flashcards over the same schedule: see the word, recall
 the meaning, grade yourself *again / hard / good / easy*. Scheduling is SM-2,

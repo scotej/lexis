@@ -254,8 +254,25 @@ addForm.addEventListener("submit", async (e) => {
 
 /* ---- today ---- */
 
+let todayRenderRequest = 0;
+
 async function renderToday() {
+  const request = ++todayRenderRequest;
   const view = await app.todayList();
+  if (request !== todayRenderRequest) return;
+  drawToday(view);
+
+  // Stored entries are useful even when the lexical APIs are slow or offline.
+  // Paint them first, then replace only this still-current render if an older
+  // opaque definition can be clarified in the background. This second call can
+  // persist an upgrade, so route failures through the normal save-error UI.
+  await mutate(async () => {
+    const clarified = await app.todayList({ clarifyDefinitions: true });
+    if (request === todayRenderRequest) drawToday(clarified);
+  });
+}
+
+function drawToday(view) {
   const date = new Date(`${view.date}T00:00:00`);
   $("today-date").textContent = date
     .toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })
