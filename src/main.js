@@ -21,6 +21,12 @@ function el(tag, className, text) {
 
 const $ = (id) => document.getElementById(id);
 
+function isEditingTarget(target = document.activeElement) {
+  return Boolean(
+    target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)
+  );
+}
+
 let platform = null;
 let app = null;
 let sync = null;
@@ -79,7 +85,7 @@ function switchView(name) {
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (aboutDialog.open) return;
-  if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
+  if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
   const digit = /^Digit([1-5])$/.exec(e.code);
   if (!digit) return;
@@ -124,7 +130,9 @@ function dueLabel(word) {
   return { text: `due in ${days}d`, urgent: false };
 }
 
-function entryNode(word, expanded) {
+const expandedWords = new Set();
+
+function entryNode(word) {
   const wrap = el("article", "entry");
   const head = el("button", "entry-head");
   head.append(el("span", "headword", word.word));
@@ -136,7 +144,7 @@ function entryNode(word, expanded) {
   wrap.append(head);
 
   const body = el("div", "entry-body");
-  body.hidden = !expanded;
+  body.hidden = !expandedWords.has(word.word);
   word.senses.forEach((s, i) => body.append(senseNode(s, i)));
 
   if (word.synonyms.length) {
@@ -165,6 +173,7 @@ function entryNode(word, expanded) {
   del.addEventListener("click", () =>
     mutate(async () => {
       await app.deleteWord(word.word);
+      expandedWords.delete(word.word);
       renderBank();
       refreshCounts();
     })
@@ -177,22 +186,31 @@ function entryNode(word, expanded) {
 
   head.addEventListener("click", () => {
     body.hidden = !body.hidden;
+    if (body.hidden) expandedWords.delete(word.word);
+    else expandedWords.add(word.word);
   });
   return wrap;
 }
 
-let expandedWord = null;
+const bankSort = $("bank-sort");
+
+bankSort.addEventListener("change", () => renderBank());
 
 async function renderBank() {
-  const words = app.listWords();
+  const words = app.listWords(bankSort.value);
+  const liveWords = new Set(words.map((word) => word.word));
+  for (const word of expandedWords) {
+    if (!liveWords.has(word)) expandedWords.delete(word);
+  }
   const list = $("word-list");
   list.replaceChildren();
-  words.forEach((w) => list.append(entryNode(w, w.word === expandedWord)));
+  words.forEach((w) => list.append(entryNode(w)));
   $("bank-empty").hidden = words.length > 0;
+  $("bank-tools").hidden = words.length < 2;
 
   const guide = $("guide-words");
   if (words.length >= 2) {
-    const alpha = words.map((w) => w.word).sort();
+    const alpha = app.listWords("word-asc").map((w) => w.word);
     guide.textContent = `${alpha[0]} — ${alpha[alpha.length - 1]}`;
     guide.hidden = false;
   } else {
@@ -205,6 +223,11 @@ const addForm = $("add-form");
 const addInput = $("add-input");
 const addStatus = $("add-status");
 
+addInput.addEventListener("input", () => {
+  addStatus.hidden = true;
+  addStatus.classList.remove("error");
+});
+
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const word = addInput.value.trim();
@@ -215,10 +238,11 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
     const entry = await app.addWord(word);
-    expandedWord = entry.word;
+    expandedWords.add(entry.word);
     addInput.value = "";
-    addStatus.hidden = true;
     await renderBank();
+    addStatus.textContent = `added “${entry.word}”`;
+    addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
     addStatus.classList.add("error");
@@ -371,7 +395,7 @@ document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
   if (aboutDialog.open) return;
   const reviewActive = $("view-review").classList.contains("active");
-  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  const typing = isEditingTarget();
   if (reviewActive && currentReveal && !typing && $("lookup").hidden) {
     e.preventDefault();
     currentReveal();
@@ -536,7 +560,7 @@ lookupBox.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
-  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  const typing = isEditingTarget();
   // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
   if (
     (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) ||
@@ -604,7 +628,7 @@ function renderLookupResult(word, dict) {
       lookupStatus.textContent = `adding “${word}”…`;
       try {
         await app.addWord(word);
-        expandedWord = word;
+        expandedWords.add(word);
         await renderBank();
         lookupStatus.textContent = `“${word}” is in your bank now`;
         add.replaceWith(el("span", null, "in your bank"));

@@ -217,14 +217,46 @@ main {
 
 /* ---- bank ---- */
 
+.bank-tools {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 8px;
+  margin-bottom: 22px;
+}
+
 .guide-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   letter-spacing: 0.1em;
   font-variant: small-caps;
   color: var(--faint);
-  border-bottom: 1px solid var(--hairline);
-  padding-bottom: 8px;
-  margin-bottom: 22px;
+}
+
+.bank-sort {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bank-sort select {
+  max-width: 160px;
+  padding: 2px 4px;
+  color: var(--faint);
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  font: inherit;
+  color-scheme: light dark;
+  cursor: pointer;
 }
 
 .add-form {

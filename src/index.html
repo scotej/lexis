@@ -111,11 +111,28 @@
     <main>
       <!-- bank -->
       <section id="view-bank" class="view active">
-        <p class="guide-words" id="guide-words" hidden></p>
+        <div id="bank-tools" class="bank-tools" hidden>
+          <p class="guide-words" id="guide-words" hidden></p>
+          <label class="bank-sort">
+            <span>sort by</span>
+            <select id="bank-sort" aria-label="Sort bank">
+              <option value="added-newest">date added — newest</option>
+              <option value="added-oldest">date added — oldest</option>
+              <option value="word-asc">word — A–Z</option>
+              <option value="word-desc">word — Z–A</option>
+              <option value="due-soonest">due — soonest</option>
+              <option value="due-latest">due — latest</option>
+              <option value="practised-most">practised — most</option>
+              <option value="practised-least">practised — least</option>
+              <option value="essay-most">essay uses — most</option>
+              <option value="essay-least">essay uses — least</option>
+            </select>
+          </label>
+        </div>
         <form id="add-form" class="add-form" autocomplete="off">
           <input id="add-input" type="text" placeholder="add a word, e.g. demise" spellcheck="false" aria-label="Add a word" />
         </form>
-        <p id="add-status" class="add-status" hidden></p>
+        <p id="add-status" class="add-status" role="status" hidden></p>
         <div id="word-list" class="word-list"></div>
         <p id="bank-empty" class="empty" hidden>
           No words yet. Add one above — lexis fetches its dictionary definition and suggests
