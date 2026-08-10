@@ -26,6 +26,11 @@
  */
 
 import { migrate, pruneTombstones, SCHEMA_VERSION, TODAY_TARGET } from "./bank.js";
+import {
+  archiveWordHistory,
+  mergeActivityArchives,
+  validActivityDate,
+} from "./activity.js";
 import { todayISO } from "./srs.js";
 
 /** A word that has never been reviewed carries no scheduling history to lose. */
@@ -52,18 +57,70 @@ function mergeEssayUseEvents(a, b) {
   return events;
 }
 
+function reviewMarker(word) {
+  return Number.isFinite(word?.review_events_updated) ? word.review_events_updated : null;
+}
+
+function reviewSnapshot(word, peerMarker = 0) {
+  const events = { ...(word.review_events ?? {}) };
+  const updated = Number.isFinite(word.updated) ? word.updated : 0;
+  const marker = reviewMarker(word);
+  const last = word.srs?.last;
+  let coveredThrough = marker ?? 0;
+
+  // Upgraded clients stamp the word after every review. An older client keeps
+  // that unknown marker when it loads the word, but its legacy grade/tick code
+  // moves `updated` without moving the marker. That gap is therefore a review
+  // we can recover deterministically, including another review on the same day.
+  const baseline = marker ?? (Number.isFinite(peerMarker) ? peerMarker : 0);
+  if (baseline > 0 && updated > baseline && validActivityDate(last)) {
+    events[`compat:${Math.trunc(updated)}:${last}`] = last;
+    coveredThrough = updated;
+  } else if (
+    marker === null &&
+    updated > 0 &&
+    validActivityDate(last) &&
+    Object.values(events).some((date) => date === last)
+  ) {
+    // First upgraded observation of a legacy/pre-marker record: migrate() has
+    // already represented the latest known review, so establish the baseline.
+    coveredThrough = updated;
+  }
+
+  return { events, coveredThrough };
+}
+
 function mergeReviewEvents(a, b) {
-  const ids = [...new Set([
-    ...Object.keys(a.review_events ?? {}),
-    ...Object.keys(b.review_events ?? {}),
-  ])].sort();
+  const local = reviewSnapshot(a, reviewMarker(b) ?? 0);
+  const remote = reviewSnapshot(b, reviewMarker(a) ?? 0);
+  const ids = [...new Set([...Object.keys(local.events), ...Object.keys(remote.events)])].sort();
   const events = {};
   for (const id of ids) {
-    const local = a.review_events?.[id];
-    const remote = b.review_events?.[id];
-    events[id] = !local ? remote : !remote ? local : local >= remote ? local : remote;
+    const localDate = local.events[id];
+    const remoteDate = remote.events[id];
+    events[id] = !localDate
+      ? remoteDate
+      : !remoteDate
+        ? localDate
+        : localDate >= remoteDate
+          ? localDate
+          : remoteDate;
   }
-  return events;
+  return {
+    events,
+    coveredThrough: Math.max(local.coveredThrough, remote.coveredThrough),
+  };
+}
+
+function normalizeReviewHistory(word) {
+  const snapshot = reviewSnapshot(word);
+  return {
+    ...word,
+    review_events: snapshot.events,
+    ...(snapshot.coveredThrough > 0
+      ? { review_events_updated: snapshot.coveredThrough }
+      : {}),
+  };
 }
 
 /** Stable, bounded union for derived checklist state. */
@@ -125,6 +182,10 @@ function latestTombstones(a, b) {
 export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const local = migrate(localRaw);
   const remote = migrate(remoteRaw);
+  let activityArchive = mergeActivityArchives(
+    localRaw?.activity_archive,
+    remoteRaw?.activity_archive
+  );
 
   const tombs = latestTombstones(local, remote);
 
@@ -133,7 +194,7 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   for (const w of [...local.words, ...remote.words]) {
     const prev = words.get(w.word);
     if (!prev) {
-      words.set(w.word, { ...w });
+      words.set(w.word, normalizeReviewHistory(w));
       continue;
     }
     const winner = beats(w, prev) ? w : prev;
@@ -141,12 +202,15 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     // word edit. Unique event ids preserve concurrent offline activity while
     // an event observed on both devices is counted exactly once.
     const essayEvents = mergeEssayUseEvents(w, prev);
-    const reviewEvents = mergeReviewEvents(w, prev);
+    const reviewHistory = mergeReviewEvents(w, prev);
     words.set(w.word, {
       ...winner,
       essay_use_events: essayEvents,
       essay_uses: Object.values(essayEvents).reduce((sum, count) => sum + count, 0),
-      review_events: reviewEvents,
+      review_events: reviewHistory.events,
+      ...(reviewHistory.coveredThrough > 0
+        ? { review_events_updated: reviewHistory.coveredThrough }
+        : {}),
     });
   }
 
@@ -160,7 +224,12 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const survivors = [];
   for (const [key, w] of words) {
     const tomb = tombs.get(key);
-    if (tomb && tomb.at > (w.created ?? 0)) continue; // still deleted
+    if (tomb && tomb.at > (w.created ?? 0)) {
+      // A delete changes inventory, not history. This also protects history
+      // when the deletion came from an older client that did not archive it.
+      activityArchive = archiveWordHistory(activityArchive, w);
+      continue;
+    }
     if (tomb) tombs.delete(key); // re-added after the delete
     survivors.push(w);
   }
@@ -223,6 +292,7 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     words: survivors,
     deleted: [...tombs.values()],
     today: todayList,
+    activity_archive: activityArchive,
   };
   pruneTombstones(merged, today);
   return merged;

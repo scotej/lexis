@@ -90,7 +90,7 @@ export function renderStatsView(bank) {
     el(
       "p",
       "lede",
-      `Your current bank over the last ${stats.days} days, from ${formatDate(stats.start)} to ${formatDate(stats.end)}.`
+      `Your activity over the last ${stats.days} days, from ${formatDate(stats.start)} to ${formatDate(stats.end)}.`
     )
   );
 
@@ -129,10 +129,16 @@ export function renderStatsView(bank) {
       el(
         "p",
         "stats-note",
-        "Older bank data did not store every review event, so pre-update history can only recover each word’s latest known review. Removed words are not included."
+        "Older bank data did not store every review event, so pre-update history can only recover each surviving word’s latest known review. Activity recorded by this version remains in these statistics even if the word is later removed."
       )
     );
   } else {
-    view.append(el("p", "stats-note", "Removed words are not included in these statistics."));
+    view.append(
+      el(
+        "p",
+        "stats-note",
+        "Recorded activity remains in these statistics even if the word is later removed."
+      )
+    );
   }
 }
