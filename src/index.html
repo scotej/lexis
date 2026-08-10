@@ -103,7 +103,9 @@
       </div>
       <button id="sync-line" class="sync-line" hidden></button>
       <button id="update-line" class="update-line" hidden></button>
-      <p class="rail-foot">definitions from Wiktionary<br /><span id="rail-privacy"></span></p>
+      <button id="rail-about" class="rail-about" type="button" aria-haspopup="dialog">
+        about
+      </button>
     </nav>
 
     <main>
@@ -215,6 +217,17 @@
         </form>
       </section>
     </main>
+
+    <dialog id="about-dialog" class="about-dialog" aria-labelledby="about-title">
+      <div class="about-head">
+        <h2 id="about-title" class="wordmark about-mark">lexis<span class="stop">.</span></h2>
+        <form method="dialog">
+          <button class="link-quiet" type="submit">close</button>
+        </form>
+      </div>
+      <p class="about-lede">A minimalist word bank for essay writers.</p>
+      <p class="about-source">Definitions from Wiktionary.</p>
+    </dialog>
 
     <!-- quick lookup: “/” or ⌘K — a definition without adding to the bank -->
     <div id="lookup" class="lookup" hidden>

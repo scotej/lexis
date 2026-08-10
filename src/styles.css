@@ -156,14 +156,18 @@ button {
   cursor: default;
 }
 
-.rail-foot {
+.rail-about {
   margin-top: auto;
+  padding: 6px 0;
+  text-align: left;
   font-size: 11px;
-  line-height: 1.6;
   color: var(--faint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.update-line:not([hidden]) + .rail-foot {
+.sync-line:not([hidden]) ~ .rail-about,
+.update-line:not([hidden]) + .rail-about {
   margin-top: 10px;
 }
 
@@ -765,6 +769,46 @@ main {
 .lookup-hint {
   margin-top: 16px;
   font-size: 11px;
+  color: var(--faint);
+}
+
+/* ---- about ---- */
+
+.about-dialog {
+  width: calc(100% - 48px);
+  max-width: 420px;
+  margin: auto;
+  padding: 24px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
+}
+
+.about-dialog::backdrop {
+  background: rgba(12, 11, 10, 0.35);
+}
+
+.about-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.about-mark {
+  margin-bottom: 18px;
+}
+
+.about-lede {
+  font-family: var(--serif);
+  font-size: 16px;
+}
+
+.about-source {
+  margin-top: 14px;
+  font-size: 12px;
   color: var(--faint);
 }
 

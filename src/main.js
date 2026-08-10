@@ -55,6 +55,9 @@ railLinks.forEach((btn, i) => {
   btn.setAttribute("aria-keyshortcuts", String(i + 1));
 });
 
+const aboutDialog = $("about-dialog");
+$("rail-about").addEventListener("click", () => aboutDialog.showModal());
+
 function switchView(name) {
   // The gate overlays the rail but doesn't inert it, so a keyboard user can
   // still reach these buttons before the app exists.
@@ -75,6 +78,7 @@ function switchView(name) {
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (aboutDialog.open) return;
   if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
   if (!$("lookup").hidden) return;
   const digit = /^Digit([1-5])$/.exec(e.code);
@@ -365,6 +369,7 @@ function renderCard() {
 let currentReveal = null;
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
+  if (aboutDialog.open) return;
   const reviewActive = $("view-review").classList.contains("active");
   const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
   if (reviewActive && currentReveal && !typing && $("lookup").hidden) {
@@ -530,6 +535,7 @@ lookupBox.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (aboutDialog.open) return;
   const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
   // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
   if (
@@ -952,11 +958,9 @@ function buildDesktopUnlock() {
 async function boot() {
   if (isDesktop()) {
     platform = createDesktopPlatform();
-    $("rail-privacy").textContent = "your bank stays on this device";
     await startDesktop();
   } else {
     platform = createWebPlatform();
-    $("rail-privacy").textContent = "encrypted before it leaves this device";
     if (!cryptoAvailable()) {
       document.body.replaceChildren(
         el("p", "empty", "lexis needs a browser with Web Crypto (and a secure https connection).")
