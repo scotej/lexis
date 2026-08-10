@@ -136,7 +136,7 @@ button {
   color: var(--faint);
   font-size: 11px;
   vertical-align: super;
-  margin-left: 4px;
+  margin-left: 2px;
 }
 
 .update-line {
