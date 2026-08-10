@@ -111,6 +111,84 @@ test("due words are those scheduled today or earlier", () => {
   assert.deepEqual(due, ["past", "today"]);
 });
 
+test("bank sorting uses creation time without changing stored order", () => {
+  const b = bank.emptyBank();
+  const alpha = entry("alpha");
+  const bravo = entry("bravo");
+  const candid = entry("candid");
+  alpha.created = Date.parse("2026-07-19T09:00:00Z");
+  bravo.created = Date.parse("2026-07-20T09:00:00Z");
+  candid.created = Date.parse("2026-07-20T10:00:00Z");
+  alpha.updated = Date.parse("2026-07-21T12:00:00Z");
+  b.words = [bravo, alpha, candid];
+  const stored = b.words.map((word) => word.word);
+
+  assert.deepEqual(bank.listWords(b).map((word) => word.word), ["candid", "bravo", "alpha"]);
+  assert.deepEqual(bank.listWords(b, "added-oldest").map((word) => word.word), [
+    "alpha",
+    "bravo",
+    "candid",
+  ]);
+  assert.deepEqual(b.words.map((word) => word.word), stored, "display sorting must not alter sync data");
+});
+
+test("legacy words fall back to their day-only added timestamp", () => {
+  const b = bank.emptyBank();
+  const earlier = entry("earlier");
+  const later = entry("later");
+  delete earlier.created;
+  delete later.created;
+  earlier.added = "2026-07-01";
+  later.added = "2026-07-03";
+  b.words = [earlier, later];
+
+  assert.deepEqual(bank.listWords(b).map((word) => word.word), ["later", "earlier"]);
+});
+
+test("bank sorting supports alphabetical and study-oriented orders", () => {
+  const b = bank.emptyBank();
+  const alpha = entry("alpha", "2026-07-20");
+  const bravo = entry("bravo", "2026-07-18");
+  const candid = entry("candid", "2026-07-25");
+  alpha.times_used = 2;
+  bravo.times_used = 1;
+  candid.times_used = 3;
+  alpha.essay_uses = 5;
+  bravo.essay_uses = 5;
+  candid.essay_uses = 0;
+  b.words = [candid, alpha, bravo];
+
+  const names = (order) => bank.listWords(b, order).map((word) => word.word);
+  assert.deepEqual(names("word-asc"), ["alpha", "bravo", "candid"]);
+  assert.deepEqual(names("word-desc"), ["candid", "bravo", "alpha"]);
+  assert.deepEqual(names("due-soonest"), ["bravo", "alpha", "candid"]);
+  assert.deepEqual(names("due-latest"), ["candid", "alpha", "bravo"]);
+  assert.deepEqual(names("practised-most"), ["candid", "alpha", "bravo"]);
+  assert.deepEqual(names("practised-least"), ["bravo", "alpha", "candid"]);
+  assert.deepEqual(names("essay-most"), ["alpha", "bravo", "candid"]);
+  assert.deepEqual(names("essay-least"), ["candid", "alpha", "bravo"]);
+});
+
+test("alphabetical sorting handles valid accented words naturally", () => {
+  const b = bank.emptyBank();
+  b.words = [entry("zebra"), entry("éclair"), entry("apple")];
+
+  assert.deepEqual(bank.listWords(b, "word-asc").map((word) => word.word), [
+    "apple",
+    "éclair",
+    "zebra",
+  ]);
+  assert.deepEqual(bank.listWords(b, "word-desc").map((word) => word.word), [
+    "zebra",
+    "éclair",
+    "apple",
+  ]);
+});
+
+test("bank sorting rejects an unknown order", () => {
+  assert.throws(() => bank.listWords(bank.emptyBank(), "surprise"), /unknown bank sort/);
+});
+
 test("migrating a v1 bank dates its words from when they were added", () => {
   const migrated = bank.migrate({
     words: [{ word: "demise", added: "2026-07-01", srs: newSrs("2026-07-01"), senses: [] }],

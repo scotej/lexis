@@ -141,8 +141,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       });
     },
 
-    listWords() {
-      return bankModel.listWords(bank);
+    listWords(order) {
+      return bankModel.listWords(bank, order);
     },
 
     async deleteWord(word) {

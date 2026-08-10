@@ -362,3 +362,14 @@ test("a sync merge queued behind an essay save preserves both changes", async ()
   assert.equal(bankModel.find(app.getBank(), "zenith").essay_uses, 1);
   assert.ok(bankModel.find(app.getBank(), "quasar"));
 });
+
+test("listing a sorted bank is presentation-only", async () => {
+  const storage = new MemoryStorage(essayBank());
+  const app = createApp(storage);
+  await app.init();
+
+  const words = app.listWords("word-desc").map((word) => word.word);
+  assert.equal(words[0], "zenith");
+  assert.equal(words.at(-1), "alpha");
+  assert.equal(storage.saves, 0);
+});

@@ -417,8 +417,44 @@ export function dueWords(bank, today) {
     .sort((a, b) => (a.srs.due < b.srs.due ? -1 : a.srs.due > b.srs.due ? 1 : 0));
 }
 
-export function listWords(bank) {
-  return [...bank.words].sort((a, b) =>
-    a.added > b.added ? -1 : a.added < b.added ? 1 : a.word < b.word ? -1 : 1
-  );
+const wordCollator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+
+function compareWords(a, b) {
+  const natural = wordCollator.compare(a.word, b.word);
+  if (natural !== 0) return natural;
+  return a.word < b.word ? -1 : a.word > b.word ? 1 : 0;
+}
+
+function addedAt(word) {
+  if (Number.isFinite(word.created)) return word.created;
+  const parsed = Date.parse(`${word.added ?? ""}T00:00:00Z`);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function countOf(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareDue(a, b) {
+  return a.srs.due < b.srs.due ? -1 : a.srs.due > b.srs.due ? 1 : 0;
+}
+
+const wordSorters = new Map([
+  ["added-newest", (a, b) => addedAt(b) - addedAt(a)],
+  ["added-oldest", (a, b) => addedAt(a) - addedAt(b)],
+  ["word-asc", compareWords],
+  ["word-desc", (a, b) => -compareWords(a, b)],
+  ["due-soonest", compareDue],
+  ["due-latest", (a, b) => -compareDue(a, b)],
+  ["practised-most", (a, b) => countOf(b.times_used) - countOf(a.times_used)],
+  ["practised-least", (a, b) => countOf(a.times_used) - countOf(b.times_used)],
+  ["essay-most", (a, b) => countOf(b.essay_uses) - countOf(a.essay_uses)],
+  ["essay-least", (a, b) => countOf(a.essay_uses) - countOf(b.essay_uses)],
+]);
+
+/** Returns a sorted copy for display without changing the synced bank order. */
+export function listWords(bank, order = "added-newest") {
+  const compare = wordSorters.get(order);
+  if (!compare) throw new RangeError(`unknown bank sort: ${order}`);
+  return [...bank.words].sort((a, b) => compare(a, b) || compareWords(a, b));
 }
