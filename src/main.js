@@ -78,6 +78,7 @@ function switchView(name) {
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (aboutDialog.open) return;
   if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
   if (!$("lookup").hidden) return;
   const digit = /^Digit([1-5])$/.exec(e.code);
@@ -368,6 +369,7 @@ function renderCard() {
 let currentReveal = null;
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
+  if (aboutDialog.open) return;
   const reviewActive = $("view-review").classList.contains("active");
   const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
   if (reviewActive && currentReveal && !typing && $("lookup").hidden) {
@@ -533,6 +535,7 @@ lookupBox.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (aboutDialog.open) return;
   const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
   // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
   if (
