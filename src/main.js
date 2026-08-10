@@ -275,6 +275,7 @@ async function renderToday() {
   const moreWrap = $("today-more-wrap");
   const more = $("today-more");
   moreWrap.hidden = !view.can_expand;
+  more.disabled = !view.can_expand;
   more.textContent = `another ${view.next_batch_size} word${view.next_batch_size === 1 ? "" : "s"}`;
 
   if (view.items.length) {
