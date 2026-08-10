@@ -77,9 +77,10 @@ function switchView(name) {
   if (name === "review") startReview();
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
+  if (name === "settings") renderSettings();
 }
 
-// 1–5 jump straight to a view, top to bottom, matching the rail. Bare digits
+// 1–6 jump straight to a view, top to bottom, matching the rail. Bare digits
 // rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
@@ -87,7 +88,7 @@ document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
   if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
-  const digit = /^Digit([1-5])$/.exec(e.code);
+  const digit = /^Digit([1-6])$/.exec(e.code);
   if (!digit) return;
   switchView(railLinks[Number(digit[1]) - 1].dataset.view);
 });
@@ -264,15 +265,24 @@ async function renderToday() {
   const list = $("today-list");
   list.replaceChildren();
   $("today-empty").hidden = view.items.length > 0;
-  $("today-refresh").disabled = !view.can_refresh;
-  $("today-refresh").title = view.can_refresh
-    ? "replace this list with other words from your bank"
-    : "add more than ten words to rotate today’s list";
+
+  const refresh = $("today-refresh");
+  refresh.disabled = !view.can_refresh;
+  refresh.title = view.can_refresh
+    ? `replace this list with another ${view.target}-word selection`
+    : "no alternative selection is available";
+
+  const moreWrap = $("today-more-wrap");
+  const more = $("today-more");
+  moreWrap.hidden = !view.can_expand;
+  more.textContent = `another ${view.next_batch_size} word${view.next_batch_size === 1 ? "" : "s"}`;
 
   if (view.items.length) {
     $("today-lede").textContent =
       view.remaining === 0
-        ? "All used. Your writing did the remembering today."
+        ? view.can_expand
+          ? `All ${view.completed_today} used today. You can take another ${view.next_batch_size} word${view.next_batch_size === 1 ? "" : "s"} when you’re ready.`
+          : "All used. Your writing did the remembering today."
         : `Work these into today’s writing — ${view.remaining} of ${view.items.length} to go. Ticking one schedules its next return.`;
   } else {
     $("today-lede").textContent = "";
@@ -306,6 +316,18 @@ $("today-refresh").addEventListener("click", async (event) => {
   // A failed save leaves the button in place; let the user retry. A successful
   // render decides whether another rotation is possible.
   if (button.isConnected && button.title.startsWith("replace")) button.disabled = false;
+});
+
+$("today-more").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  await mutate(async () => {
+    await app.expandTodayList();
+    await renderToday();
+    await refreshCounts();
+  });
+  // On failure the existing completed batch is still visible and expandable.
+  if (button.isConnected && !$("today-more-wrap").hidden) button.disabled = false;
 });
 
 /* ---- review ---- */
@@ -727,6 +749,45 @@ $("sync-setup").addEventListener("submit", async (e) => {
   }
 });
 
+/* ---- settings ---- */
+
+const settingsForm = $("settings-form");
+const settingsDailyTarget = $("settings-daily-target");
+const settingsStatus = $("settings-status");
+
+function renderSettings() {
+  const settings = app.getSettings();
+  settingsDailyTarget.min = String(settings.min_daily_target);
+  settingsDailyTarget.max = String(settings.max_daily_target);
+  settingsDailyTarget.value = String(settings.daily_target);
+}
+
+settingsDailyTarget.addEventListener("input", () => {
+  settingsStatus.hidden = true;
+  settingsStatus.classList.remove("error");
+});
+
+settingsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  settingsStatus.hidden = true;
+  settingsStatus.classList.remove("error");
+  try {
+    const settings = await app.setDailyTarget(settingsDailyTarget.value);
+    settingsDailyTarget.value = String(settings.daily_target);
+    settingsStatus.textContent = `Daily batches now contain ${settings.daily_target} word${settings.daily_target === 1 ? "" : "s"}.`;
+    settingsStatus.hidden = false;
+    await refreshCounts();
+  } catch (err) {
+    settingsStatus.textContent = String(err.message ?? err);
+    settingsStatus.classList.add("error");
+    settingsStatus.hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 /* ---- updates (desktop only) ---- */
 
 async function offerUpdate() {
@@ -850,6 +911,7 @@ function wireApp() {
       const active = document.querySelector(".rail-link.active")?.dataset.view;
       if (active === "bank") renderBank();
       else if (active === "today") renderToday();
+      else if (active === "settings") renderSettings();
       else refreshCounts();
     },
   });

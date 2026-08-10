@@ -99,6 +99,7 @@
         <button class="rail-link" data-view="review">review<span class="rail-count" id="count-review"></span></button>
         <button class="rail-link" data-view="essay">essay</button>
         <button class="rail-link" data-view="sync">sync</button>
+        <button class="rail-link" data-view="settings">settings</button>
         <button class="rail-link" id="rail-lookup" title="shortcut: /">lookup<span class="rail-hint">/</span></button>
       </div>
       <button id="sync-line" class="sync-line" hidden></button>
@@ -150,6 +151,9 @@
           <p class="lede" id="today-lede"></p>
         </header>
         <div id="today-list" class="today-list"></div>
+        <div id="today-more-wrap" class="essay-actions" hidden>
+          <button id="today-more" class="button-primary" type="button">another batch</button>
+        </div>
         <p id="today-empty" class="empty" hidden>
           Nothing to practise today. Add words to your bank first.
         </p>
@@ -231,6 +235,37 @@
           </label>
           <button class="button-primary" type="submit">connect</button>
           <p id="ds-error" class="gate-error" hidden></p>
+        </form>
+      </section>
+
+      <!-- settings -->
+      <section id="view-settings" class="view">
+        <header class="view-head">
+          <p class="eyebrow">settings</p>
+          <p class="lede">
+            Choose how many words appear in each daily batch. After you finish one batch,
+            Today can give you another without resetting anything you already practised.
+          </p>
+        </header>
+        <form id="settings-form" class="gate-form sync-form" autocomplete="off">
+          <label class="field">
+            <span>words per daily batch</span>
+            <input
+              id="settings-daily-target"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              inputmode="numeric"
+              aria-label="Words per daily batch"
+            />
+            <small>
+              Defaults to 10. Increasing it tops up today. Decreasing it applies on the next
+              refreshed list, extra batch, or new day.
+            </small>
+          </label>
+          <button class="button-primary" type="submit">save settings</button>
+          <p id="settings-status" class="add-status" role="status" hidden></p>
         </form>
       </section>
     </main>

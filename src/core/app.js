@@ -125,6 +125,20 @@ export function createApp(storage, onChange = () => {}) {
       return bankModel.listWords(bank, order);
     },
 
+    getSettings() {
+      return bankModel.settingsView(bank);
+    },
+
+    async setDailyTarget(target) {
+      return enqueueMutation(async () => {
+        const next = cloneBank();
+        if (bankModel.setDailyTarget(next, target, todayISO())) {
+          await persistReplacement(next);
+        }
+        return bankModel.settingsView(bank);
+      });
+    },
+
     async deleteWord(word) {
       return enqueueMutation(async () => {
         bankModel.removeWord(bank, word);
@@ -145,6 +159,14 @@ export function createApp(storage, onChange = () => {}) {
       return enqueueMutation(async () => {
         const next = cloneBank();
         if (bankModel.refreshTodayList(next, todayISO())) await persistReplacement(next);
+        return bankModel.todayView(bank);
+      });
+    },
+
+    async expandTodayList() {
+      return enqueueMutation(async () => {
+        const next = cloneBank();
+        if (bankModel.expandTodayList(next, todayISO())) await persistReplacement(next);
         return bankModel.todayView(bank);
       });
     },
