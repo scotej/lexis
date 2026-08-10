@@ -561,6 +561,7 @@ $("rail-lookup").addEventListener("click", openLookup);
 lookupBox.addEventListener("click", (e) => {
   if (e.target === lookupBox) lookupBox.hidden = true;
 });
+
 document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
   const typing = isEditingTarget();
