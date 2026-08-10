@@ -58,6 +58,11 @@ export function migrate(raw) {
     // the word was created. Do not backfill from `updated`: reviews advance that
     // clock and would make stale definitions look newer than real dictionary edits.
     if (typeof w.definition_updated !== "number") w.definition_updated = w.created;
+    // Canonicalise optional dictionary fields before merge comparison. Otherwise
+    // the first shared-word merge can introduce an explicit null and make an
+    // otherwise identical second sync look like a new change.
+    if (typeof w.phonetic !== "string") w.phonetic = null;
+    if (typeof w.clarification_url !== "string") w.clarification_url = null;
     if (typeof w.times_used !== "number") w.times_used = 0;
     // Essay totals are derived from uniquely identified log events. Unioning
     // those events during sync preserves concurrent offline additions from two
