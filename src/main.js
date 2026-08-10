@@ -236,9 +236,12 @@ async function renderToday() {
 
   // Stored entries are useful even when the lexical APIs are slow or offline.
   // Paint them first, then replace only this still-current render if an older
-  // opaque definition can be clarified in the background.
-  const clarified = await app.todayList({ clarifyDefinitions: true });
-  if (request === todayRenderRequest) drawToday(clarified);
+  // opaque definition can be clarified in the background. This second call can
+  // persist an upgrade, so route failures through the normal save-error UI.
+  await mutate(async () => {
+    const clarified = await app.todayList({ clarifyDefinitions: true });
+    if (request === todayRenderRequest) drawToday(clarified);
+  });
 }
 
 function drawToday(view) {

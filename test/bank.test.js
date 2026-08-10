@@ -7,6 +7,7 @@ import { sophisticationScore, stripHtml } from "../src/core/dict.js";
 const DAY = "2026-07-20";
 
 function entry(name, due = DAY) {
+  const now = Date.now();
   return {
     word: name,
     phonetic: null,
@@ -18,8 +19,9 @@ function entry(name, due = DAY) {
     srs: { ...newSrs(DAY), due },
     times_used: 0,
     essay_uses: 0,
-    updated: Date.now(),
-    created: Date.now(),
+    updated: now,
+    definition_updated: now,
+    created: now,
   };
 }
 
@@ -113,9 +115,11 @@ test("migrating a v1 bank dates its words from when they were added", () => {
   const migrated = bank.migrate({
     words: [{ word: "demise", added: "2026-07-01", srs: newSrs("2026-07-01"), senses: [] }],
   });
+  const added = Date.parse("2026-07-01T00:00:00Z");
   assert.equal(migrated.version, 3);
-  assert.equal(migrated.words[0].updated, Date.parse("2026-07-01T00:00:00Z"));
-  assert.equal(migrated.words[0].created, Date.parse("2026-07-01T00:00:00Z"));
+  assert.equal(migrated.words[0].updated, added);
+  assert.equal(migrated.words[0].created, added);
+  assert.equal(migrated.words[0].definition_updated, added);
   assert.equal(migrated.words[0].times_used, 0);
   assert.equal(migrated.words[0].essay_uses, 0);
   assert.deepEqual(migrated.words[0].essay_use_events, {});
@@ -196,6 +200,7 @@ test("migration timestamps are timezone-independent", () => {
   });
   assert.equal(migrated.words[0].updated, 1782864000000);
   assert.equal(migrated.words[0].created, 1782864000000);
+  assert.equal(migrated.words[0].definition_updated, 1782864000000);
 });
 
 test("ticking twice in one day cannot double-advance the schedule", () => {
@@ -236,6 +241,7 @@ test("a genuine re-add gets a fresh created stamp", () => {
   );
   assert.equal(typeof w.created, "number");
   assert.equal(w.created, w.updated);
+  assert.equal(w.definition_updated, w.created);
   assert.equal(w.clarification_url, "c");
   assert.equal(w.essay_uses, 0);
   assert.deepEqual(w.essay_use_events, {});
@@ -252,6 +258,7 @@ test("updating a definition preserves the word's review and usage history", () =
   w.srs = { ...w.srs, reps: 4, interval: 12, last: DAY };
   w.created = 50;
   w.updated = 100;
+  w.definition_updated = 50;
   b.words = [w];
   const history = structuredClone({
     synonyms: w.synonyms,
@@ -260,6 +267,7 @@ test("updating a definition preserves the word's review and usage history", () =
     essay_use_events: w.essay_use_events,
     srs: w.srs,
     added: w.added,
+    updated: w.updated,
     created: w.created,
   });
 
@@ -282,7 +290,8 @@ test("updating a definition preserves the word's review and usage history", () =
 
   assert.equal(w.senses[0].def, "Depending on context: movingly or touchingly.");
   assert.equal(w.clarification_url, "https://api.datamuse.com/words?ml=poignantly");
-  assert.equal(w.updated, 500);
+  assert.equal(w.updated, 100, "definition refreshes must not advance review/base recency");
+  assert.equal(w.definition_updated, 500);
   assert.deepEqual(
     {
       synonyms: w.synonyms,
@@ -291,14 +300,20 @@ test("updating a definition preserves the word's review and usage history", () =
       essay_use_events: w.essay_use_events,
       srs: w.srs,
       added: w.added,
+      updated: w.updated,
       created: w.created,
     },
     history
   );
 
-  const updated = w.updated;
+  const definitionUpdated = w.definition_updated;
   assert.equal(bank.updateDefinition(b, "poignantly", w, 900), false);
-  assert.equal(w.updated, updated, "an identical definition must not create a sync edit");
+  assert.equal(
+    w.definition_updated,
+    definitionUpdated,
+    "an identical definition must not create a sync edit"
+  );
+  assert.equal(w.updated, 100);
 });
 
 test("manually refreshing today rotates in words outside the current list", () => {

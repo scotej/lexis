@@ -232,7 +232,7 @@ test("a pending clarification cannot overwrite a newer synced definition", async
   await started;
   const remote = structuredClone(initial);
   remote.words[0].senses[0].def = "In a deeply moving way.";
-  remote.words[0].updated = Date.now() + 1000;
+  remote.words[0].definition_updated = Date.now() + 1000;
   await app.mergeBank(remote);
   releaseLookup();
   const view = await pending;
