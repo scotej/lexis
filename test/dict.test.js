@@ -6,6 +6,7 @@ import {
   expandDerivativeDefinitions,
   fetchDefinition,
   fetchSynonyms,
+  needsDerivativeClarification,
 } from "../src/core/dict.js";
 
 function dictionary(senses) {
@@ -20,6 +21,27 @@ function dictionary(senses) {
 function candidate(word, pos, freq) {
   return { word, tags: [pos, `f:${freq}`] };
 }
+
+test("only opaque adverb glosses need derivative clarification", () => {
+  assert.equal(
+    needsDerivativeClarification(
+      dictionary([{ pos: "adverb", def: "In a poignant manner.", example: null }])
+    ),
+    true
+  );
+  assert.equal(
+    needsDerivativeClarification(
+      dictionary([{ pos: "adverb", def: "With moving emotional force.", example: null }])
+    ),
+    false
+  );
+  assert.equal(
+    needsDerivativeClarification(
+      dictionary([{ pos: "noun", def: "In a poignant manner.", example: null }])
+    ),
+    false
+  );
+});
 
 test("regular adverbs produce plausible adjective lemmas", () => {
   assert.ok(adjectiveFormsForAdverb("ardently").has("ardent"));

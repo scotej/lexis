@@ -7,8 +7,9 @@
  *
  * The rules, in order of subtlety:
  *
- *   - A word present on both sides resolves to whichever copy was edited
- *     last (`updated`, epoch ms).
+ *   - Review/base state for a word resolves by `updated` recency.
+ *   - Dictionary fields resolve independently by `definition_updated`, so an
+ *     automatic clarification cannot make stale review history win a merge.
  *   - A delete leaves a tombstone. The word stays deleted only while the
  *     tombstone is newer than the surviving copy of the word — so deleting
  *     on one device wins over an older edit on the other, but *re-adding*
@@ -22,7 +23,7 @@
  * Clock skew between devices can misorder edits made within seconds of each
  * other on the same record. For a single user moving between their own
  * machines this is acceptable; nothing is ever lost, at worst one of two
- * near-simultaneous edits to the *same word* is superseded.
+ * near-simultaneous edits to the *same field group* is superseded.
  */
 
 import { migrate, pruneTombstones, SCHEMA_VERSION, TODAY_TARGET } from "./bank.js";
@@ -44,6 +45,24 @@ function mergeEssayUseEvents(a, b) {
     events[id] = Math.max(a.essay_use_events?.[id] ?? 0, b.essay_use_events?.[id] ?? 0);
   }
   return events;
+}
+
+function dictionaryFields(w) {
+  return {
+    phonetic: w.phonetic ?? null,
+    senses: w.senses,
+    source: w.source,
+    source_url: w.source_url,
+    clarification_url: w.clarification_url ?? null,
+  };
+}
+
+/** Order-independent comparison for independently versioned dictionary state. */
+function definitionBeats(a, b) {
+  const au = a.definition_updated ?? a.created ?? 0;
+  const bu = b.definition_updated ?? b.created ?? 0;
+  if (au !== bu) return au > bu;
+  return stable(dictionaryFields(a)) > stable(dictionaryFields(b));
 }
 
 /** Stable, bounded union for derived checklist state. */
@@ -117,12 +136,15 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
       continue;
     }
     const winner = beats(w, prev) ? w : prev;
-    // Essay usage is unionable metadata, not part of the LWW word edit. Each
-    // explicit essay log has a random id, so concurrent offline logs survive
-    // while the same event observed twice is counted only once.
+    const definitionWinner = definitionBeats(w, prev) ? w : prev;
+    // Dictionary state and essay usage are independently mergeable metadata.
+    // This keeps an opportunistic definition refresh or essay log on a stale
+    // device from replacing a newer review schedule wholesale.
     const events = mergeEssayUseEvents(w, prev);
     words.set(w.word, {
       ...winner,
+      ...dictionaryFields(definitionWinner),
+      definition_updated: definitionWinner.definition_updated,
       essay_use_events: events,
       essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
     });
