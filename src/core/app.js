@@ -83,6 +83,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   }
 
   function cloneBank() {
+    // The bank is deliberately JSON-only because it is encrypted and synced as
+    // JSON. Cloning gives multi-field mutations transactional save semantics.
     return JSON.parse(JSON.stringify(bank));
   }
 
@@ -151,14 +153,17 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       });
     },
 
+    /** The in-memory bank — used by the sync layer as the local side of a merge. */
     getBank() {
       return bank;
     },
 
+    /** Waits for pending local writes before giving sync a stable snapshot. */
     async getBankSnapshot() {
       return enqueueMutation(async () => cloneBank());
     },
 
+    /** Replaces the bank wholesale after a sync, then persists it. */
     async replaceBank(next) {
       return enqueueMutation(async () => {
         const replacement = migrateBank(next);
@@ -168,6 +173,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       });
     },
 
+    /** Merges a completed network sync against the latest queued local state. */
     async mergeBank(next) {
       return enqueueMutation(async () => {
         const merged = mergeBanks(bank, next);
@@ -247,11 +253,16 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     async todayList({ clarifyDefinitions = false } = {}) {
       if (!clarifyDefinitions) {
         return enqueueMutation(async () => {
+          // Only write when the list genuinely changed; this is called on every
+          // count refresh, and persisting unconditionally would queue a sync.
           if (bankModel.ensureTodayList(bank, todayISO())) await persist();
           return bankModel.todayView(bank);
         });
       }
 
+      // Build a candidate list from a clone, then release the mutation queue
+      // while the independent lexical requests run in parallel. A slow network
+      // must not prevent a tick, sync, or essay save from committing.
       const candidates = await enqueueMutation(async () => {
         const next = cloneBank();
         const listChanged = bankModel.ensureTodayList(next, todayISO());
@@ -284,6 +295,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
               dictionary: await clarifyDefinition(candidate.word, candidate.dictionary),
             };
           } catch {
+            // Clarification is an opportunistic upgrade. Offline Today remains
+            // fully usable with the original human-edited definition.
             return null;
           }
         })
@@ -296,6 +309,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         for (const result of clarified) {
           if (!result || !visible.has(result.word)) continue;
           const current = bankModel.find(next, result.word);
+          // A sync may have supplied a newer definition while the lookup was
+          // pending. Never overwrite it with a result based on stale senses.
           if (
             !current ||
             !needsDerivativeClarification(current) ||
@@ -351,6 +366,11 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       return analyze(text, bankWords, todayWords);
     },
 
+    /**
+     * Records one deliberate essay import. Every matched bank-word occurrence
+     * contributes to its essay-use total; matches on today's list also keep the
+     * existing scheduling behaviour and are marked as practised.
+     */
     async logEssay(text) {
       return enqueueMutation(async () => {
         const today = todayISO();
