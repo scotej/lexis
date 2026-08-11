@@ -9,6 +9,12 @@
  */
 
 import * as bankModel from "./bank.js";
+import {
+  archiveWordHistory,
+  markExistingReviewHistory,
+  markReviewHistoryCurrent,
+  normalizeActivityArchive,
+} from "./activity.js";
 import { analyze } from "./essay.js";
 import {
   clarifyDerivativeDefinitions,
@@ -19,6 +25,17 @@ import {
 import { mergeBanks } from "./merge.js";
 import { todayISO } from "./srs.js";
 import { isGrade } from "./srs.js";
+
+function migrateBank(raw) {
+  const migrated = bankModel.migrate(raw);
+  migrated.activity_archive = normalizeActivityArchive(raw?.activity_archive);
+  markExistingReviewHistory(migrated);
+  return migrated;
+}
+
+function reviewEventCount(word) {
+  return Object.keys(word?.review_events ?? {}).length;
+}
 
 /**
  * @param storage  `{ load(): Promise<object|null>, save(bank): Promise<void> }`
@@ -85,7 +102,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   return {
     async init() {
       return enqueueMutation(async () => {
-        bank = bankModel.migrate((await storage.load()) ?? bankModel.emptyBank());
+        const raw = (await storage.load()) ?? bankModel.emptyBank();
+        bank = migrateBank(raw);
         return bank;
       });
     },
@@ -103,7 +121,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     /** Replaces the bank wholesale after a sync, then persists it. */
     async replaceBank(next) {
       return enqueueMutation(async () => {
-        const replacement = bankModel.migrate(next);
+        const replacement = migrateBank(next);
         await storage.save(replacement);
         bank = replacement;
         return bank;
@@ -147,6 +165,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
 
     async deleteWord(word) {
       return enqueueMutation(async () => {
+        const entry = bankModel.find(bank, word);
+        if (entry) bank.activity_archive = archiveWordHistory(bank.activity_archive, entry);
         bankModel.removeWord(bank, word);
         await persist();
       });
@@ -237,7 +257,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
 
     async tickWord(word, ticked) {
       return enqueueMutation(async () => {
+        const before = reviewEventCount(bankModel.find(bank, word));
         const view = bankModel.tick(bank, word, ticked, todayISO());
+        const entry = bankModel.find(bank, word);
+        if (entry && reviewEventCount(entry) > before) markReviewHistoryCurrent(entry);
         await persist();
         return view;
       });
@@ -251,6 +274,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       if (!isGrade(grade)) throw new Error("unknown grade");
       return enqueueMutation(async () => {
         const entry = bankModel.grade(bank, word, grade, todayISO());
+        markReviewHistoryCurrent(entry);
         await persist();
         return entry;
       });
@@ -279,7 +303,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         const logged = bankModel.logEssayUses(next, report.used, newEssayLogId());
         const usedToday = report.used.filter((usage) => usage.in_today);
         for (const usage of usedToday) {
+          const before = reviewEventCount(bankModel.find(next, usage.word));
           bankModel.tick(next, usage.word, true, today);
+          const entry = bankModel.find(next, usage.word);
+          if (entry && reviewEventCount(entry) > before) markReviewHistoryCurrent(entry);
         }
         if (listChanged || logged.length > 0) await persistReplacement(next);
         return {
