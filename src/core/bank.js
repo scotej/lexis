@@ -2,9 +2,9 @@
  * The bank model: words, today's checklist, and the sync bookkeeping that
  * lets two devices reconcile without a server.
  *
- * Every record carries an `updated` stamp (epoch milliseconds) and deletes
- * leave tombstones, so a merge can tell "changed here" from "deleted there"
- * without either side having to be online at the same time.
+ * Review/base edits and dictionary edits carry separate timestamps so sync can
+ * reconcile them independently. Deletes leave tombstones, so a merge can tell
+ * "changed here" from "deleted there" without either side being online.
  */
 
 import { newSrs, apply as applySrs, todayISO, daysBetween } from "./srs.js";
@@ -77,6 +77,15 @@ export function migrate(raw) {
     // is reviewed. That distinction is what lets a merge tell "deleted, then
     // typed in again" from "deleted here, reviewed there" — see merge.js.
     if (typeof w.created !== "number") w.created = addedUTC;
+    // Before definition refreshes existed, dictionary fields only changed when
+    // the word was created. Do not backfill from `updated`: reviews advance that
+    // clock and would make stale definitions look newer than real dictionary edits.
+    if (typeof w.definition_updated !== "number") w.definition_updated = w.created;
+    // Canonicalise optional dictionary fields before merge comparison. Otherwise
+    // the first shared-word merge can introduce an explicit null and make an
+    // otherwise identical second sync look like a new change.
+    if (typeof w.phonetic !== "string") w.phonetic = null;
+    if (typeof w.clarification_url !== "string") w.clarification_url = null;
     if (typeof w.times_used !== "number") w.times_used = 0;
     // Essay totals are derived from uniquely identified log events. Unioning
     // those events during sync preserves concurrent offline additions from two
@@ -305,7 +314,7 @@ export function todayView(bank) {
   };
 }
 
-// ---- mutations (each stamps `updated` so sync can order them) ----
+// ---- mutations ----
 
 export function insertWord(bank, entry, today) {
   bank.words.unshift(entry);
@@ -335,10 +344,45 @@ export function newWord(word, dict, synonyms, today) {
     essay_uses: 0,
     essay_use_events: {},
     review_events: {},
-    // `updated` moves on every edit; `created` only when the word is added.
+    // Review/base recency and dictionary recency are deliberately independent.
     updated: now,
+    definition_updated: now,
     created: now,
   };
+}
+
+/**
+ * Replaces only a word's dictionary fields, preserving its review and usage
+ * history. Definition recency is separate from `updated`, so a clarification
+ * on a stale device cannot make stale SRS state win a whole-record merge.
+ */
+export function updateDefinition(bank, word, dictionary, now = Date.now()) {
+  const entry = find(bank, word);
+  if (!entry) return false;
+
+  const next = {
+    phonetic: dictionary.phonetic ?? entry.phonetic ?? null,
+    senses: Array.isArray(dictionary.senses) ? dictionary.senses : entry.senses,
+    source: typeof dictionary.source === "string" ? dictionary.source : entry.source,
+    source_url:
+      typeof dictionary.source_url === "string" ? dictionary.source_url : entry.source_url,
+    clarification_url:
+      typeof dictionary.clarification_url === "string"
+        ? dictionary.clarification_url
+        : entry.clarification_url ?? null,
+  };
+  const current = {
+    phonetic: entry.phonetic ?? null,
+    senses: entry.senses,
+    source: entry.source,
+    source_url: entry.source_url,
+    clarification_url: entry.clarification_url ?? null,
+  };
+  if (JSON.stringify(next) === JSON.stringify(current)) return false;
+
+  Object.assign(entry, next);
+  entry.definition_updated = Math.max(now, (entry.definition_updated ?? entry.created ?? 0) + 1);
+  return true;
 }
 
 export function removeWord(bank, word) {
@@ -395,7 +439,7 @@ export function tick(bank, word, ticked, today) {
  *
  * Deliberately does not move the word's main `updated` stamp. Sync merges this
  * monotonic statistic independently, so logging an essay on a stale device
- * cannot replace a newer definition or SRS schedule wholesale.
+ * cannot replace a newer SRS schedule wholesale.
  */
 export function logEssayUses(bank, usages, logId) {
   if (typeof logId !== "string" || !logId) throw new Error("essay log needs an id");
