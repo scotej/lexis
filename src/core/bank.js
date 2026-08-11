@@ -11,10 +11,33 @@ import { newSrs, apply as applySrs, todayISO, daysBetween } from "./srs.js";
 
 export const SCHEMA_VERSION = 3;
 export const TODAY_TARGET = 10;
+export const MIN_DAILY_TARGET = 1;
+export const MAX_DAILY_TARGET = 100;
 
 /** Tombstones older than this are pruned; well past any plausible offline gap. */
 const TOMBSTONE_TTL_DAYS = 180;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizedDailyTarget(value) {
+  const target = Number(value);
+  return Number.isInteger(target) &&
+    target >= MIN_DAILY_TARGET &&
+    target <= MAX_DAILY_TARGET
+    ? target
+    : TODAY_TARGET;
+}
+
+export function dailyTarget(bank) {
+  return normalizedDailyTarget(bank?.settings?.daily_target);
+}
+
+export function settingsView(bank) {
+  return {
+    daily_target: dailyTarget(bank),
+    min_daily_target: MIN_DAILY_TARGET,
+    max_daily_target: MAX_DAILY_TARGET,
+  };
+}
 
 function validISODate(value) {
   if (typeof value !== "string" || !ISO_DATE.test(value)) return false;
@@ -39,7 +62,13 @@ function recordReview(entry, today, id = reviewEventId()) {
 }
 
 export function emptyBank() {
-  return { version: SCHEMA_VERSION, words: [], deleted: [], today: null };
+  return {
+    version: SCHEMA_VERSION,
+    words: [],
+    deleted: [],
+    today: null,
+    settings: { daily_target: TODAY_TARGET, updated: 0 },
+  };
 }
 
 export function normalize(word) {
@@ -59,11 +88,19 @@ export function normalize(word) {
  */
 export function migrate(raw) {
   const bank = raw && typeof raw === "object" ? raw : {};
+  const settings =
+    bank.settings && typeof bank.settings === "object" && !Array.isArray(bank.settings)
+      ? bank.settings
+      : {};
   const out = {
     version: SCHEMA_VERSION,
     words: Array.isArray(bank.words) ? bank.words : [],
     deleted: Array.isArray(bank.deleted) ? bank.deleted : [],
     today: bank.today ?? null,
+    settings: {
+      daily_target: normalizedDailyTarget(settings.daily_target),
+      updated: Number.isFinite(settings.updated) ? settings.updated : 0,
+    },
   };
   for (const w of out.words) {
     // Backfills are parsed as UTC, deliberately. These are sync timestamps
@@ -200,12 +237,13 @@ function rankedWordNames(bank) {
  * app would queue a sync, and the counts in the rail refresh constantly.
  */
 export function ensureTodayList(bank, date) {
+  const target = dailyTarget(bank);
   const fresh = !bank.today || bank.today.date !== date;
   if (fresh) {
     // Due words first (most overdue at the top), then the words whose
-    // review comes up soonest, until we have about ten.
+    // review comes up soonest, until we have the configured daily batch.
     const ranked = rankedWordNames(bank);
-    const words = ranked.slice(0, TODAY_TARGET);
+    const words = ranked.slice(0, target);
     bank.today = {
       date,
       words,
@@ -230,13 +268,15 @@ export function ensureTodayList(bank, date) {
   // Top the list back up. Words can arrive after the list was built — most
   // often synced in from the other device — and without this they'd wait
   // until tomorrow to be practised, which reads as sync half-working.
-  // Existing entries keep their order; only the tail grows.
-  if (t.words.length < TODAY_TARGET) {
+  // Existing entries keep their order; only the tail grows. Deliberately do
+  // not shrink a live list when the setting is lowered; the smaller size takes
+  // effect at the next refresh, extra batch, or new day.
+  if (t.words.length < target) {
     const already = new Set(t.words);
     const fill = [...bank.words]
       .filter((w) => !already.has(w.word))
       .sort(compareSchedule)
-      .slice(0, TODAY_TARGET - t.words.length)
+      .slice(0, target - t.words.length)
       .map((w) => w.word);
     t.words.push(...fill);
   }
@@ -251,10 +291,16 @@ export function ensureTodayList(bank, date) {
   return true;
 }
 
+function stampTodaySelection(t) {
+  const now = Date.now();
+  t.refreshed = Math.max(now, (t.refreshed ?? 0) + 1);
+  t.updated = now;
+}
+
 /**
  * Replaces today's selection with the next due-ranked words that are not
  * already visible, then fills any spare slots from the current selection.
- * With ten words or fewer there is nothing useful to rotate, so this is a
+ * With no alternative words there is nothing useful to rotate, so this is a
  * genuine no-op and does not create needless storage or sync writes.
  */
 export function refreshTodayList(bank, date) {
@@ -265,25 +311,49 @@ export function refreshTodayList(bank, date) {
   if (!sameDay) return ensured;
   const t = bank.today;
   const ranked = rankedWordNames(bank);
-  if (ranked.length <= TODAY_TARGET) return ensured;
+  const target = dailyTarget(bank);
+  if (ranked.length <= target) return ensured;
 
   // Before the first manual rotation, infer the position after the current
-  // page. This also handles a bank that grew from ten to eleven words after
-  // today's list was created. Thereafter the persisted cursor walks a circular
-  // sequence of pages, so a 25-word bank reaches words 20–24 instead of
-  // bouncing forever between the first two groups of ten.
+  // page. This also handles a bank that grew after today's list was created.
+  // Thereafter the persisted cursor walks a circular sequence of pages.
   let cursor = t.refreshed
     ? (t.cursor ?? 0) % ranked.length
     : cursorAfterCurrent(ranked, t.words);
   const words = Array.from(
-    { length: Math.min(TODAY_TARGET, ranked.length) },
+    { length: Math.min(target, ranked.length) },
     (_, index) => ranked[(cursor + index) % ranked.length]
   );
   t.words = words;
-  t.cursor = (cursor + TODAY_TARGET) % ranked.length;
-  const now = Date.now();
-  t.refreshed = Math.max(now, (t.refreshed ?? 0) + 1);
-  t.updated = now;
+  t.cursor = (cursor + target) % ranked.length;
+  stampTodaySelection(t);
+  return true;
+}
+
+/**
+ * Starts another same-day batch after the visible batch is complete.
+ *
+ * Unlike a generic refresh, this never reintroduces a word already practised
+ * today. The day-wide tick history stays intact, so extra practice cannot
+ * double-advance a word's SRS schedule.
+ */
+export function expandTodayList(bank, date) {
+  const sameDay = bank.today?.date === date;
+  const ensured = ensureTodayList(bank, date);
+  if (!sameDay) return ensured;
+
+  const view = todayView(bank);
+  if (view.remaining !== 0) return ensured;
+
+  const t = bank.today;
+  const ranked = rankedWordNames(bank);
+  const completed = new Set(t.ticked);
+  const words = ranked.filter((word) => !completed.has(word)).slice(0, dailyTarget(bank));
+  if (!words.length) return ensured;
+
+  t.words = words;
+  t.cursor = ranked.length ? cursorAfterCurrent(ranked, words) : 0;
+  stampTodaySelection(t);
   return true;
 }
 
@@ -306,12 +376,54 @@ export function todayView(bank) {
       def: w.senses[0]?.def ?? "",
       ticked: t.ticked.includes(w.word),
     }));
+  const completedToday = t.ticked.filter((word) => Boolean(find(bank, word))).length;
+  const nextBatchSize = Math.min(
+    dailyTarget(bank),
+    bank.words.filter((word) => !t.ticked.includes(word.word)).length
+  );
+  const remaining = items.filter((i) => !i.ticked).length;
   return {
     date: t.date,
     items,
-    remaining: items.filter((i) => !i.ticked).length,
-    can_refresh: bank.words.some((word) => !t.words.includes(word.word)),
+    remaining,
+    target: dailyTarget(bank),
+    completed_today: completedToday,
+    next_batch_size: nextBatchSize,
+    can_expand: remaining === 0 && nextBatchSize > 0,
+    can_refresh:
+      t.words.length > dailyTarget(bank) ||
+      bank.words.some((word) => !t.words.includes(word.word)),
   };
+}
+
+/**
+ * Changes the default Today batch size.
+ *
+ * Raising the target tops up the current list immediately. Lowering it leaves
+ * an already-visible larger list alone and takes effect on the next explicit
+ * selection change or new day, so changing a setting never makes assigned
+ * words disappear mid-session.
+ */
+export function setDailyTarget(bank, value, date = todayISO()) {
+  const target = Number(value);
+  if (
+    !Number.isInteger(target) ||
+    target < MIN_DAILY_TARGET ||
+    target > MAX_DAILY_TARGET
+  ) {
+    throw new RangeError(
+      `choose a whole number from ${MIN_DAILY_TARGET} to ${MAX_DAILY_TARGET}`
+    );
+  }
+  if (target === dailyTarget(bank)) return false;
+
+  const previousUpdated = Number.isFinite(bank.settings?.updated) ? bank.settings.updated : 0;
+  bank.settings = {
+    daily_target: target,
+    updated: Math.max(Date.now(), previousUpdated + 1),
+  };
+  ensureTodayList(bank, date);
+  return true;
 }
 
 // ---- mutations ----
@@ -322,7 +434,7 @@ export function insertWord(bank, entry, today) {
   bank.deleted = (bank.deleted ?? []).filter((d) => d.word !== entry.word);
   // A brand-new word can join today's checklist if there's room.
   const t = bank.today;
-  if (t && t.date === today && t.words.length < TODAY_TARGET) {
+  if (t && t.date === today && t.words.length < dailyTarget(bank)) {
     t.words.push(entry.word);
     t.updated = Date.now();
   }

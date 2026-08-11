@@ -19,6 +19,8 @@
  *     unioned. Union rather than last-write-wins because ticking is
  *     monotonic — a tick represents writing you actually did, and losing it
  *     would silently undo a review.
+ *   - Settings use last-write-wins with a deterministic tie-break, so two
+ *     offline devices converge on one daily target after they reconnect.
  *
  * Clock skew between devices can misorder edits made within seconds of each
  * other on the same record. For a single user moving between their own
@@ -26,7 +28,7 @@
  * near-simultaneous edits to the *same field group* is superseded.
  */
 
-import { migrate, pruneTombstones, SCHEMA_VERSION, TODAY_TARGET } from "./bank.js";
+import { migrate, pruneTombstones, SCHEMA_VERSION } from "./bank.js";
 import {
   archiveWordHistory,
   mergeActivityArchives,
@@ -143,9 +145,21 @@ function definitionBeats(a, b) {
 }
 
 /** Stable, bounded union for derived checklist state. */
-function mergeChecklistWords(a, b) {
+function mergeChecklistWords(a, b, limit) {
   const [first, second] = stable(a) >= stable(b) ? [a, b] : [b, a];
-  return [...new Set([...first, ...second])].slice(0, TODAY_TARGET);
+  return [...new Set([...first, ...second])].slice(0, limit);
+}
+
+/**
+ * Order-independent last-write-wins merge for the small settings record.
+ * A stable tie-break matters because equal timestamps are possible after an
+ * imported or manually edited data file.
+ */
+function mergeSettings(a, b) {
+  const au = a.updated ?? 0;
+  const bu = b.updated ?? 0;
+  if (au !== bu) return { ...(au > bu ? a : b) };
+  return { ...(stable(a) >= stable(b) ? a : b) };
 }
 
 /**
@@ -201,6 +215,7 @@ function latestTombstones(a, b) {
 export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const local = migrate(localRaw);
   const remote = migrate(remoteRaw);
+  const settings = mergeSettings(local.settings, remote.settings);
   let activityArchive = mergeActivityArchives(
     localRaw?.activity_archive,
     remoteRaw?.activity_archive
@@ -267,9 +282,17 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     if (lt.date === rt.date) {
       const localRefresh = lt.refreshed ?? 0;
       const remoteRefresh = rt.refreshed ?? 0;
+      // A newly lowered setting must not silently remove words already visible
+      // on one device. Preserve the larger live selection until the next
+      // explicit refresh/expansion/new day, while still bounding the union by
+      // the number of surviving bank words.
+      const checklistLimit = Math.min(
+        survivors.length,
+        Math.max(settings.daily_target, lt.words.length, rt.words.length)
+      );
       const words =
         localRefresh === remoteRefresh
-          ? mergeChecklistWords(lt.words, rt.words)
+          ? mergeChecklistWords(lt.words, rt.words, checklistLimit)
           : localRefresh > remoteRefresh
             ? [...lt.words]
             : [...rt.words];
@@ -314,6 +337,7 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     words: survivors,
     deleted: [...tombs.values()],
     today: todayList,
+    settings,
     activity_archive: activityArchive,
   };
   pruneTombstones(merged, today);
