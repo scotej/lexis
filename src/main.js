@@ -10,6 +10,7 @@ import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
 import { createWebPlatform } from "./platform/web.js";
 import { hasVault, unlockVault, createVault, clearVault } from "./core/vault.js";
 import { cryptoAvailable } from "./core/crypto.js";
+import { installStatsView, renderStatsView } from "./stats-view.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -54,6 +55,8 @@ async function mutate(action) {
 
 /* ---- navigation ---- */
 
+installStatsView();
+
 const railLinks = document.querySelectorAll(".rail-link[data-view]");
 railLinks.forEach((btn, i) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
@@ -75,12 +78,13 @@ function switchView(name) {
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
+  if (name === "stats") renderStatsView(app.getBank());
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
   if (name === "settings") renderSettings();
 }
 
-// 1–6 jump straight to a view, top to bottom, matching the rail. Bare digits
+// 1–7 jump straight to a view, top to bottom, matching the rail. Bare digits
 // rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
@@ -88,7 +92,7 @@ document.addEventListener("keydown", (e) => {
   if (aboutDialog.open) return;
   if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
-  const digit = /^Digit([1-6])$/.exec(e.code);
+  const digit = /^Digit([1-7])$/.exec(e.code);
   if (!digit) return;
   switchView(railLinks[Number(digit[1]) - 1].dataset.view);
 });
@@ -238,11 +242,12 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
-    const entry = await app.addWord(word);
-    expandedWords.add(entry.word);
+    const result = await app.addWord(word);
+    const addedEntries = result.batch ?? [result];
+    for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
     await renderBank();
-    addStatus.textContent = `added “${entry.word}”`;
+    addStatus.textContent = `added “${addedEntries.map((entry) => entry.word).join(" · ")}”`;
     addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
@@ -255,8 +260,25 @@ addForm.addEventListener("submit", async (e) => {
 
 /* ---- today ---- */
 
+let todayRenderRequest = 0;
+
 async function renderToday() {
+  const request = ++todayRenderRequest;
   const view = await app.todayList();
+  if (request !== todayRenderRequest) return;
+  drawToday(view);
+
+  // Stored entries are useful even when the lexical APIs are slow or offline.
+  // Paint them first, then replace only this still-current render if an older
+  // opaque definition can be clarified in the background. This second call can
+  // persist an upgrade, so route failures through the normal save-error UI.
+  await mutate(async () => {
+    const clarified = await app.todayList({ clarifyDefinitions: true });
+    if (request === todayRenderRequest) drawToday(clarified);
+  });
+}
+
+function drawToday(view) {
   const date = new Date(`${view.date}T00:00:00`);
   $("today-date").textContent = date
     .toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" })
@@ -616,7 +638,6 @@ $("lookup-form").addEventListener("submit", async (e) => {
     lookupStatus.classList.add("error");
   }
 });
-
 function renderLookupResult(word, dict) {
   lookupResult.replaceChildren();
 
@@ -912,6 +933,7 @@ function wireApp() {
       const active = document.querySelector(".rail-link.active")?.dataset.view;
       if (active === "bank") renderBank();
       else if (active === "today") renderToday();
+      else if (active === "stats") renderStatsView(app.getBank());
       else if (active === "settings") renderSettings();
       else refreshCounts();
     },
@@ -955,7 +977,6 @@ async function requestPersistence() {
     /* durability is an upgrade, never a requirement */
   }
 }
-
 async function startDesktop() {
   wireApp();
   await app.init();

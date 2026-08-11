@@ -2,9 +2,9 @@
  * The bank model: words, today's checklist, and the sync bookkeeping that
  * lets two devices reconcile without a server.
  *
- * Every record carries an `updated` stamp (epoch milliseconds) and deletes
- * leave tombstones, so a merge can tell "changed here" from "deleted there"
- * without either side having to be online at the same time.
+ * Review/base edits and dictionary edits carry separate timestamps so sync can
+ * reconcile them independently. Deletes leave tombstones, so a merge can tell
+ * "changed here" from "deleted there" without either side being online.
  */
 
 import { newSrs, apply as applySrs, todayISO, daysBetween } from "./srs.js";
@@ -16,6 +16,7 @@ export const MAX_DAILY_TARGET = 100;
 
 /** Tombstones older than this are pruned; well past any plausible offline gap. */
 const TOMBSTONE_TTL_DAYS = 180;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function normalizedDailyTarget(value) {
   const target = Number(value);
@@ -36,6 +37,28 @@ export function settingsView(bank) {
     min_daily_target: MIN_DAILY_TARGET,
     max_daily_target: MAX_DAILY_TARGET,
   };
+}
+
+function validISODate(value) {
+  if (typeof value !== "string" || !ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function reviewEventId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `review:${globalThis.crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  const suffix = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `review:${Date.now().toString(36)}:${suffix}`;
+}
+
+function recordReview(entry, today, id = reviewEventId()) {
+  entry.review_events ??= {};
+  entry.review_events[id] = today;
 }
 
 export function emptyBank() {
@@ -91,6 +114,15 @@ export function migrate(raw) {
     // is reviewed. That distinction is what lets a merge tell "deleted, then
     // typed in again" from "deleted here, reviewed there" — see merge.js.
     if (typeof w.created !== "number") w.created = addedUTC;
+    // Before definition refreshes existed, dictionary fields only changed when
+    // the word was created. Do not backfill from `updated`: reviews advance that
+    // clock and would make stale definitions look newer than real dictionary edits.
+    if (typeof w.definition_updated !== "number") w.definition_updated = w.created;
+    // Canonicalise optional dictionary fields before merge comparison. Otherwise
+    // the first shared-word merge can introduce an explicit null and make an
+    // otherwise identical second sync look like a new change.
+    if (typeof w.phonetic !== "string") w.phonetic = null;
+    if (typeof w.clarification_url !== "string") w.clarification_url = null;
     if (typeof w.times_used !== "number") w.times_used = 0;
     // Essay totals are derived from uniquely identified log events. Unioning
     // those events during sync preserves concurrent offline additions from two
@@ -113,6 +145,29 @@ export function migrate(raw) {
     }
     w.essay_use_events = events;
     w.essay_uses = Object.values(events).reduce((sum, count) => sum + count, 0);
+
+    // Review history uses the same conflict-safe event-set pattern as essay
+    // logs. Old banks only retain `srs.last`, so preserve that one known event
+    // rather than inventing history we cannot reconstruct.
+    const reviewEvents = {};
+    if (
+      w.review_events &&
+      typeof w.review_events === "object" &&
+      !Array.isArray(w.review_events)
+    ) {
+      for (const [id, date] of Object.entries(w.review_events)) {
+        if (id && validISODate(date)) reviewEvents[id] = date;
+      }
+    }
+    const lastReview = w.srs?.last;
+    if (
+      validISODate(lastReview) &&
+      !Object.values(reviewEvents).some((date) => date === lastReview)
+    ) {
+      reviewEvents[`legacy:${lastReview}`] = lastReview;
+    }
+    w.review_events = reviewEvents;
+
     if (!Array.isArray(w.synonyms)) w.synonyms = [];
     if (!Array.isArray(w.senses)) w.senses = [];
   }
@@ -371,7 +426,7 @@ export function setDailyTarget(bank, value, date = todayISO()) {
   return true;
 }
 
-// ---- mutations (each stamps `updated` so sync can order them) ----
+// ---- mutations ----
 
 export function insertWord(bank, entry, today) {
   bank.words.unshift(entry);
@@ -400,10 +455,46 @@ export function newWord(word, dict, synonyms, today) {
     times_used: 0,
     essay_uses: 0,
     essay_use_events: {},
-    // `updated` moves on every edit; `created` only when the word is added.
+    review_events: {},
+    // Review/base recency and dictionary recency are deliberately independent.
     updated: now,
+    definition_updated: now,
     created: now,
   };
+}
+
+/**
+ * Replaces only a word's dictionary fields, preserving its review and usage
+ * history. Definition recency is separate from `updated`, so a clarification
+ * on a stale device cannot make stale SRS state win a whole-record merge.
+ */
+export function updateDefinition(bank, word, dictionary, now = Date.now()) {
+  const entry = find(bank, word);
+  if (!entry) return false;
+
+  const next = {
+    phonetic: dictionary.phonetic ?? entry.phonetic ?? null,
+    senses: Array.isArray(dictionary.senses) ? dictionary.senses : entry.senses,
+    source: typeof dictionary.source === "string" ? dictionary.source : entry.source,
+    source_url:
+      typeof dictionary.source_url === "string" ? dictionary.source_url : entry.source_url,
+    clarification_url:
+      typeof dictionary.clarification_url === "string"
+        ? dictionary.clarification_url
+        : entry.clarification_url ?? null,
+  };
+  const current = {
+    phonetic: entry.phonetic ?? null,
+    senses: entry.senses,
+    source: entry.source,
+    source_url: entry.source_url,
+    clarification_url: entry.clarification_url ?? null,
+  };
+  if (JSON.stringify(next) === JSON.stringify(current)) return false;
+
+  Object.assign(entry, next);
+  entry.definition_updated = Math.max(now, (entry.definition_updated ?? entry.created ?? 0) + 1);
+  return true;
 }
 
 export function removeWord(bank, word) {
@@ -422,6 +513,7 @@ export function grade(bank, word, g, today) {
   const entry = find(bank, word);
   if (!entry) throw new Error("word not found");
   applySrs(entry.srs, g, today);
+  recordReview(entry, today);
   entry.updated = Date.now();
   return entry;
 }
@@ -440,6 +532,7 @@ export function tick(bank, word, ticked, today) {
     if (entry && entry.srs.last !== today) {
       applySrs(entry.srs, "good", today);
       entry.times_used += 1;
+      recordReview(entry, today, `practice:${today}`);
       entry.updated = Date.now();
     }
     t.ticked.push(word);
@@ -458,7 +551,7 @@ export function tick(bank, word, ticked, today) {
  *
  * Deliberately does not move the word's main `updated` stamp. Sync merges this
  * monotonic statistic independently, so logging an essay on a stale device
- * cannot replace a newer definition or SRS schedule wholesale.
+ * cannot replace a newer SRS schedule wholesale.
  */
 export function logEssayUses(bank, usages, logId) {
   if (typeof logId !== "string" || !logId) throw new Error("essay log needs an id");
