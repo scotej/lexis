@@ -68,6 +68,25 @@ function legacyAdverb(word, adjective, today) {
   return value;
 }
 
+function fakeLexicon(log = [], failWord = null) {
+  return {
+    async fetchDefinition(word) {
+      log.push(`definition:${word}`);
+      if (word === failWord) throw new Error("lookup failed");
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      log.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+}
+
 function essayBank() {
   const today = todayISO();
   const names = [
@@ -372,4 +391,253 @@ test("listing a sorted bank is presentation-only", async () => {
   assert.equal(words[0], "zenith");
   assert.equal(words.at(-1), "alpha");
   assert.equal(storage.saves, 0);
+});
+
+test("multi-word input normalizes, de-duplicates, and persists as one transaction", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  let changes = 0;
+  const app = createApp(
+    storage,
+    () => {
+      changes += 1;
+    },
+    fakeLexicon(lookups)
+  );
+  await app.init();
+
+  const result = await app.addWord("  Deontic   modality\tdeontic  ");
+
+  assert.deepEqual(app.listWords("word-asc").map((word) => word.word), ["deontic", "modality"]);
+  assert.deepEqual(lookups, [
+    "definition:deontic",
+    "synonyms:deontic",
+    "definition:modality",
+    "synonyms:modality",
+  ]);
+  assert.equal(storage.saves, 1);
+  assert.equal(changes, 1);
+  assert.equal(result.word, "deontic · modality");
+  assert.deepEqual(result.batch.map((word) => word.word), ["deontic", "modality"]);
+});
+
+test("multi-word input skips words already in the bank without re-fetching them", async () => {
+  const initial = bankModel.emptyBank();
+  initial.words.push(entry("deontic", todayISO()));
+  const storage = new MemoryStorage(initial);
+  const lookups = [];
+  const app = createApp(storage, () => {}, fakeLexicon(lookups));
+  await app.init();
+
+  const result = await app.addWord("deontic modality");
+
+  assert.deepEqual(app.listWords("word-asc").map((word) => word.word), ["deontic", "modality"]);
+  assert.deepEqual(lookups, ["definition:modality", "synonyms:modality"]);
+  assert.equal(storage.saves, 1);
+  assert.equal(result.word, "modality");
+});
+
+test("an invalid token rejects a multi-word submission before any lookup or save", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  const app = createApp(storage, () => {}, fakeLexicon(lookups));
+  await app.init();
+
+  await assert.rejects(() => app.addWord("deontic modality2"), /single word/);
+
+  assert.deepEqual(lookups, []);
+  assert.deepEqual(app.listWords(), []);
+  assert.equal(storage.saves, 0);
+});
+
+test("a failed lookup leaves a multi-word submission completely unapplied", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  const app = createApp(storage, () => {}, fakeLexicon(lookups, "modality"));
+  await app.init();
+
+  await assert.rejects(() => app.addWord("deontic modality"), /couldn’t add “modality”: lookup failed/);
+
+  assert.deepEqual(lookups, [
+    "definition:deontic",
+    "synonyms:deontic",
+    "definition:modality",
+  ]);
+  assert.deepEqual(app.listWords(), []);
+  assert.equal(storage.saves, 0);
+});
+
+test("a failed save leaves no in-memory partial multi-word addition", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, fakeLexicon());
+  await app.init();
+  storage.failNext = true;
+
+  await assert.rejects(() => app.addWord("deontic modality"), /save failed/);
+
+  assert.deepEqual(app.listWords(), []);
+  assert.equal(storage.saves, 0);
+});
+
+test("overlapping add requests preserve request order without blocking unrelated mutations", async () => {
+  const initial = bankModel.emptyBank();
+  initial.words.push(entry("alpha", todayISO()));
+  const storage = new MemoryStorage(initial);
+  const lookups = [];
+  let lookupStartedResolve;
+  let releaseLookup;
+  const lookupStarted = new Promise((resolve) => {
+    lookupStartedResolve = resolve;
+  });
+  const lookupGate = new Promise((resolve) => {
+    releaseLookup = resolve;
+  });
+  const lexicon = {
+    async fetchDefinition(word) {
+      lookups.push(`definition:${word}`);
+      if (word === "deontic") {
+        lookupStartedResolve();
+        await lookupGate;
+      }
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      lookups.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+  const app = createApp(storage, () => {}, lexicon);
+  await app.init();
+
+  const first = app.addWord("deontic");
+  await lookupStarted;
+  const second = app.addWord("deontic");
+  const secondRejected = assert.rejects(second, /already in your bank/);
+  await Promise.resolve();
+
+  assert.deepEqual(lookups, ["definition:deontic"], "the later add must not start its lookup early");
+
+  await app.deleteWord("alpha");
+  assert.equal(bankModel.find(app.getBank(), "alpha"), null, "unrelated mutations must not wait on the lookup");
+
+  releaseLookup();
+  const added = await first;
+  await secondRejected;
+
+  assert.equal(added.word, "deontic");
+  assert.deepEqual(lookups, ["definition:deontic", "synonyms:deontic"]);
+  assert.ok(bankModel.find(app.getBank(), "deontic"));
+  assert.equal(storage.saves, 2);
+});
+
+test("a later same-word delete wins over an in-flight add", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  let lookupStartedResolve;
+  let releaseLookup;
+  const lookupStarted = new Promise((resolve) => {
+    lookupStartedResolve = resolve;
+  });
+  const lookupGate = new Promise((resolve) => {
+    releaseLookup = resolve;
+  });
+  const lexicon = {
+    async fetchDefinition(word) {
+      lookups.push(`definition:${word}`);
+      lookupStartedResolve();
+      await lookupGate;
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      lookups.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+  const app = createApp(storage, () => {}, lexicon);
+  await app.init();
+
+  const adding = app.addWord("deontic");
+  const rejected = assert.rejects(adding, /removed after this add was requested/);
+  await lookupStarted;
+
+  const remote = bankModel.emptyBank();
+  remote.words.push(entry("deontic", todayISO()));
+  await app.mergeBank(remote);
+  assert.ok(bankModel.find(app.getBank(), "deontic"));
+
+  await app.deleteWord("deontic");
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+
+  releaseLookup();
+  await rejected;
+
+  assert.deepEqual(lookups, ["definition:deontic", "synonyms:deontic"]);
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+  assert.equal(storage.saves, 2, "the cancelled add must not overwrite the merge and delete");
+});
+
+test("a delete supersedes an add that is still waiting behind an earlier add", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  let firstLookupStartedResolve;
+  let releaseFirstLookup;
+  const firstLookupStarted = new Promise((resolve) => {
+    firstLookupStartedResolve = resolve;
+  });
+  const firstLookupGate = new Promise((resolve) => {
+    releaseFirstLookup = resolve;
+  });
+  const lexicon = {
+    async fetchDefinition(word) {
+      lookups.push(`definition:${word}`);
+      if (word === "alpha") {
+        firstLookupStartedResolve();
+        await firstLookupGate;
+      }
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "test",
+        source_url: "https://example.invalid",
+      };
+    },
+    async fetchSynonyms(word) {
+      lookups.push(`synonyms:${word}`);
+      return [];
+    },
+  };
+  const app = createApp(storage, () => {}, lexicon);
+  await app.init();
+
+  const first = app.addWord("alpha");
+  await firstLookupStarted;
+  const queued = app.addWord("deontic");
+  const queuedRejected = assert.rejects(queued, /removed after this add was requested/);
+
+  const remote = bankModel.emptyBank();
+  remote.words.push(entry("deontic", todayISO()));
+  await app.mergeBank(remote);
+  await app.deleteWord("deontic");
+
+  releaseFirstLookup();
+  await first;
+  await queuedRejected;
+
+  assert.deepEqual(lookups, ["definition:alpha", "synonyms:alpha"]);
+  assert.ok(bankModel.find(app.getBank(), "alpha"));
+  assert.equal(bankModel.find(app.getBank(), "deontic"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
+  assert.equal(storage.saves, 3, "merge, delete, and the unrelated first add should be the only saves");
 });

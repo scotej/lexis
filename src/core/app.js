@@ -28,6 +28,8 @@ import { isGrade } from "./srs.js";
 export function createApp(storage, onChange = () => {}, services = {}) {
   let bank = bankModel.emptyBank();
   let mutationTail = Promise.resolve();
+  let additionTail = Promise.resolve();
+  const deleteGenerations = new Map();
   const lookupDefinition = services.fetchDefinition ?? fetchDefinition;
   const lookupSynonyms = services.fetchSynonyms ?? fetchSynonyms;
   const clarifyDefinition =
@@ -41,6 +43,17 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   function enqueueMutation(action) {
     const result = mutationTail.then(action, action);
     mutationTail = result.catch(() => {});
+    return result;
+  }
+
+  /**
+   * Word additions also contain network lookups. Reserve their request order in
+   * a separate queue so a later fast lookup cannot overtake an earlier one,
+   * while unrelated bank mutations remain free to commit during network I/O.
+   */
+  function enqueueAddition(action) {
+    const result = additionTail.then(action, action);
+    additionTail = result.catch(() => {});
     return result;
   }
 
@@ -82,6 +95,48 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
+  /**
+   * Parses a submission into normalized, de-duplicated words without weakening
+   * the bank model's single-word invariant. Invalid tokens reject the entire
+   * submission before any network request or storage mutation starts.
+   */
+  function normalizeWordInput(input) {
+    const raw = (input ?? "").trim();
+    if (!raw) bankModel.normalize(raw); // preserves the established empty-input error
+
+    const words = [];
+    const seen = new Set();
+    for (const token of raw.split(/\s+/u)) {
+      const word = bankModel.normalize(token);
+      if (seen.has(word)) continue;
+      seen.add(word);
+      words.push(word);
+    }
+    return words;
+  }
+
+  function alreadyStoredError(words) {
+    if (words.length === 1) return new Error(`“${words[0]}” is already in your bank`);
+    return new Error("those words are already in your bank");
+  }
+
+  function deleteGeneration(word) {
+    return deleteGenerations.get(word) ?? 0;
+  }
+
+  function markDeleteRequested(word) {
+    const key = typeof word === "string" ? word.trim().toLowerCase() : word;
+    deleteGenerations.set(key, deleteGeneration(key) + 1);
+  }
+
+  function supersededAddition(words, generations) {
+    return words.find((word) => deleteGeneration(word) !== generations.get(word)) ?? null;
+  }
+
+  function additionSupersededError(word) {
+    return new Error(`couldn’t add “${word}”: it was removed after this add was requested`);
+  }
+
   return {
     async init() {
       return enqueueMutation(async () => {
@@ -120,24 +175,74 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       });
     },
 
-    async addWord(word) {
-      const w = bankModel.normalize(word);
-      if (bankModel.find(bank, w)) {
-        throw new Error(`“${w}” is already in your bank`);
-      }
-      const dict = await lookupDefinition(w);
-      const synonyms = await lookupSynonyms(w);
-      return enqueueMutation(async () => {
-        // Another lookup for the same word may have completed while the
-        // network requests above were in flight.
-        if (bankModel.find(bank, w)) {
-          throw new Error(`“${w}” is already in your bank`);
+    /**
+     * Adds one or more whitespace-separated words as one transaction.
+     *
+     * Addition requests are serialized in request order, and each batch's
+     * lookups stay sequential to avoid bursting the public dictionary APIs. The
+     * bank is not touched until every requested new word has been resolved, so
+     * a bad lookup or failed save cannot leave a half-added batch behind.
+     */
+    async addWord(input) {
+      const requested = normalizeWordInput(input);
+      const deleteState = new Map(
+        requested.map((word) => [word, deleteGeneration(word)])
+      );
+
+      return enqueueAddition(async () => {
+        const pending = requested.filter((word) => !bankModel.find(bank, word));
+        if (!pending.length) throw alreadyStoredError(requested);
+
+        const staleBeforeLookup = supersededAddition(pending, deleteState);
+        if (staleBeforeLookup) throw additionSupersededError(staleBeforeLookup);
+
+        const prepared = [];
+        for (const word of pending) {
+          const stale = supersededAddition(pending, deleteState);
+          if (stale) throw additionSupersededError(stale);
+          try {
+            const dict = await lookupDefinition(word);
+            const synonyms = await lookupSynonyms(word);
+            prepared.push({ word, dict, synonyms });
+          } catch (err) {
+            if (requested.length === 1) throw err;
+            throw new Error(`couldn’t add “${word}”: ${String(err.message ?? err)}`);
+          }
         }
-        const today = todayISO();
-        const entry = bankModel.newWord(w, dict, synonyms, today);
-        bankModel.insertWord(bank, entry, today);
-        await persist();
-        return entry;
+
+        return enqueueMutation(async () => {
+          // A local delete requested after this add must win even if a sync made
+          // the word visible while its lookup was running. Without this guard,
+          // insertWord would clear the newer tombstone and resurrect the word.
+          const stale = supersededAddition(pending, deleteState);
+          if (stale) throw additionSupersededError(stale);
+
+          // Sync or another mutation may have completed while the network
+          // requests above were in flight. Re-check against a transactional
+          // clone and add only candidates that are still absent.
+          const next = cloneBank();
+          const today = todayISO();
+          const added = [];
+          for (const candidate of prepared) {
+            if (bankModel.find(next, candidate.word)) continue;
+            const entry = bankModel.newWord(candidate.word, candidate.dict, candidate.synonyms, today);
+            bankModel.insertWord(next, entry, today);
+            added.push(entry);
+          }
+
+          if (!added.length) throw alreadyStoredError(requested);
+          await persistReplacement(next);
+
+          // Preserve the established single-word return contract. For a genuine
+          // batch, return a presentation-compatible summary while keeping the
+          // real entries available to callers that want them.
+          if (added.length === 1) return added[0];
+          return {
+            ...added[0],
+            word: added.map((entry) => entry.word).join(" · "),
+            batch: added,
+          };
+        });
       });
     },
 
@@ -146,6 +251,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     },
 
     async deleteWord(word) {
+      // Record intent before entering the mutation queue. An addition can be
+      // waiting on network I/O (or behind another addition) when this is called;
+      // request order, not eventual save timing, decides which operation wins.
+      markDeleteRequested(word);
       return enqueueMutation(async () => {
         bankModel.removeWord(bank, word);
         await persist();
