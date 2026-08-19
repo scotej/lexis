@@ -7,8 +7,9 @@
  *
  * The rules, in order of subtlety:
  *
- *   - A word present on both sides resolves to whichever copy was edited
- *     last (`updated`, epoch ms).
+ *   - Review/base state for a word resolves by `updated` recency.
+ *   - Dictionary fields resolve independently by `definition_updated`, so an
+ *     automatic clarification cannot make stale review history win a merge.
  *   - A delete leaves a tombstone. The word stays deleted only while the
  *     tombstone is newer than the surviving copy of the word — so deleting
  *     on one device wins over an older edit on the other, but *re-adding*
@@ -18,20 +19,33 @@
  *     unioned. Union rather than last-write-wins because ticking is
  *     monotonic — a tick represents writing you actually did, and losing it
  *     would silently undo a review.
+ *   - Settings use last-write-wins with a deterministic tie-break, so two
+ *     offline devices converge on one daily target after they reconnect.
  *
  * Clock skew between devices can misorder edits made within seconds of each
  * other on the same record. For a single user moving between their own
  * machines this is acceptable; nothing is ever lost, at worst one of two
- * near-simultaneous edits to the *same word* is superseded.
+ * near-simultaneous edits to the *same field group* is superseded.
  */
 
-import { migrate, pruneTombstones, SCHEMA_VERSION, TODAY_TARGET } from "./bank.js";
+import { migrate, pruneTombstones, SCHEMA_VERSION } from "./bank.js";
+import {
+  archiveWordHistory,
+  mergeActivityArchives,
+  validActivityDate,
+} from "./activity.js";
 import { todayISO } from "./srs.js";
 
 /** A word that has never been reviewed carries no scheduling history to lose. */
 function pristine(w) {
   const s = w.srs ?? {};
-  return !s.last && (s.reps ?? 0) === 0 && (s.lapses ?? 0) === 0 && (w.times_used ?? 0) === 0;
+  return (
+    !s.last &&
+    (s.reps ?? 0) === 0 &&
+    (s.lapses ?? 0) === 0 &&
+    (w.times_used ?? 0) === 0 &&
+    Object.keys(w.review_events ?? {}).length === 0
+  );
 }
 
 function mergeEssayUseEvents(a, b) {
@@ -46,10 +60,106 @@ function mergeEssayUseEvents(a, b) {
   return events;
 }
 
+function reviewMarker(word) {
+  return Number.isFinite(word?.review_events_updated) ? word.review_events_updated : null;
+}
+
+function reviewSnapshot(word, peerMarker = 0) {
+  const events = { ...(word.review_events ?? {}) };
+  const updated = Number.isFinite(word.updated) ? word.updated : 0;
+  const marker = reviewMarker(word);
+  const last = word.srs?.last;
+  let coveredThrough = marker ?? 0;
+
+  // Upgraded clients stamp the word after every review. An older client keeps
+  // that unknown marker when it loads the word, but its legacy grade/tick code
+  // moves `updated` without moving the marker. That gap is therefore a review
+  // we can recover deterministically, including another review on the same day.
+  const baseline = marker ?? (Number.isFinite(peerMarker) ? peerMarker : 0);
+  if (baseline > 0 && updated > baseline && validActivityDate(last)) {
+    events[`compat:${Math.trunc(updated)}:${last}`] = last;
+    coveredThrough = updated;
+  } else if (
+    marker === null &&
+    updated > 0 &&
+    validActivityDate(last) &&
+    Object.values(events).some((date) => date === last)
+  ) {
+    // First upgraded observation of a legacy/pre-marker record: migrate() has
+    // already represented the latest known review, so establish the baseline.
+    coveredThrough = updated;
+  }
+
+  return { events, coveredThrough };
+}
+
+function mergeReviewEvents(a, b) {
+  const local = reviewSnapshot(a, reviewMarker(b) ?? 0);
+  const remote = reviewSnapshot(b, reviewMarker(a) ?? 0);
+  const ids = [...new Set([...Object.keys(local.events), ...Object.keys(remote.events)])].sort();
+  const events = {};
+  for (const id of ids) {
+    const localDate = local.events[id];
+    const remoteDate = remote.events[id];
+    events[id] = !localDate
+      ? remoteDate
+      : !remoteDate
+        ? localDate
+        : localDate >= remoteDate
+          ? localDate
+          : remoteDate;
+  }
+  return {
+    events,
+    coveredThrough: Math.max(local.coveredThrough, remote.coveredThrough),
+  };
+}
+
+function normalizeReviewHistory(word) {
+  const snapshot = reviewSnapshot(word);
+  return {
+    ...word,
+    review_events: snapshot.events,
+    ...(snapshot.coveredThrough > 0
+      ? { review_events_updated: snapshot.coveredThrough }
+      : {}),
+  };
+}
+
+export function dictionaryFields(w) {
+  return {
+    phonetic: w.phonetic ?? null,
+    senses: w.senses,
+    source: w.source,
+    source_url: w.source_url,
+    clarification_url: w.clarification_url ?? null,
+  };
+}
+
+/** Order-independent comparison for independently versioned dictionary state. */
+export function definitionBeats(a, b) {
+  const au = a.definition_updated ?? a.created ?? 0;
+  const bu = b.definition_updated ?? b.created ?? 0;
+  if (au !== bu) return au > bu;
+  return stable(dictionaryFields(a)) > stable(dictionaryFields(b));
+}
+
 /** Stable, bounded union for derived checklist state. */
-function mergeChecklistWords(a, b) {
+function mergeChecklistWords(a, b, limit) {
   const [first, second] = stable(a) >= stable(b) ? [a, b] : [b, a];
-  return [...new Set([...first, ...second])].slice(0, TODAY_TARGET);
+  return [...new Set([...first, ...second])].slice(0, limit);
+}
+
+/**
+ * Order-independent last-write-wins merge for the small settings record.
+ * A stable tie-break matters because equal timestamps are possible after an
+ * imported or manually edited data file.
+ */
+function mergeSettings(a, b) {
+  const au = a.updated ?? 0;
+  const bu = b.updated ?? 0;
+  if (au !== bu) return { ...(au > bu ? a : b) };
+  return { ...(stable(a) >= stable(b) ? a : b) };
 }
 
 /**
@@ -105,6 +215,11 @@ function latestTombstones(a, b) {
 export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const local = migrate(localRaw);
   const remote = migrate(remoteRaw);
+  const settings = mergeSettings(local.settings, remote.settings);
+  let activityArchive = mergeActivityArchives(
+    localRaw?.activity_archive,
+    remoteRaw?.activity_archive
+  );
 
   const tombs = latestTombstones(local, remote);
 
@@ -113,18 +228,26 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   for (const w of [...local.words, ...remote.words]) {
     const prev = words.get(w.word);
     if (!prev) {
-      words.set(w.word, { ...w });
+      words.set(w.word, normalizeReviewHistory(w));
       continue;
     }
     const winner = beats(w, prev) ? w : prev;
-    // Essay usage is unionable metadata, not part of the LWW word edit. Each
-    // explicit essay log has a random id, so concurrent offline logs survive
-    // while the same event observed twice is counted only once.
-    const events = mergeEssayUseEvents(w, prev);
+    const definitionWinner = definitionBeats(w, prev) ? w : prev;
+    // Dictionary state, essay usage, and review activity merge independently.
+    // This keeps stale definition refreshes or metadata-only writes from
+    // replacing a newer review schedule wholesale.
+    const essayEvents = mergeEssayUseEvents(w, prev);
+    const reviewHistory = mergeReviewEvents(w, prev);
     words.set(w.word, {
       ...winner,
-      essay_use_events: events,
-      essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
+      ...dictionaryFields(definitionWinner),
+      definition_updated: definitionWinner.definition_updated,
+      essay_use_events: essayEvents,
+      essay_uses: Object.values(essayEvents).reduce((sum, count) => sum + count, 0),
+      review_events: reviewHistory.events,
+      ...(reviewHistory.coveredThrough > 0
+        ? { review_events_updated: reviewHistory.coveredThrough }
+        : {}),
     });
   }
 
@@ -138,7 +261,12 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
   const survivors = [];
   for (const [key, w] of words) {
     const tomb = tombs.get(key);
-    if (tomb && tomb.at > (w.created ?? 0)) continue; // still deleted
+    if (tomb && tomb.at > (w.created ?? 0)) {
+      // A delete changes inventory, not history. This also protects history
+      // when the deletion came from an older client that did not archive it.
+      activityArchive = archiveWordHistory(activityArchive, w);
+      continue;
+    }
     if (tomb) tombs.delete(key); // re-added after the delete
     survivors.push(w);
   }
@@ -154,9 +282,17 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     if (lt.date === rt.date) {
       const localRefresh = lt.refreshed ?? 0;
       const remoteRefresh = rt.refreshed ?? 0;
+      // A newly lowered setting must not silently remove words already visible
+      // on one device. Preserve the larger live selection until the next
+      // explicit refresh/expansion/new day, while still bounding the union by
+      // the number of surviving bank words.
+      const checklistLimit = Math.min(
+        survivors.length,
+        Math.max(settings.daily_target, lt.words.length, rt.words.length)
+      );
       const words =
         localRefresh === remoteRefresh
-          ? mergeChecklistWords(lt.words, rt.words)
+          ? mergeChecklistWords(lt.words, rt.words, checklistLimit)
           : localRefresh > remoteRefresh
             ? [...lt.words]
             : [...rt.words];
@@ -201,6 +337,8 @@ export function mergeBanks(localRaw, remoteRaw, today = todayISO()) {
     words: survivors,
     deleted: [...tombs.values()],
     today: todayList,
+    settings,
+    activity_archive: activityArchive,
   };
   pruneTombstones(merged, today);
   return merged;

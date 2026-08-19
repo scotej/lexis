@@ -2,21 +2,76 @@
  * The bank model: words, today's checklist, and the sync bookkeeping that
  * lets two devices reconcile without a server.
  *
- * Every record carries an `updated` stamp (epoch milliseconds) and deletes
- * leave tombstones, so a merge can tell "changed here" from "deleted there"
- * without either side having to be online at the same time.
+ * Review/base edits and dictionary edits carry separate timestamps so sync can
+ * reconcile them independently. Deletes leave tombstones, so a merge can tell
+ * "changed here" from "deleted there" without either side being online.
  */
 
 import { newSrs, apply as applySrs, todayISO, daysBetween } from "./srs.js";
 
 export const SCHEMA_VERSION = 3;
 export const TODAY_TARGET = 10;
+export const MIN_DAILY_TARGET = 1;
+export const MAX_DAILY_TARGET = 100;
 
 /** Tombstones older than this are pruned; well past any plausible offline gap. */
+// Exported so the Syncthing mirror can refuse to merge a peer file older than
+// this: past the cutoff a bank may hold words every live device has since
+// deleted, with no tombstone left anywhere to delete them again.
 export const TOMBSTONE_TTL_DAYS = 180;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizedDailyTarget(value) {
+  const target = Number(value);
+  return Number.isInteger(target) &&
+    target >= MIN_DAILY_TARGET &&
+    target <= MAX_DAILY_TARGET
+    ? target
+    : TODAY_TARGET;
+}
+
+export function dailyTarget(bank) {
+  return normalizedDailyTarget(bank?.settings?.daily_target);
+}
+
+export function settingsView(bank) {
+  return {
+    daily_target: dailyTarget(bank),
+    min_daily_target: MIN_DAILY_TARGET,
+    max_daily_target: MAX_DAILY_TARGET,
+  };
+}
+
+function validISODate(value) {
+  if (typeof value !== "string" || !ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function reviewEventId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return `review:${globalThis.crypto.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  const suffix = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `review:${Date.now().toString(36)}:${suffix}`;
+}
+
+function recordReview(entry, today, id = reviewEventId()) {
+  entry.review_events ??= {};
+  entry.review_events[id] = today;
+}
 
 export function emptyBank() {
-  return { version: SCHEMA_VERSION, words: [], deleted: [], today: null };
+  return {
+    version: SCHEMA_VERSION,
+    words: [],
+    deleted: [],
+    today: null,
+    settings: { daily_target: TODAY_TARGET, updated: 0 },
+  };
 }
 
 export function normalize(word) {
@@ -36,11 +91,19 @@ export function normalize(word) {
  */
 export function migrate(raw) {
   const bank = raw && typeof raw === "object" ? raw : {};
+  const settings =
+    bank.settings && typeof bank.settings === "object" && !Array.isArray(bank.settings)
+      ? bank.settings
+      : {};
   const out = {
     version: SCHEMA_VERSION,
     words: Array.isArray(bank.words) ? bank.words : [],
     deleted: Array.isArray(bank.deleted) ? bank.deleted : [],
     today: bank.today ?? null,
+    settings: {
+      daily_target: normalizedDailyTarget(settings.daily_target),
+      updated: Number.isFinite(settings.updated) ? settings.updated : 0,
+    },
   };
   for (const w of out.words) {
     // Backfills are parsed as UTC, deliberately. These are sync timestamps
@@ -54,6 +117,15 @@ export function migrate(raw) {
     // is reviewed. That distinction is what lets a merge tell "deleted, then
     // typed in again" from "deleted here, reviewed there" — see merge.js.
     if (typeof w.created !== "number") w.created = addedUTC;
+    // Before definition refreshes existed, dictionary fields only changed when
+    // the word was created. Do not backfill from `updated`: reviews advance that
+    // clock and would make stale definitions look newer than real dictionary edits.
+    if (typeof w.definition_updated !== "number") w.definition_updated = w.created;
+    // Canonicalise optional dictionary fields before merge comparison. Otherwise
+    // the first shared-word merge can introduce an explicit null and make an
+    // otherwise identical second sync look like a new change.
+    if (typeof w.phonetic !== "string") w.phonetic = null;
+    if (typeof w.clarification_url !== "string") w.clarification_url = null;
     if (typeof w.times_used !== "number") w.times_used = 0;
     // Essay totals are derived from uniquely identified log events. Unioning
     // those events during sync preserves concurrent offline additions from two
@@ -76,6 +148,29 @@ export function migrate(raw) {
     }
     w.essay_use_events = events;
     w.essay_uses = Object.values(events).reduce((sum, count) => sum + count, 0);
+
+    // Review history uses the same conflict-safe event-set pattern as essay
+    // logs. Old banks only retain `srs.last`, so preserve that one known event
+    // rather than inventing history we cannot reconstruct.
+    const reviewEvents = {};
+    if (
+      w.review_events &&
+      typeof w.review_events === "object" &&
+      !Array.isArray(w.review_events)
+    ) {
+      for (const [id, date] of Object.entries(w.review_events)) {
+        if (id && validISODate(date)) reviewEvents[id] = date;
+      }
+    }
+    const lastReview = w.srs?.last;
+    if (
+      validISODate(lastReview) &&
+      !Object.values(reviewEvents).some((date) => date === lastReview)
+    ) {
+      reviewEvents[`legacy:${lastReview}`] = lastReview;
+    }
+    w.review_events = reviewEvents;
+
     if (!Array.isArray(w.synonyms)) w.synonyms = [];
     if (!Array.isArray(w.senses)) w.senses = [];
   }
@@ -145,12 +240,13 @@ function rankedWordNames(bank) {
  * app would queue a sync, and the counts in the rail refresh constantly.
  */
 export function ensureTodayList(bank, date) {
+  const target = dailyTarget(bank);
   const fresh = !bank.today || bank.today.date !== date;
   if (fresh) {
     // Due words first (most overdue at the top), then the words whose
-    // review comes up soonest, until we have about ten.
+    // review comes up soonest, until we have the configured daily batch.
     const ranked = rankedWordNames(bank);
-    const words = ranked.slice(0, TODAY_TARGET);
+    const words = ranked.slice(0, target);
     bank.today = {
       date,
       words,
@@ -175,13 +271,15 @@ export function ensureTodayList(bank, date) {
   // Top the list back up. Words can arrive after the list was built — most
   // often synced in from the other device — and without this they'd wait
   // until tomorrow to be practised, which reads as sync half-working.
-  // Existing entries keep their order; only the tail grows.
-  if (t.words.length < TODAY_TARGET) {
+  // Existing entries keep their order; only the tail grows. Deliberately do
+  // not shrink a live list when the setting is lowered; the smaller size takes
+  // effect at the next refresh, extra batch, or new day.
+  if (t.words.length < target) {
     const already = new Set(t.words);
     const fill = [...bank.words]
       .filter((w) => !already.has(w.word))
       .sort(compareSchedule)
-      .slice(0, TODAY_TARGET - t.words.length)
+      .slice(0, target - t.words.length)
       .map((w) => w.word);
     t.words.push(...fill);
   }
@@ -196,10 +294,16 @@ export function ensureTodayList(bank, date) {
   return true;
 }
 
+function stampTodaySelection(t) {
+  const now = Date.now();
+  t.refreshed = Math.max(now, (t.refreshed ?? 0) + 1);
+  t.updated = now;
+}
+
 /**
  * Replaces today's selection with the next due-ranked words that are not
  * already visible, then fills any spare slots from the current selection.
- * With ten words or fewer there is nothing useful to rotate, so this is a
+ * With no alternative words there is nothing useful to rotate, so this is a
  * genuine no-op and does not create needless storage or sync writes.
  */
 export function refreshTodayList(bank, date) {
@@ -210,25 +314,49 @@ export function refreshTodayList(bank, date) {
   if (!sameDay) return ensured;
   const t = bank.today;
   const ranked = rankedWordNames(bank);
-  if (ranked.length <= TODAY_TARGET) return ensured;
+  const target = dailyTarget(bank);
+  if (ranked.length <= target) return ensured;
 
   // Before the first manual rotation, infer the position after the current
-  // page. This also handles a bank that grew from ten to eleven words after
-  // today's list was created. Thereafter the persisted cursor walks a circular
-  // sequence of pages, so a 25-word bank reaches words 20–24 instead of
-  // bouncing forever between the first two groups of ten.
+  // page. This also handles a bank that grew after today's list was created.
+  // Thereafter the persisted cursor walks a circular sequence of pages.
   let cursor = t.refreshed
     ? (t.cursor ?? 0) % ranked.length
     : cursorAfterCurrent(ranked, t.words);
   const words = Array.from(
-    { length: Math.min(TODAY_TARGET, ranked.length) },
+    { length: Math.min(target, ranked.length) },
     (_, index) => ranked[(cursor + index) % ranked.length]
   );
   t.words = words;
-  t.cursor = (cursor + TODAY_TARGET) % ranked.length;
-  const now = Date.now();
-  t.refreshed = Math.max(now, (t.refreshed ?? 0) + 1);
-  t.updated = now;
+  t.cursor = (cursor + target) % ranked.length;
+  stampTodaySelection(t);
+  return true;
+}
+
+/**
+ * Starts another same-day batch after the visible batch is complete.
+ *
+ * Unlike a generic refresh, this never reintroduces a word already practised
+ * today. The day-wide tick history stays intact, so extra practice cannot
+ * double-advance a word's SRS schedule.
+ */
+export function expandTodayList(bank, date) {
+  const sameDay = bank.today?.date === date;
+  const ensured = ensureTodayList(bank, date);
+  if (!sameDay) return ensured;
+
+  const view = todayView(bank);
+  if (view.remaining !== 0) return ensured;
+
+  const t = bank.today;
+  const ranked = rankedWordNames(bank);
+  const completed = new Set(t.ticked);
+  const words = ranked.filter((word) => !completed.has(word)).slice(0, dailyTarget(bank));
+  if (!words.length) return ensured;
+
+  t.words = words;
+  t.cursor = ranked.length ? cursorAfterCurrent(ranked, words) : 0;
+  stampTodaySelection(t);
   return true;
 }
 
@@ -251,15 +379,57 @@ export function todayView(bank) {
       def: w.senses[0]?.def ?? "",
       ticked: t.ticked.includes(w.word),
     }));
+  const completedToday = t.ticked.filter((word) => Boolean(find(bank, word))).length;
+  const nextBatchSize = Math.min(
+    dailyTarget(bank),
+    bank.words.filter((word) => !t.ticked.includes(word.word)).length
+  );
+  const remaining = items.filter((i) => !i.ticked).length;
   return {
     date: t.date,
     items,
-    remaining: items.filter((i) => !i.ticked).length,
-    can_refresh: bank.words.some((word) => !t.words.includes(word.word)),
+    remaining,
+    target: dailyTarget(bank),
+    completed_today: completedToday,
+    next_batch_size: nextBatchSize,
+    can_expand: remaining === 0 && nextBatchSize > 0,
+    can_refresh:
+      t.words.length > dailyTarget(bank) ||
+      bank.words.some((word) => !t.words.includes(word.word)),
   };
 }
 
-// ---- mutations (each stamps `updated` so sync can order them) ----
+/**
+ * Changes the default Today batch size.
+ *
+ * Raising the target tops up the current list immediately. Lowering it leaves
+ * an already-visible larger list alone and takes effect on the next explicit
+ * selection change or new day, so changing a setting never makes assigned
+ * words disappear mid-session.
+ */
+export function setDailyTarget(bank, value, date = todayISO()) {
+  const target = Number(value);
+  if (
+    !Number.isInteger(target) ||
+    target < MIN_DAILY_TARGET ||
+    target > MAX_DAILY_TARGET
+  ) {
+    throw new RangeError(
+      `choose a whole number from ${MIN_DAILY_TARGET} to ${MAX_DAILY_TARGET}`
+    );
+  }
+  if (target === dailyTarget(bank)) return false;
+
+  const previousUpdated = Number.isFinite(bank.settings?.updated) ? bank.settings.updated : 0;
+  bank.settings = {
+    daily_target: target,
+    updated: Math.max(Date.now(), previousUpdated + 1),
+  };
+  ensureTodayList(bank, date);
+  return true;
+}
+
+// ---- mutations ----
 
 export function insertWord(bank, entry, today) {
   bank.words.unshift(entry);
@@ -267,7 +437,7 @@ export function insertWord(bank, entry, today) {
   bank.deleted = (bank.deleted ?? []).filter((d) => d.word !== entry.word);
   // A brand-new word can join today's checklist if there's room.
   const t = bank.today;
-  if (t && t.date === today && t.words.length < TODAY_TARGET) {
+  if (t && t.date === today && t.words.length < dailyTarget(bank)) {
     t.words.push(entry.word);
     t.updated = Date.now();
   }
@@ -288,16 +458,18 @@ export function newWord(word, dict, synonyms, today) {
     times_used: 0,
     essay_uses: 0,
     essay_use_events: {},
-    // `updated` moves on every edit; `created` only when the word is added.
+    review_events: {},
+    // Review/base recency and dictionary recency are deliberately independent.
     updated: now,
+    definition_updated: now,
     created: now,
   };
 }
 
 /**
  * Replaces only a word's dictionary fields, preserving its review and usage
- * history. Returns false for a stale/no-op result so callers avoid needless
- * storage writes and sync pushes.
+ * history. Definition recency is separate from `updated`, so a clarification
+ * on a stale device cannot make stale SRS state win a whole-record merge.
  */
 export function updateDefinition(bank, word, dictionary, now = Date.now()) {
   const entry = find(bank, word);
@@ -324,7 +496,7 @@ export function updateDefinition(bank, word, dictionary, now = Date.now()) {
   if (JSON.stringify(next) === JSON.stringify(current)) return false;
 
   Object.assign(entry, next);
-  entry.updated = Math.max(now, (entry.updated ?? 0) + 1);
+  entry.definition_updated = Math.max(now, (entry.definition_updated ?? entry.created ?? 0) + 1);
   return true;
 }
 
@@ -337,11 +509,20 @@ export function updateDefinition(bank, word, dictionary, now = Date.now()) {
  * now, so it wins the next merge on every channel by the ordinary rules rather
  * than by a special case that only this device would understand.
  *
- * Two details make it stick. Essay-use events are unioned rather than replaced,
- * because those were never in conflict and discarding them would turn one
- * resolved conflict into a new loss. And restoring a word that another device
- * deleted moves `created` past the tombstone — the only thing that survives a
- * merge as a genuine re-add.
+ * Three details make it stick, one per clock the merge keeps:
+ *
+ *  - `updated` moves ahead of both copies, so the reinstated review/base state
+ *    wins `beats`.
+ *  - `definition_updated` moves too. Dictionary fields resolve *independently*
+ *    of the rest of the record, so restoring a definition without this would be
+ *    undone by the very next merge — the record would come back while the
+ *    definition the user rejected quietly won again.
+ *  - `created` moves past any tombstone, which is the only thing a merge reads
+ *    as a genuine re-add rather than a delete to re-apply.
+ *
+ * Unionable state — essay-use events and review events — is merged rather than
+ * replaced. Those were never in conflict, and dropping them would turn one
+ * resolved conflict into a fresh loss of activity history.
  */
 export function reinstateWord(bank, record, now = Date.now()) {
   const word = record.word;
@@ -352,13 +533,30 @@ export function reinstateWord(bank, record, now = Date.now()) {
     events[id] = Math.max(events[id] ?? 0, count);
   }
 
+  const reviews = { ...(record.review_events ?? {}) };
+  for (const [id, date] of Object.entries(current?.review_events ?? {})) {
+    if (!reviews[id] || date > reviews[id]) reviews[id] = date;
+  }
+  const reviewsThrough = Math.max(
+    record.review_events_updated ?? 0,
+    current?.review_events_updated ?? 0
+  );
+
+  // Ahead of both copies, and of any device whose clock ran ahead of ours.
+  const ahead = (...values) => Math.max(now, ...values.map((v) => (v ?? 0) + 1));
+
   const tomb = (bank.deleted ?? []).find((d) => d.word === word);
   const entry = {
     ...record,
     essay_use_events: events,
     essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
-    // Ahead of both copies, and of any device whose clock ran ahead of ours.
-    updated: Math.max(now, (current?.updated ?? 0) + 1, (record.updated ?? 0) + 1),
+    review_events: reviews,
+    ...(reviewsThrough > 0 ? { review_events_updated: reviewsThrough } : {}),
+    updated: ahead(current?.updated, record.updated),
+    definition_updated: ahead(
+      current?.definition_updated ?? current?.created,
+      record.definition_updated ?? record.created
+    ),
     created: tomb
       ? Math.max(now, tomb.at + 1)
       : current?.created ?? record.created ?? now,
@@ -389,6 +587,7 @@ export function grade(bank, word, g, today) {
   const entry = find(bank, word);
   if (!entry) throw new Error("word not found");
   applySrs(entry.srs, g, today);
+  recordReview(entry, today);
   entry.updated = Date.now();
   return entry;
 }
@@ -407,6 +606,7 @@ export function tick(bank, word, ticked, today) {
     if (entry && entry.srs.last !== today) {
       applySrs(entry.srs, "good", today);
       entry.times_used += 1;
+      recordReview(entry, today, `practice:${today}`);
       entry.updated = Date.now();
     }
     t.ticked.push(word);
@@ -425,7 +625,7 @@ export function tick(bank, word, ticked, today) {
  *
  * Deliberately does not move the word's main `updated` stamp. Sync merges this
  * monotonic statistic independently, so logging an essay on a stale device
- * cannot replace a newer definition or SRS schedule wholesale.
+ * cannot replace a newer SRS schedule wholesale.
  */
 export function logEssayUses(bank, usages, logId) {
   if (typeof logId !== "string" || !logId) throw new Error("essay log needs an id");
@@ -457,8 +657,44 @@ export function dueWords(bank, today) {
     .sort((a, b) => (a.srs.due < b.srs.due ? -1 : a.srs.due > b.srs.due ? 1 : 0));
 }
 
-export function listWords(bank) {
-  return [...bank.words].sort((a, b) =>
-    a.added > b.added ? -1 : a.added < b.added ? 1 : a.word < b.word ? -1 : 1
-  );
+const wordCollator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+
+function compareWords(a, b) {
+  const natural = wordCollator.compare(a.word, b.word);
+  if (natural !== 0) return natural;
+  return a.word < b.word ? -1 : a.word > b.word ? 1 : 0;
+}
+
+function addedAt(word) {
+  if (Number.isFinite(word.created)) return word.created;
+  const parsed = Date.parse(`${word.added ?? ""}T00:00:00Z`);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function countOf(value) {
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareDue(a, b) {
+  return a.srs.due < b.srs.due ? -1 : a.srs.due > b.srs.due ? 1 : 0;
+}
+
+const wordSorters = new Map([
+  ["added-newest", (a, b) => addedAt(b) - addedAt(a)],
+  ["added-oldest", (a, b) => addedAt(a) - addedAt(b)],
+  ["word-asc", compareWords],
+  ["word-desc", (a, b) => -compareWords(a, b)],
+  ["due-soonest", compareDue],
+  ["due-latest", (a, b) => -compareDue(a, b)],
+  ["practised-most", (a, b) => countOf(b.times_used) - countOf(a.times_used)],
+  ["practised-least", (a, b) => countOf(a.times_used) - countOf(b.times_used)],
+  ["essay-most", (a, b) => countOf(b.essay_uses) - countOf(a.essay_uses)],
+  ["essay-least", (a, b) => countOf(a.essay_uses) - countOf(b.essay_uses)],
+]);
+
+/** Returns a sorted copy for display without changing the synced bank order. */
+export function listWords(bank, order = "added-newest") {
+  const compare = wordSorters.get(order);
+  if (!compare) throw new RangeError(`unknown bank sort: ${order}`);
+  return [...bank.words].sort((a, b) => compare(a, b) || compareWords(a, b));
 }

@@ -14,10 +14,19 @@
  *
  * The definition of a conflict here is deliberately narrow — **the merge
  * discarded something the loser had that the winner does not**. Two copies
- * that differ only in fields the merge unions (essay-use events, today's
- * ticks) are not a conflict, because nothing was lost. Two identical copies
- * are not a conflict either. Anything reported here is a real choice with a
- * real cost, which is what makes the list short enough to be worth reading.
+ * that differ only in fields the merge unions (essay-use events, review
+ * events, today's ticks) are not a conflict, because nothing was lost. Two
+ * identical copies are not a conflict either. Anything reported here is a real
+ * choice with a real cost, which is what makes the list short enough to be
+ * worth reading.
+ *
+ * That means this file has to track `merge.js` field group for field group. A
+ * word is not resolved as one unit: review/base state resolves by `updated`
+ * (`beats`), while dictionary state resolves independently by
+ * `definition_updated` (`definitionBeats`), so an automatic clarification
+ * cannot drag stale scheduling along with it. The two can therefore have
+ * *different* winners, and collapsing them into one report would name the
+ * wrong device. They are reported — and undone — separately.
  *
  * There is no common ancestor to diff against — no operation log, no base
  * revision — and inventing one would mean storing a third copy of the bank
@@ -25,7 +34,7 @@
  * and answers the only question a person actually asks.
  */
 
-import { beats, stable } from "./merge.js";
+import { beats, definitionBeats, dictionaryFields, stable } from "./merge.js";
 import { encryptJSON, decryptJSON } from "./crypto.js";
 import { storeGet, storeSet, storeRemove } from "../platform/store.js";
 
@@ -41,42 +50,41 @@ function srsOf(w) {
 }
 
 /**
- * The reasons this particular loser mattered. Empty means the merge cost
- * nothing and there is no conflict to report.
+ * What the *base* winner's copy cost the loser.
  *
- * Only fields the merge resolves by *choosing* are considered. Essay-use
- * events are unioned in `mergeBanks`, so a difference there survives both
- * ways and is not a loss; `essay_uses` is derived from them and likewise
- * excluded.
+ * Only the field groups `mergeBanks` resolves by choosing a whole side are
+ * considered. Essay-use events and review events are unioned there, so a
+ * difference in either survives both ways and is not a loss; `essay_uses` is
+ * derived from the former and likewise excluded. Dictionary fields are not
+ * here at all — they have their own winner, and their own report below.
  */
-function losses(winner, loser) {
+function baseLosses(winner, loser) {
   const out = [];
-
-  if (stable(winner.senses ?? []) !== stable(loser.senses ?? [])) {
-    out.push("a different definition");
-  } else if ((winner.phonetic ?? null) !== (loser.phonetic ?? null)) {
-    out.push("a different pronunciation");
-  }
-
-  if (stable(winner.synonyms ?? []) !== stable(loser.synonyms ?? [])) {
-    out.push("different synonyms");
-  }
-
   const ws = srsOf(winner);
   const ls = srsOf(loser);
+
   if (
     (ls.reps ?? 0) > (ws.reps ?? 0) ||
     (ls.lapses ?? 0) > (ws.lapses ?? 0) ||
     (ls.last ?? "") > (ws.last ?? "")
   ) {
-    out.push(`more review history (${ls.reps ?? 0} reps vs ${ws.reps ?? 0})`);
+    out.push(`a further-along review schedule (${ls.reps ?? 0} reps vs ${ws.reps ?? 0})`);
   }
 
   if ((loser.times_used ?? 0) > (winner.times_used ?? 0)) {
     out.push(`more practice (${loser.times_used ?? 0}× vs ${winner.times_used ?? 0}×)`);
   }
 
+  if (stable(loser.synonyms ?? []) !== stable(winner.synonyms ?? [])) {
+    out.push("different synonyms");
+  }
+
   return out;
+}
+
+/** Whether the dictionary the merge dropped actually said something different. */
+function definitionDiffers(winner, loser) {
+  return stable(dictionaryFields(winner)) !== stable(dictionaryFields(loser));
 }
 
 /** FNV-1a over the canonical form — just enough to recognise the same pair twice. */
@@ -113,9 +121,14 @@ function wordMap(bank) {
  * "the Syncthing folder", "GitHub"), carried through to the interface so the
  * report can say where each copy came from.
  *
- * Two shapes are reported:
+ * Three shapes are reported:
  *
- *   - **edit vs edit** — both sides hold the word, the merge keeps one.
+ *   - **edit vs edit** — both sides hold the word and the merge keeps one
+ *     copy's schedule, practice count, and synonyms.
+ *   - **definition vs definition** — the two copies disagree about the
+ *     dictionary entry, which the merge resolves on its own clock. This can
+ *     land on the opposite device from the edit above, which is exactly why
+ *     it is its own entry.
  *   - **delete vs edit** — one side deleted the word, the other edited it
  *     *after* that delete, and the tombstone still wins. The edit vanishes,
  *     which is the single most surprising outcome the merge can produce.
@@ -130,26 +143,50 @@ export function detectConflicts(mineBank, theirsBank, { mine, theirs, at = Date.
   const theirsTombs = tombstoneMap(theirsBank);
   const found = [];
 
+  const side = (aWon) => ({
+    keptSide: aWon ? mine : theirs,
+    lostSide: aWon ? theirs : mine,
+  });
+
   for (const [word, a] of mineWords) {
     const b = theirsWords.get(word);
     if (!b) continue;
     if (stable(a) === stable(b)) continue;
-    const aWins = beats(a, b);
-    const kept = aWins ? a : b;
-    const lost = aWins ? b : a;
-    const reasons = losses(kept, lost);
-    if (!reasons.length) continue;
-    found.push({
-      word,
-      kind: "edit",
-      keptSide: aWins ? mine : theirs,
-      lostSide: aWins ? theirs : mine,
-      kept,
-      lost,
-      reasons,
-      at,
-      id: `${word}:${digest(kept)}:${digest(lost)}`,
-    });
+
+    // Review/base state: whichever copy `mergeBanks` keeps whole.
+    const baseA = beats(a, b);
+    const baseKept = baseA ? a : b;
+    const baseLost = baseA ? b : a;
+    const reasons = baseLosses(baseKept, baseLost);
+    if (reasons.length) {
+      found.push({
+        word,
+        kind: "edit",
+        ...side(baseA),
+        kept: baseKept,
+        lost: baseLost,
+        reasons,
+        at,
+        id: `${word}:edit:${digest(baseKept)}:${digest(baseLost)}`,
+      });
+    }
+
+    // Dictionary state: resolved separately, so reported separately.
+    const defA = definitionBeats(a, b);
+    const defKept = defA ? a : b;
+    const defLost = defA ? b : a;
+    if (definitionDiffers(defKept, defLost)) {
+      found.push({
+        word,
+        kind: "definition",
+        ...side(defA),
+        kept: defKept,
+        lost: defLost,
+        reasons: ["a different definition"],
+        at,
+        id: `${word}:def:${digest(dictionaryFields(defKept))}:${digest(dictionaryFields(defLost))}`,
+      });
+    }
   }
 
   // A delete on one side that swallows a later edit on the other.
@@ -176,7 +213,9 @@ export function detectConflicts(mineBank, theirsBank, { mine, theirs, at = Date.
     }
   }
 
-  found.sort((x, y) => (x.word < y.word ? -1 : x.word > y.word ? 1 : 0));
+  found.sort((x, y) =>
+    x.word < y.word ? -1 : x.word > y.word ? 1 : x.kind < y.kind ? -1 : x.kind > y.kind ? 1 : 0
+  );
   return found;
 }
 

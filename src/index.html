@@ -99,24 +99,44 @@
         <button class="rail-link" data-view="review">review<span class="rail-count" id="count-review"></span></button>
         <button class="rail-link" data-view="essay">essay</button>
         <button class="rail-link" data-view="sync">sync</button>
+        <button class="rail-link" data-view="settings">settings</button>
         <button class="rail-link" id="rail-lookup" title="shortcut: /">lookup<span class="rail-hint">/</span></button>
       </div>
       <button id="sync-line" class="sync-line" hidden></button>
       <button id="update-line" class="update-line" hidden></button>
-      <p class="rail-foot">definitions from Wiktionary<br /><span id="rail-privacy"></span></p>
+      <button id="rail-about" class="rail-about" type="button" aria-haspopup="dialog">
+        about
+      </button>
     </nav>
 
     <main>
       <!-- bank -->
       <section id="view-bank" class="view active">
-        <p class="guide-words" id="guide-words" hidden></p>
+        <div id="bank-tools" class="bank-tools" hidden>
+          <p class="guide-words" id="guide-words" hidden></p>
+          <label class="bank-sort">
+            <span>sort by</span>
+            <select id="bank-sort" aria-label="Sort bank">
+              <option value="added-newest">date added — newest</option>
+              <option value="added-oldest">date added — oldest</option>
+              <option value="word-asc">word — A–Z</option>
+              <option value="word-desc">word — Z–A</option>
+              <option value="due-soonest">due — soonest</option>
+              <option value="due-latest">due — latest</option>
+              <option value="practised-most">practised — most</option>
+              <option value="practised-least">practised — least</option>
+              <option value="essay-most">essay uses — most</option>
+              <option value="essay-least">essay uses — least</option>
+            </select>
+          </label>
+        </div>
         <form id="add-form" class="add-form" autocomplete="off">
-          <input id="add-input" type="text" placeholder="add a word, e.g. demise" spellcheck="false" aria-label="Add a word" />
+          <input id="add-input" type="text" placeholder="add words, e.g. deontic modality" spellcheck="false" aria-label="Add one or more words" />
         </form>
-        <p id="add-status" class="add-status" hidden></p>
+        <p id="add-status" class="add-status" role="status" hidden></p>
         <div id="word-list" class="word-list"></div>
         <p id="bank-empty" class="empty" hidden>
-          No words yet. Add one above — lexis fetches its dictionary definition and suggests
+          No words yet. Add one or more above — lexis fetches each dictionary definition and suggests
           essay-ready synonyms.
         </p>
       </section>
@@ -131,6 +151,9 @@
           <p class="lede" id="today-lede"></p>
         </header>
         <div id="today-list" class="today-list"></div>
+        <div id="today-more-wrap" class="essay-actions" hidden>
+          <button id="today-more" class="button-primary" type="button">another batch</button>
+        </div>
         <p id="today-empty" class="empty" hidden>
           Nothing to practise today. Add words to your bank first.
         </p>
@@ -266,7 +289,49 @@
           <p id="ds-error" class="gate-error" hidden></p>
         </form>
       </section>
+
+      <!-- settings -->
+      <section id="view-settings" class="view">
+        <header class="view-head">
+          <p class="eyebrow">settings</p>
+          <p class="lede">
+            Choose how many words appear in each daily batch. After you finish one batch,
+            Today can give you another without resetting anything you already practised.
+          </p>
+        </header>
+        <form id="settings-form" class="gate-form sync-form" autocomplete="off">
+          <label class="field">
+            <span>words per daily batch</span>
+            <input
+              id="settings-daily-target"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              inputmode="numeric"
+              aria-label="Words per daily batch"
+            />
+            <small>
+              Defaults to 10. Increasing it tops up today. Decreasing it applies on the next
+              refreshed list, extra batch, or new day.
+            </small>
+          </label>
+          <button class="button-primary" type="submit">save settings</button>
+          <p id="settings-status" class="add-status" role="status" hidden></p>
+        </form>
+      </section>
     </main>
+
+    <dialog id="about-dialog" class="about-dialog" aria-labelledby="about-title">
+      <div class="about-head">
+        <h2 id="about-title" class="wordmark about-mark">lexis<span class="stop">.</span></h2>
+        <form method="dialog">
+          <button class="link-quiet" type="submit">close</button>
+        </form>
+      </div>
+      <p class="about-lede">A minimalist word bank for essay writers.</p>
+      <p class="about-source">Definitions from Wiktionary.</p>
+    </dialog>
 
     <!-- quick lookup: “/” or ⌘K — a definition without adding to the bank -->
     <div id="lookup" class="lookup" hidden>

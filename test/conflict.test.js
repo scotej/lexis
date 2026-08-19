@@ -213,3 +213,70 @@ test("a new divergence of a word with a dismissed conflict is still reported", (
   const log = foldConflicts(dismissed, detectConflicts(a, c, sides));
   assert.equal(log.filter((x) => !x.dismissed).length, 1);
 });
+
+/* ---- dictionary state resolves on its own clock ---- */
+
+test("the definition and the schedule can be kept from different devices", () => {
+  // This is the case a single per-word verdict would misreport. `mergeBanks`
+  // keeps the newer *record* and the newer *definition* independently, so the
+  // two halves of the merged word can come from opposite machines.
+  const mine = bank([
+    word("demise", {
+      updated: 5000,
+      definition_updated: 1000,
+      srs: { ...newSrs(DAY), reps: 1 },
+    }),
+  ]);
+  const theirs = bank([
+    word("demise", {
+      updated: 2000,
+      definition_updated: 9000,
+      senses: [{ pos: "noun", def: "a hand-written definition", example: null }],
+      srs: { ...newSrs(DAY), reps: 9, last: "2026-07-19" },
+    }),
+  ]);
+
+  const found = detectConflicts(mine, theirs, sides);
+  const edit = found.find((c) => c.kind === "edit");
+  const definition = found.find((c) => c.kind === "definition");
+
+  assert.ok(edit, "the discarded schedule is reported");
+  assert.equal(edit.keptSide, "here");
+  assert.match(edit.reasons.join(" "), /9 reps vs 1/);
+
+  assert.ok(definition, "the discarded definition is reported separately");
+  assert.equal(definition.keptSide, "there", "and against the other device");
+
+  // The merge really does split them, which is why two entries is correct.
+  const merged = mergeBanks(mine, theirs).words[0];
+  assert.equal(merged.srs.reps, 1, "schedule came from here");
+  assert.equal(merged.senses[0].def, "a hand-written definition", "definition came from there");
+});
+
+test("a definition conflict alone does not claim the schedule was lost", () => {
+  const mine = bank([word("demise", { definition_updated: 5000 })]);
+  const theirs = bank([
+    word("demise", {
+      definition_updated: 2000,
+      senses: [{ pos: "noun", def: "a hand-written definition", example: null }],
+    }),
+  ]);
+  const found = detectConflicts(mine, theirs, sides);
+  assert.deepEqual(
+    found.map((c) => c.kind),
+    ["definition"]
+  );
+});
+
+test("review events differ without conflicting, because the merge unions them", () => {
+  const mine = bank([
+    word("demise", { updated: 5000, review_events: { "review:a": "2026-07-18" } }),
+  ]);
+  const theirs = bank([
+    word("demise", { updated: 2000, review_events: { "review:b": "2026-07-19" } }),
+  ]);
+
+  assert.deepEqual(detectConflicts(mine, theirs, sides), []);
+  const merged = mergeBanks(mine, theirs).words[0];
+  assert.deepEqual(Object.keys(merged.review_events).sort(), ["review:a", "review:b"]);
+});

@@ -15,7 +15,10 @@ Wiktionary REST API). Definitions come from human-edited entries, never a
 language model. When an entry only restates an adverb as “in a … manner”,
 lexis clarifies it with common same-part-of-speech results from Datamuse
 instead of guessing which of the adjective's senses applies. Entries render
-like a print dictionary: headword, IPA, part of speech, numbered senses.
+like a print dictionary: headword, IPA, part of speech, numbered senses. Add
+several words in one go by separating them with spaces; lexis looks each up
+in turn. As the bank grows, sort it by date added, alphabetically, by due
+date, or by how much you've practised or used a word in essays.
 
 **Synonyms for essays.** Each word also gets a short run of synonyms drawn
 from [Datamuse](https://www.datamuse.com/api/) (corpus statistics, not AI) and
@@ -23,10 +26,12 @@ ranked by an on-device scorer that favours the formal register — uncommon but
 usable words, Latinate endings, some length. They're suggestions for your
 writing, deliberately *not* added to the bank.
 
-**Today.** Every day lexis picks about ten words — most overdue first — and
-asks you to work them into that day's writing. Ticking a word counts as a
-successful review. If you want a different selection, **refresh list** rotates
-in the next due words without erasing anything you have already practised.
+**Today.** Every day lexis picks a batch of words — ten by default, most
+overdue first — and asks you to work them into that day's writing. Ticking a
+word counts as a successful review. If you want a different selection,
+**refresh list** rotates in the next due words without erasing anything you
+have already practised, and once a batch is done you can pull in another
+without resetting it. The batch size is yours to change in **settings**.
 When an older stored adverb reaches Today, its opaque definition is upgraded
 with the same lexical clarification used for newly added words.
 
@@ -41,9 +46,14 @@ draft adds every matched occurrence — including bank words outside today's
 list — to that word's separate essay-use total. Matches from today's list are
 also marked as practised and scheduled to return.
 
+**Stats.** A dedicated view charts your activity — words added and reviews
+done per day — alongside running totals for bank size, reviews, streak, and
+essay uses. Recorded activity stays in these statistics even after a word is
+later removed.
+
 **Quick lookup.** Press `/` (or `⌘K`) anywhere for a definition without
 commitment: type a word, read its senses, `esc` to close — or add it to the
-bank after all. The five views answer to the keys `1`–`5`.
+bank after all. The seven views answer to the keys `1`–`7`.
 
 ## Two ends, one app
 

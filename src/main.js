@@ -17,6 +17,7 @@ import {
   saveConflictLog,
   clearConflictLog,
 } from "./core/conflict.js";
+import { installStatsView, renderStatsView } from "./stats-view.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -27,6 +28,12 @@ function el(tag, className, text) {
 }
 
 const $ = (id) => document.getElementById(id);
+
+function isEditingTarget(target = document.activeElement) {
+  return Boolean(
+    target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)
+  );
+}
 
 let platform = null;
 let app = null;
@@ -58,12 +65,17 @@ async function mutate(action) {
 
 /* ---- navigation ---- */
 
+installStatsView();
+
 const railLinks = document.querySelectorAll(".rail-link[data-view]");
 railLinks.forEach((btn, i) => {
   btn.addEventListener("click", () => switchView(btn.dataset.view));
   btn.title = `shortcut: ${i + 1}`;
   btn.setAttribute("aria-keyshortcuts", String(i + 1));
 });
+
+const aboutDialog = $("about-dialog");
+$("rail-about").addEventListener("click", () => aboutDialog.showModal());
 
 function switchView(name) {
   // The gate overlays the rail but doesn't inert it, so a keyboard user can
@@ -76,18 +88,21 @@ function switchView(name) {
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
+  if (name === "stats") renderStatsView(app.getBank());
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
+  if (name === "settings") renderSettings();
 }
 
-// 1–5 jump straight to a view, top to bottom, matching the rail. Bare digits
+// 1–7 jump straight to a view, top to bottom, matching the rail. Bare digits
 // rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
 // tabs, and bare Space already works this way during review.
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
+  if (aboutDialog.open) return;
+  if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
-  const digit = /^Digit([1-5])$/.exec(e.code);
+  const digit = /^Digit([1-7])$/.exec(e.code);
   if (!digit) return;
   switchView(railLinks[Number(digit[1]) - 1].dataset.view);
 });
@@ -130,7 +145,9 @@ function dueLabel(word) {
   return { text: `due in ${days}d`, urgent: false };
 }
 
-function entryNode(word, expanded) {
+const expandedWords = new Set();
+
+function entryNode(word) {
   const wrap = el("article", "entry");
   const head = el("button", "entry-head");
   head.append(el("span", "headword", word.word));
@@ -142,7 +159,7 @@ function entryNode(word, expanded) {
   wrap.append(head);
 
   const body = el("div", "entry-body");
-  body.hidden = !expanded;
+  body.hidden = !expandedWords.has(word.word);
   word.senses.forEach((s, i) => body.append(senseNode(s, i)));
 
   if (word.synonyms.length) {
@@ -171,6 +188,7 @@ function entryNode(word, expanded) {
   del.addEventListener("click", () =>
     mutate(async () => {
       await app.deleteWord(word.word);
+      expandedWords.delete(word.word);
       renderBank();
       refreshCounts();
     })
@@ -183,22 +201,31 @@ function entryNode(word, expanded) {
 
   head.addEventListener("click", () => {
     body.hidden = !body.hidden;
+    if (body.hidden) expandedWords.delete(word.word);
+    else expandedWords.add(word.word);
   });
   return wrap;
 }
 
-let expandedWord = null;
+const bankSort = $("bank-sort");
+
+bankSort.addEventListener("change", () => renderBank());
 
 async function renderBank() {
-  const words = app.listWords();
+  const words = app.listWords(bankSort.value);
+  const liveWords = new Set(words.map((word) => word.word));
+  for (const word of expandedWords) {
+    if (!liveWords.has(word)) expandedWords.delete(word);
+  }
   const list = $("word-list");
   list.replaceChildren();
-  words.forEach((w) => list.append(entryNode(w, w.word === expandedWord)));
+  words.forEach((w) => list.append(entryNode(w)));
   $("bank-empty").hidden = words.length > 0;
+  $("bank-tools").hidden = words.length < 2;
 
   const guide = $("guide-words");
   if (words.length >= 2) {
-    const alpha = words.map((w) => w.word).sort();
+    const alpha = app.listWords("word-asc").map((w) => w.word);
     guide.textContent = `${alpha[0]} — ${alpha[alpha.length - 1]}`;
     guide.hidden = false;
   } else {
@@ -211,6 +238,11 @@ const addForm = $("add-form");
 const addInput = $("add-input");
 const addStatus = $("add-status");
 
+addInput.addEventListener("input", () => {
+  addStatus.hidden = true;
+  addStatus.classList.remove("error");
+});
+
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const word = addInput.value.trim();
@@ -220,11 +252,13 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
-    const entry = await app.addWord(word);
-    expandedWord = entry.word;
+    const result = await app.addWord(word);
+    const addedEntries = result.batch ?? [result];
+    for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
-    addStatus.hidden = true;
     await renderBank();
+    addStatus.textContent = `added “${addedEntries.map((entry) => entry.word).join(" · ")}”`;
+    addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
     addStatus.classList.add("error");
@@ -246,9 +280,12 @@ async function renderToday() {
 
   // Stored entries are useful even when the lexical APIs are slow or offline.
   // Paint them first, then replace only this still-current render if an older
-  // opaque definition can be clarified in the background.
-  const clarified = await app.todayList({ clarifyDefinitions: true });
-  if (request === todayRenderRequest) drawToday(clarified);
+  // opaque definition can be clarified in the background. This second call can
+  // persist an upgrade, so route failures through the normal save-error UI.
+  await mutate(async () => {
+    const clarified = await app.todayList({ clarifyDefinitions: true });
+    if (request === todayRenderRequest) drawToday(clarified);
+  });
 }
 
 function drawToday(view) {
@@ -260,15 +297,25 @@ function drawToday(view) {
   const list = $("today-list");
   list.replaceChildren();
   $("today-empty").hidden = view.items.length > 0;
-  $("today-refresh").disabled = !view.can_refresh;
-  $("today-refresh").title = view.can_refresh
-    ? "replace this list with other words from your bank"
-    : "add more than ten words to rotate today’s list";
+
+  const refresh = $("today-refresh");
+  refresh.disabled = !view.can_refresh;
+  refresh.title = view.can_refresh
+    ? `replace this list with another ${view.target}-word selection`
+    : "no alternative selection is available";
+
+  const moreWrap = $("today-more-wrap");
+  const more = $("today-more");
+  moreWrap.hidden = !view.can_expand;
+  more.disabled = !view.can_expand;
+  more.textContent = `another ${view.next_batch_size} word${view.next_batch_size === 1 ? "" : "s"}`;
 
   if (view.items.length) {
     $("today-lede").textContent =
       view.remaining === 0
-        ? "All used. Your writing did the remembering today."
+        ? view.can_expand
+          ? `All ${view.completed_today} used today. You can take another ${view.next_batch_size} word${view.next_batch_size === 1 ? "" : "s"} when you’re ready.`
+          : "All used. Your writing did the remembering today."
         : `Work these into today’s writing — ${view.remaining} of ${view.items.length} to go. Ticking one schedules its next return.`;
   } else {
     $("today-lede").textContent = "";
@@ -302,6 +349,18 @@ $("today-refresh").addEventListener("click", async (event) => {
   // A failed save leaves the button in place; let the user retry. A successful
   // render decides whether another rotation is possible.
   if (button.isConnected && button.title.startsWith("replace")) button.disabled = false;
+});
+
+$("today-more").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  await mutate(async () => {
+    await app.expandTodayList();
+    await renderToday();
+    await refreshCounts();
+  });
+  // On failure the existing completed batch is still visible and expandable.
+  if (button.isConnected && !$("today-more-wrap").hidden) button.disabled = false;
 });
 
 /* ---- review ---- */
@@ -389,8 +448,9 @@ function renderCard() {
 let currentReveal = null;
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
+  if (aboutDialog.open) return;
   const reviewActive = $("view-review").classList.contains("active");
-  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  const typing = isEditingTarget();
   if (reviewActive && currentReveal && !typing && $("lookup").hidden) {
     e.preventDefault();
     currentReveal();
@@ -554,7 +614,8 @@ lookupBox.addEventListener("click", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName);
+  if (aboutDialog.open) return;
+  const typing = isEditingTarget();
   // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
   if (
     (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) ||
@@ -587,7 +648,6 @@ $("lookup-form").addEventListener("submit", async (e) => {
     lookupStatus.classList.add("error");
   }
 });
-
 function renderLookupResult(word, dict) {
   lookupResult.replaceChildren();
 
@@ -622,7 +682,7 @@ function renderLookupResult(word, dict) {
       lookupStatus.textContent = `adding “${word}”…`;
       try {
         await app.addWord(word);
-        expandedWord = word;
+        expandedWords.add(word);
         await renderBank();
         lookupStatus.textContent = `“${word}” is in your bank now`;
         add.replaceWith(el("span", null, "in your bank"));
@@ -930,9 +990,11 @@ function conflictNode(entry) {
       "conflict-why",
       entry.kind === "delete"
         ? `Deleted on ${entry.keptSide}, but ${entry.lostSide} had edited it since. ${stamp}`
-        : `Kept the copy from ${entry.keptSide}; the one from ${entry.lostSide} had ${entry.reasons.join(
-            ", "
-          )}. ${stamp}`
+        : entry.kind === "definition"
+          ? `Kept the definition from ${entry.keptSide}; ${entry.lostSide} had a different one. ${stamp}`
+          : `Kept the copy from ${entry.keptSide}; the one from ${entry.lostSide} had ${entry.reasons.join(
+              ", "
+            )}. ${stamp}`
     )
   );
 
@@ -940,14 +1002,21 @@ function conflictNode(entry) {
   const take = el(
     "button",
     "link-quiet",
-    entry.kind === "delete" ? "put the word back" : "use the other copy"
+    entry.kind === "delete"
+      ? "put the word back"
+      : entry.kind === "definition"
+        ? "use the other definition"
+        : "use the other copy"
   );
   take.addEventListener("click", () =>
     mutate(async () => {
       take.disabled = true;
-      // Reinstated as an edit made now, so it wins on GitHub and in the
-      // folder by the ordinary rules rather than by a local special case.
-      await app.restoreWord(entry.lost);
+      // Reinstated as an edit made now, so it wins on GitHub and in the folder
+      // by the ordinary rules rather than by a local special case. A definition
+      // conflict restores only the dictionary half — the schedule it was merged
+      // with may have been kept from the other device, and is not in dispute.
+      if (entry.kind === "definition") await app.restoreDefinition(entry.lost);
+      else await app.restoreWord(entry.lost);
       await dropConflict(entry.id);
       await renderBank();
     })
@@ -969,6 +1038,45 @@ $("conflicts-clear").addEventListener("click", async () => {
   conflictLog = [];
   await clearConflictLog();
   renderConflicts();
+});
+
+/* ---- settings ---- */
+
+const settingsForm = $("settings-form");
+const settingsDailyTarget = $("settings-daily-target");
+const settingsStatus = $("settings-status");
+
+function renderSettings() {
+  const settings = app.getSettings();
+  settingsDailyTarget.min = String(settings.min_daily_target);
+  settingsDailyTarget.max = String(settings.max_daily_target);
+  settingsDailyTarget.value = String(settings.daily_target);
+}
+
+settingsDailyTarget.addEventListener("input", () => {
+  settingsStatus.hidden = true;
+  settingsStatus.classList.remove("error");
+});
+
+settingsForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  settingsStatus.hidden = true;
+  settingsStatus.classList.remove("error");
+  try {
+    const settings = await app.setDailyTarget(settingsDailyTarget.value);
+    settingsDailyTarget.value = String(settings.daily_target);
+    settingsStatus.textContent = `Daily batches now contain ${settings.daily_target} word${settings.daily_target === 1 ? "" : "s"}.`;
+    settingsStatus.hidden = false;
+    await refreshCounts();
+  } catch (err) {
+    settingsStatus.textContent = String(err.message ?? err);
+    settingsStatus.classList.add("error");
+    settingsStatus.hidden = false;
+  } finally {
+    button.disabled = false;
+  }
 });
 
 /* ---- updates (desktop only) ---- */
@@ -1099,6 +1207,8 @@ function wireApp() {
       const active = document.querySelector(".rail-link.active")?.dataset.view;
       if (active === "bank") renderBank();
       else if (active === "today") renderToday();
+      else if (active === "stats") renderStatsView(app.getBank());
+      else if (active === "settings") renderSettings();
       else refreshCounts();
     },
   });
@@ -1140,7 +1250,6 @@ async function requestPersistence() {
     /* durability is an upgrade, never a requirement */
   }
 }
-
 async function startDesktop() {
   wireApp();
   await app.init();
@@ -1229,11 +1338,9 @@ function buildDesktopUnlock() {
 async function boot() {
   if (isDesktop()) {
     platform = createDesktopPlatform();
-    $("rail-privacy").textContent = "your bank stays on this device";
     await startDesktop();
   } else {
     platform = createWebPlatform();
-    $("rail-privacy").textContent = "encrypted before it leaves this device";
     if (!cryptoAvailable()) {
       document.body.replaceChildren(
         el("p", "empty", "lexis needs a browser with Web Crypto (and a secure https connection).")

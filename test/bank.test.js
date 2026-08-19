@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as bank from "../src/core/bank.js";
 import { newSrs } from "../src/core/srs.js";
+import { mergeBanks } from "../src/core/merge.js";
 import { sophisticationScore, stripHtml } from "../src/core/dict.js";
 
 const DAY = "2026-07-20";
 
 function entry(name, due = DAY) {
+  const now = Date.now();
   return {
     word: name,
     phonetic: null,
@@ -18,8 +20,9 @@ function entry(name, due = DAY) {
     srs: { ...newSrs(DAY), due },
     times_used: 0,
     essay_uses: 0,
-    updated: Date.now(),
-    created: Date.now(),
+    updated: now,
+    definition_updated: now,
+    created: now,
   };
 }
 
@@ -109,13 +112,93 @@ test("due words are those scheduled today or earlier", () => {
   assert.deepEqual(due, ["past", "today"]);
 });
 
+test("bank sorting uses creation time without changing stored order", () => {
+  const b = bank.emptyBank();
+  const alpha = entry("alpha");
+  const bravo = entry("bravo");
+  const candid = entry("candid");
+  alpha.created = Date.parse("2026-07-19T09:00:00Z");
+  bravo.created = Date.parse("2026-07-20T09:00:00Z");
+  candid.created = Date.parse("2026-07-20T10:00:00Z");
+  alpha.updated = Date.parse("2026-07-21T12:00:00Z");
+  b.words = [bravo, alpha, candid];
+  const stored = b.words.map((word) => word.word);
+
+  assert.deepEqual(bank.listWords(b).map((word) => word.word), ["candid", "bravo", "alpha"]);
+  assert.deepEqual(bank.listWords(b, "added-oldest").map((word) => word.word), [
+    "alpha",
+    "bravo",
+    "candid",
+  ]);
+  assert.deepEqual(b.words.map((word) => word.word), stored, "display sorting must not alter sync data");
+});
+
+test("legacy words fall back to their day-only added timestamp", () => {
+  const b = bank.emptyBank();
+  const earlier = entry("earlier");
+  const later = entry("later");
+  delete earlier.created;
+  delete later.created;
+  earlier.added = "2026-07-01";
+  later.added = "2026-07-03";
+  b.words = [earlier, later];
+
+  assert.deepEqual(bank.listWords(b).map((word) => word.word), ["later", "earlier"]);
+});
+
+test("bank sorting supports alphabetical and study-oriented orders", () => {
+  const b = bank.emptyBank();
+  const alpha = entry("alpha", "2026-07-20");
+  const bravo = entry("bravo", "2026-07-18");
+  const candid = entry("candid", "2026-07-25");
+  alpha.times_used = 2;
+  bravo.times_used = 1;
+  candid.times_used = 3;
+  alpha.essay_uses = 5;
+  bravo.essay_uses = 5;
+  candid.essay_uses = 0;
+  b.words = [candid, alpha, bravo];
+
+  const names = (order) => bank.listWords(b, order).map((word) => word.word);
+  assert.deepEqual(names("word-asc"), ["alpha", "bravo", "candid"]);
+  assert.deepEqual(names("word-desc"), ["candid", "bravo", "alpha"]);
+  assert.deepEqual(names("due-soonest"), ["bravo", "alpha", "candid"]);
+  assert.deepEqual(names("due-latest"), ["candid", "alpha", "bravo"]);
+  assert.deepEqual(names("practised-most"), ["candid", "alpha", "bravo"]);
+  assert.deepEqual(names("practised-least"), ["bravo", "alpha", "candid"]);
+  assert.deepEqual(names("essay-most"), ["alpha", "bravo", "candid"]);
+  assert.deepEqual(names("essay-least"), ["candid", "alpha", "bravo"]);
+});
+
+test("alphabetical sorting handles valid accented words naturally", () => {
+  const b = bank.emptyBank();
+  b.words = [entry("zebra"), entry("éclair"), entry("apple")];
+
+  assert.deepEqual(bank.listWords(b, "word-asc").map((word) => word.word), [
+    "apple",
+    "éclair",
+    "zebra",
+  ]);
+  assert.deepEqual(bank.listWords(b, "word-desc").map((word) => word.word), [
+    "zebra",
+    "éclair",
+    "apple",
+  ]);
+});
+
+test("bank sorting rejects an unknown order", () => {
+  assert.throws(() => bank.listWords(bank.emptyBank(), "surprise"), /unknown bank sort/);
+});
+
 test("migrating a v1 bank dates its words from when they were added", () => {
   const migrated = bank.migrate({
     words: [{ word: "demise", added: "2026-07-01", srs: newSrs("2026-07-01"), senses: [] }],
   });
+  const added = Date.parse("2026-07-01T00:00:00Z");
   assert.equal(migrated.version, 3);
-  assert.equal(migrated.words[0].updated, Date.parse("2026-07-01T00:00:00Z"));
-  assert.equal(migrated.words[0].created, Date.parse("2026-07-01T00:00:00Z"));
+  assert.equal(migrated.words[0].updated, added);
+  assert.equal(migrated.words[0].created, added);
+  assert.equal(migrated.words[0].definition_updated, added);
   assert.equal(migrated.words[0].times_used, 0);
   assert.equal(migrated.words[0].essay_uses, 0);
   assert.deepEqual(migrated.words[0].essay_use_events, {});
@@ -196,6 +279,7 @@ test("migration timestamps are timezone-independent", () => {
   });
   assert.equal(migrated.words[0].updated, 1782864000000);
   assert.equal(migrated.words[0].created, 1782864000000);
+  assert.equal(migrated.words[0].definition_updated, 1782864000000);
 });
 
 test("ticking twice in one day cannot double-advance the schedule", () => {
@@ -236,6 +320,7 @@ test("a genuine re-add gets a fresh created stamp", () => {
   );
   assert.equal(typeof w.created, "number");
   assert.equal(w.created, w.updated);
+  assert.equal(w.definition_updated, w.created);
   assert.equal(w.clarification_url, "c");
   assert.equal(w.essay_uses, 0);
   assert.deepEqual(w.essay_use_events, {});
@@ -252,6 +337,7 @@ test("updating a definition preserves the word's review and usage history", () =
   w.srs = { ...w.srs, reps: 4, interval: 12, last: DAY };
   w.created = 50;
   w.updated = 100;
+  w.definition_updated = 50;
   b.words = [w];
   const history = structuredClone({
     synonyms: w.synonyms,
@@ -260,6 +346,7 @@ test("updating a definition preserves the word's review and usage history", () =
     essay_use_events: w.essay_use_events,
     srs: w.srs,
     added: w.added,
+    updated: w.updated,
     created: w.created,
   });
 
@@ -282,7 +369,8 @@ test("updating a definition preserves the word's review and usage history", () =
 
   assert.equal(w.senses[0].def, "Depending on context: movingly or touchingly.");
   assert.equal(w.clarification_url, "https://api.datamuse.com/words?ml=poignantly");
-  assert.equal(w.updated, 500);
+  assert.equal(w.updated, 100, "definition refreshes must not advance review/base recency");
+  assert.equal(w.definition_updated, 500);
   assert.deepEqual(
     {
       synonyms: w.synonyms,
@@ -291,14 +379,20 @@ test("updating a definition preserves the word's review and usage history", () =
       essay_use_events: w.essay_use_events,
       srs: w.srs,
       added: w.added,
+      updated: w.updated,
       created: w.created,
     },
     history
   );
 
-  const updated = w.updated;
+  const definitionUpdated = w.definition_updated;
   assert.equal(bank.updateDefinition(b, "poignantly", w, 900), false);
-  assert.equal(w.updated, updated, "an identical definition must not create a sync edit");
+  assert.equal(
+    w.definition_updated,
+    definitionUpdated,
+    "an identical definition must not create a sync edit"
+  );
+  assert.equal(w.updated, 100);
 });
 
 test("manually refreshing today rotates in words outside the current list", () => {
@@ -443,4 +537,29 @@ test("reinstating a word keeps essay-use events from both copies", () => {
   assert.deepEqual(restored.essay_use_events, { theirs: 3, mine: 2 });
   assert.equal(restored.essay_uses, 5);
   assert.equal(b.words.length, 1, "the word is replaced, not duplicated");
+});
+
+test("reinstating a definition survives a merge against the copy that won", () => {
+  // Definitions carry their own clock. Without bumping `definition_updated`,
+  // "use the other definition" would be undone by the very next merge.
+  const theirs = {
+    ...entry("demise"),
+    definition_updated: 9000,
+    senses: [{ pos: "noun", def: "the copy from the other machine", example: null }],
+  };
+  const b = bank.emptyBank();
+  b.words = [{ ...entry("demise"), definition_updated: 5000 }];
+
+  assert.equal(bank.reinstateWord(b, theirs).definition_updated > 9000, true);
+  const merged = mergeBanks(b, { version: 3, words: [theirs], deleted: [], today: null });
+  assert.equal(merged.words[0].senses[0].def, "the copy from the other machine");
+});
+
+test("reinstating a word keeps review events from both copies", () => {
+  const b = bank.emptyBank();
+  b.words = [{ ...entry("demise"), review_events: { "review:mine": "2026-07-18" } }];
+  const record = { ...entry("demise"), review_events: { "review:theirs": "2026-07-19" } };
+
+  const restored = bank.reinstateWord(b, record);
+  assert.deepEqual(Object.keys(restored.review_events).sort(), ["review:mine", "review:theirs"]);
 });
