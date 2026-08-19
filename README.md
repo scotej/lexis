@@ -103,14 +103,27 @@ anything. Add a word on your laptop, tick it off in the browser at school.
 
 **A second copy, on your own network.** The desktop app can also keep an
 encrypted copy in a folder you already sync between machines — a Syncthing
-folder, or anything else that carries a directory across. Open **sync → local
-backup**, give it the folder (say `~/Documents/Crossing`), and every change is
-written there as well as to GitHub.
+folder, or anything else that carries a directory across. (lexis looks for
+Syncthing's `.stfolder` marker and says so if it can't find one; that notice is
+informational and can be silenced.)
+
+Set it up per machine, after GitHub sync is connected on that machine — the
+folder section only appears once it is, because it is sealed with the same
+password-derived key:
+
+1. Connect GitHub sync as above, with **the same password** as your other device.
+2. Go to **sync → local backup**, type the folder's path *on this machine* (say
+   `~/Documents/Crossing`), and choose **use this folder**.
+3. Repeat on the other machine. The path is usually different there; take it
+   from that machine's own Syncthing, not from this one.
+
+From then on every change is written there as well as to GitHub. The web build
+has no filesystem, so this is desktop-only.
 
 It is a genuine second channel, not a mirror of the first. Two machines on the
 same desk reconcile through the folder with no internet at all, and they do it
 in seconds rather than minutes: the folder is checked every eight seconds for
-the price of a directory listing, where GitHub is polled every five. If GitHub
+the price of a directory listing, where GitHub is polled every five minutes. If GitHub
 is unreachable your work still crosses; if the folder is unreachable — an
 unmounted drive, a machine that is off — GitHub still carries it. Turn the
 folder off and nothing else changes.
@@ -137,10 +150,15 @@ were offline is never silently clobbered.
 answer, but sometimes the answer discards real work — a definition you edited
 on one machine, a fortnight of reviews on the other. Those are listed under
 **sync → conflicts**, naming which copy was kept, which channel it came from,
-and what the losing copy held. Each one offers the discarded copy back: *use
-the other copy* reinstates it as an edit made now, so it propagates through
-GitHub and the folder by the ordinary rules. Nothing is deleted without
-appearing there first.
+and in broad terms what the discarded one held: a further-along review
+schedule, more practice, different synonyms, or a different definition.
+
+A word's dictionary and its review schedule are resolved on separate clocks, so
+the two can be kept from *different* machines — and they are listed, and undone,
+separately. Each entry offers the discarded copy back: *use the other copy*
+reinstates the whole record, *use the other definition* replaces only the
+dictionary entry. Either is applied as an edit made now, so it propagates
+through GitHub and the folder by the ordinary rules.
 
 ## Privacy
 
@@ -158,8 +176,13 @@ uploaded; they are analysed locally and never leave the device.
 **The local backup folder is held to the same standard**, and for the same
 reason: a synced folder is a plain directory on two machines with possibly an
 untrusted relay in between. It gets the identical envelope under the identical
-key, so it holds ciphertext and a README explaining as much. Syncthing carries
+key, so it holds ciphertext and a README explaining as much — Syncthing carries
 bytes it cannot read, and neither can anyone who copies the folder.
+
+What the folder does *not* hide is metadata: anyone who can see the directory
+learns that you use lexis, how many devices you sync, each device's random id,
+and roughly how often and how much you write, from the file names, sizes, and
+timestamps. Only the contents are encrypted.
 
 **About the password, honestly.** GitHub Pages on a free account cannot serve
 a private page — the HTML and JavaScript are public no matter what, so a login

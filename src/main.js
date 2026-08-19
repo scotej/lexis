@@ -852,6 +852,29 @@ function notWatchedWarning(root) {
   return `No .stfolder marker was found at or above ${root}, so Syncthing may not be carrying it. The backup is still written; it just may not reach your other machine.`;
 }
 
+/**
+ * The folder notice, with a way to silence it.
+ *
+ * lexis only asks for a folder both machines can see — Syncthing is the
+ * obvious way to arrange that, but it is not the only one, and a standing
+ * warning aimed at people who chose Dropbox or a network share would be a
+ * scold rather than information. Silencing it is remembered in the vault
+ * beside the folder itself.
+ */
+function warningNode(text) {
+  const li = el("li", null, `${text} `);
+  const quiet = el("button", "link-quiet", "don’t mention this again");
+  quiet.type = "button";
+  quiet.addEventListener("click", () =>
+    mutate(async () => {
+      await saveSyncConfig({ ...syncConfig, mirrorQuiet: true });
+      renderMirror();
+    })
+  );
+  li.append(quiet);
+  return li;
+}
+
 /** Rewrites the vault under the same key, so the token is never re-entered. */
 async function saveSyncConfig(next) {
   const { salt, ...stored } = next;
@@ -881,9 +904,12 @@ function renderMirror() {
   }
 
   const notes = $("mirror-notes");
-  const all = [...(mirrorWarning ? [mirrorWarning] : []), ...mirrorNotes];
-  notes.replaceChildren(...all.map((n) => el("li", null, n)));
-  notes.hidden = all.length === 0;
+  const showWarning = mirrorWarning && !syncConfig?.mirrorQuiet;
+  notes.replaceChildren(
+    ...(showWarning ? [warningNode(mirrorWarning)] : []),
+    ...mirrorNotes.map((n) => el("li", null, n))
+  );
+  notes.hidden = notes.childElementCount === 0;
 }
 
 $("mirror-form").addEventListener("submit", async (e) => {
@@ -936,6 +962,7 @@ $("mirror-off").addEventListener("click", async () => {
   }
   const next = { ...syncConfig };
   delete next.mirrorRoot; // deviceId is kept, so turning it back on reuses the name
+  delete next.mirrorQuiet; // a different folder deserves to be judged afresh
   await saveSyncConfig(next);
   mirrorInfo = null;
   mirrorWarning = null;
@@ -1035,8 +1062,15 @@ function renderConflicts() {
 }
 
 $("conflicts-clear").addEventListener("click", async () => {
-  conflictLog = [];
-  await clearConflictLog();
+  // Dismiss rather than delete. Detection re-derives from the channels every
+  // pass, so an emptied log simply refills on the next poll — the flag is the
+  // only thing that makes "clear" mean anything.
+  conflictLog = conflictLog.map((c) => ({ ...c, dismissed: true }));
+  try {
+    if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+  } catch (err) {
+    console.error(err);
+  }
   renderConflicts();
 });
 

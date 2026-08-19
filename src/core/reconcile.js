@@ -76,8 +76,12 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
       }
 
       for (const s of stale) {
+        // Deliberately not actionable from here: folding in a bank this old
+        // would resurrect words every live device has deleted. Naming the file
+        // is the honest maximum — the user can delete it, or open it on the
+        // machine that wrote it and let that machine sync normally.
         notes.push(
-          `${s.name} is ${s.days} days old and was left alone — restore it by hand if you want it back.`
+          `${s.name} was last written ${s.days} days ago and is too old to merge safely, so it was left untouched.`
         );
       }
       for (const u of unreadable) notes.push(`${u.name} could not be read (${u.reason}).`);

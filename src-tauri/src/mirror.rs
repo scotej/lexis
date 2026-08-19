@@ -240,7 +240,10 @@ mod tests {
         assert!(dir.join("lexis").is_dir());
         assert!(dir.join("lexis/README.txt").exists());
         assert_eq!(info.path, dir.join("lexis").to_string_lossy());
-        assert!(!info.syncthing);
+        // Deliberately no assertion on `syncthing` here: it walks up to the
+        // filesystem root, so a build machine whose temp directory happens to
+        // sit under a synced folder would fail a test about something else.
+        // The marker itself is covered by the test below.
     }
 
     #[test]
