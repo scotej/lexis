@@ -184,6 +184,58 @@
             Your bank is encrypted with your password before it is written to GitHub. The
             repository holds ciphertext; GitHub never has the key.
           </p>
+
+          <!-- the Syncthing mirror: desktop only, since a browser has no filesystem -->
+          <section id="mirror" class="sync-block" hidden>
+            <h2 class="sync-heading">local backup</h2>
+            <p class="sync-blurb" id="mirror-lede"></p>
+
+            <dl class="sync-facts" id="mirror-facts" hidden>
+              <div><dt>folder</dt><dd id="mirror-path"></dd></div>
+              <div><dt>this device</dt><dd id="mirror-file"></dd></div>
+              <div><dt>other devices</dt><dd id="mirror-peers">—</dd></div>
+            </dl>
+
+            <form id="mirror-form" class="gate-form sync-form" autocomplete="off">
+              <label class="field">
+                <span>folder</span>
+                <input
+                  id="mirror-root"
+                  type="text"
+                  placeholder="~/Documents/Crossing"
+                  spellcheck="false"
+                  aria-label="Syncthing folder"
+                />
+                <small>
+                  Any folder your other machine also sees. lexis writes one encrypted file per
+                  device into a <em>lexis</em> subfolder and reads the others.
+                </small>
+              </label>
+              <button class="button-primary" type="submit">use this folder</button>
+              <p id="mirror-error" class="gate-error" hidden></p>
+            </form>
+
+            <div class="sync-actions" id="mirror-actions" hidden>
+              <button id="mirror-off" class="link-quiet" type="button">
+                stop backing up to this folder
+              </button>
+            </div>
+
+            <ul id="mirror-notes" class="sync-warnings" hidden></ul>
+          </section>
+
+          <!-- what the merge had to choose between -->
+          <section id="conflicts" class="sync-block" hidden>
+            <h2 class="sync-heading">conflicts</h2>
+            <p class="sync-blurb">
+              Two copies of these words disagreed and lexis had to keep one. Nothing was
+              deleted without being noted here — the other copy is still available.
+            </p>
+            <ul id="conflict-list" class="conflict-list"></ul>
+            <div class="sync-actions">
+              <button id="conflicts-clear" class="link-quiet" type="button">clear this list</button>
+            </div>
+          </section>
         </div>
 
         <!-- not connected (desktop, or web after disconnect) -->

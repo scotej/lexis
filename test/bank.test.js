@@ -407,3 +407,40 @@ test("the same essay event id is idempotent", () => {
   bank.logEssayUses(b, [{ word: "demise", count: 2 }], "essay-a");
   assert.equal(bank.find(b, "demise").essay_uses, 2);
 });
+
+test("reinstating a deleted word survives a merge against the peer that deleted it", async () => {
+  // "put the word back" after a delete-conflict. The restore only sticks if
+  // `created` moves past the tombstone: the peer still carries that tombstone
+  // and will re-apply it on the next merge otherwise.
+  const { mergeBanks } = await import("../src/core/merge.js");
+
+  const deletedAt = Date.now() - 60_000;
+  const record = { ...entry("demise"), created: deletedAt - 60_000, updated: deletedAt - 60_000 };
+
+  const local = bank.emptyBank();
+  local.deleted = [{ word: "demise", at: deletedAt }];
+
+  const restored = bank.reinstateWord(local, record);
+  assert.deepEqual(local.deleted, [], "the tombstone is cleared here");
+  assert.equal(bank.find(local, "demise")?.word, "demise");
+  assert.ok(restored.created > deletedAt, "the re-add postdates the delete");
+
+  const peer = { version: 3, words: [], deleted: [{ word: "demise", at: deletedAt }], today: null };
+  const merged = mergeBanks(local, peer);
+  assert.deepEqual(
+    merged.words.map((w) => w.word),
+    ["demise"],
+    "the peer's tombstone no longer wins"
+  );
+});
+
+test("reinstating a word keeps essay-use events from both copies", () => {
+  const b = bank.emptyBank();
+  b.words = [{ ...entry("demise"), essay_use_events: { mine: 2 }, essay_uses: 2 }];
+  const record = { ...entry("demise"), essay_use_events: { theirs: 3 }, essay_uses: 3 };
+
+  const restored = bank.reinstateWord(b, record);
+  assert.deepEqual(restored.essay_use_events, { theirs: 3, mine: 2 });
+  assert.equal(restored.essay_uses, 5);
+  assert.equal(b.words.length, 1, "the word is replaced, not duplicated");
+});

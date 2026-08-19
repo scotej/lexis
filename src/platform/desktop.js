@@ -35,6 +35,25 @@ export function createDesktopPlatform() {
       },
     },
 
+    /**
+     * The Syncthing mirror's filesystem. Only the desktop build has one, which
+     * is why it lives here rather than in the shared core: the four calls are
+     * scoped to a directory the user nominates, and every byte crossing them is
+     * already encrypted (see core/mirror.js).
+     */
+    mirror: {
+      supported: true,
+      check: (root) => invoke("mirror_check", { root }),
+      fs(root) {
+        return {
+          list: () => invoke("mirror_list", { root }),
+          read: (name) => invoke("mirror_read", { root, name }),
+          write: (name, contents) => invoke("mirror_write", { root, name, contents }),
+          remove: (name) => invoke("mirror_remove", { root, name }),
+        };
+      },
+    },
+
     openUrl(url) {
       tauri?.opener?.openUrl(url).catch(() => {});
     },

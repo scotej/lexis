@@ -71,7 +71,7 @@ function mergeChecklistWords(a, b) {
  *     device keeps its own copy forever, the banks never converge, and both
  *     push a fresh commit on every poll.
  */
-function beats(a, b) {
+export function beats(a, b) {
   const ap = pristine(a);
   const bp = pristine(b);
   if (ap !== bp) return bp;

@@ -958,3 +958,83 @@ main {
   max-width: 380px;
   margin-top: 4px;
 }
+
+/* ---- local backup + conflicts ---- */
+
+.sync-block {
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--hairline);
+}
+
+.sync-heading {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 400;
+}
+
+.sync-blurb {
+  font-family: var(--serif);
+  font-size: 14px;
+  line-height: 1.6;
+  margin-top: 10px;
+  margin-bottom: 16px;
+  max-width: 52ch;
+}
+
+.sync-block .sync-form {
+  margin-top: 0;
+}
+
+.sync-block .sync-actions {
+  margin-top: 16px;
+}
+
+.sync-warnings {
+  list-style: none;
+  margin-top: 18px;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--faint);
+  max-width: 52ch;
+}
+
+.sync-warnings li {
+  padding-left: 14px;
+  text-indent: -14px;
+  margin-top: 6px;
+}
+
+.sync-warnings li::before {
+  content: "— ";
+}
+
+.conflict-list {
+  list-style: none;
+}
+
+.conflict {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.conflict-word {
+  font-family: var(--serif);
+  font-size: 16px;
+}
+
+.conflict-why {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--faint);
+  margin-top: 4px;
+  max-width: 52ch;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+}

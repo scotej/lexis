@@ -61,6 +61,10 @@ export function createWebPlatform() {
       return requestPersistentStorage();
     },
 
+    // A browser has no filesystem to mirror into; the GitHub channel is the
+    // web build's only path off the machine, and that is by design.
+    mirror: { supported: false },
+
     openUrl(url) {
       globalThis.open(url, "_blank", "noopener,noreferrer");
     },

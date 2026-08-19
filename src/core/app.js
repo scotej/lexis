@@ -145,6 +145,19 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       return bankModel.listWords(bank);
     },
 
+    /**
+     * Reinstates a copy of a word the merge discarded. Committed as a normal
+     * edit, so it propagates through GitHub and the Syncthing folder alike.
+     */
+    async restoreWord(record) {
+      return enqueueMutation(async () => {
+        const next = cloneBank();
+        const entry = bankModel.reinstateWord(next, record);
+        await persistReplacement(next);
+        return entry;
+      });
+    },
+
     async deleteWord(word) {
       return enqueueMutation(async () => {
         bankModel.removeWord(bank, word);

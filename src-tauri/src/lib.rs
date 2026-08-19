@@ -1,3 +1,4 @@
+mod mirror;
 mod store;
 
 use serde::Serialize;
@@ -16,6 +17,38 @@ fn load_bank(state: tauri::State<'_, Mutex<Store>>) -> Result<Option<String>, St
 fn save_bank(state: tauri::State<'_, Mutex<Store>>, json: String) -> Result<(), String> {
     let store = state.lock().map_err(|e| e.to_string())?;
     store.save(&json)
+}
+
+/* ---- the Syncthing mirror ----
+ *
+ * Five thin commands over one directory the user nominates. The bytes are
+ * already encrypted by the time they arrive here; see `mirror.rs` and the
+ * shared core's `mirror.js`.
+ */
+
+#[tauri::command]
+fn mirror_check(root: String) -> Result<mirror::MirrorInfo, String> {
+    mirror::check(&root)
+}
+
+#[tauri::command]
+fn mirror_list(root: String) -> Result<Vec<mirror::MirrorEntry>, String> {
+    mirror::list(&root)
+}
+
+#[tauri::command]
+fn mirror_read(root: String, name: String) -> Result<Option<String>, String> {
+    mirror::read(&root, &name)
+}
+
+#[tauri::command]
+fn mirror_write(root: String, name: String, contents: String) -> Result<(), String> {
+    mirror::write(&root, &name, &contents)
+}
+
+#[tauri::command]
+fn mirror_remove(root: String, name: String) -> Result<(), String> {
+    mirror::remove(&root, &name)
 }
 
 #[derive(Serialize, Clone)]
@@ -85,7 +118,12 @@ pub fn run() {
             load_bank,
             save_bank,
             check_update,
-            install_update
+            install_update,
+            mirror_check,
+            mirror_list,
+            mirror_read,
+            mirror_write,
+            mirror_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

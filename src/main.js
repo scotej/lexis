@@ -8,8 +8,15 @@ import { fetchDefinition } from "./core/dict.js";
 import { createSyncController } from "./core/sync-controller.js";
 import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
 import { createWebPlatform } from "./platform/web.js";
-import { hasVault, unlockVault, createVault, clearVault } from "./core/vault.js";
+import { hasVault, unlockVault, createVault, clearVault, updateVault } from "./core/vault.js";
 import { cryptoAvailable } from "./core/crypto.js";
+import { createMirror, newDeviceId, peerFileName } from "./core/mirror.js";
+import {
+  foldConflicts,
+  loadConflictLog,
+  saveConflictLog,
+  clearConflictLog,
+} from "./core/conflict.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -24,6 +31,9 @@ const $ = (id) => document.getElementById(id);
 let platform = null;
 let app = null;
 let sync = null;
+// Held for as long as the app is unlocked: the mirror is sealed with it, and
+// so is the conflict log. Never persisted anywhere in this form.
+let sessionKey = null;
 
 /**
  * Runs a bank mutation, surfacing failures instead of swallowing them.
@@ -647,6 +657,8 @@ function renderSync() {
     $("sync-repo").textContent = `${syncConfig.owner}/${syncConfig.repo}`;
     $("sync-path").textContent = syncConfig.path;
   }
+  renderMirror();
+  renderConflicts();
 }
 
 let syncConfig = null;
@@ -669,8 +681,25 @@ $("sync-now").addEventListener("click", () => sync?.now());
 
 $("sync-disconnect").addEventListener("click", async () => {
   sync?.disable();
+  // Take our file out of the backup folder on the way out. Left behind, it
+  // would age into a "stale peer" the other machine reports for six months —
+  // and the settings that name it are about to be erased.
+  const { mirrorRoot, deviceId } = syncConfig ?? {};
+  if (platform.mirror?.supported && mirrorRoot && deviceId) {
+    try {
+      await platform.mirror.fs(mirrorRoot).remove(peerFileName(deviceId));
+    } catch {
+      /* the folder may be gone; the vault is cleared either way */
+    }
+  }
   await clearVault();
+  // The log holds word records sealed under a key we are about to forget.
+  await clearConflictLog();
+  conflictLog = [];
+  mirror = null;
+  mirrorInfo = null;
   syncConfig = null;
+  sessionKey = null;
   if (platform.kind === "web") {
     await platform.clearCache();
     location.reload();
@@ -695,8 +724,7 @@ $("sync-setup").addEventListener("submit", async (e) => {
       repo: $("ds-repo").value.trim(),
       path: $("ds-path").value.trim() || "bank.lexis.json",
     });
-    syncConfig = { ...config, salt };
-    sync.enable(key, syncConfig);
+    await startSync(key, { ...config, salt });
     $("ds-token").value = "";
     $("ds-password").value = "";
     await sync.now();
@@ -709,6 +737,238 @@ $("sync-setup").addEventListener("submit", async (e) => {
     button.disabled = false;
     button.textContent = "connect";
   }
+});
+
+/* ---- the local backup folder ---- */
+
+let mirror = null;
+let mirrorInfo = null; // what the backend reported about the folder
+let mirrorWarning = null; // sticky: a folder problem found when it was chosen
+let mirrorNotes = []; // per-pass: stale peers, unreadable files, write failures
+
+/**
+ * Turns sync on for this session, across every channel this build has.
+ *
+ * Both ends come through here — the browser after the gate, the desktop after
+ * its unlock or its first connect — so the folder, the conflict log, and the
+ * session key are set up in exactly one place rather than three.
+ */
+async function startSync(key, config) {
+  sessionKey = key;
+  syncConfig = config;
+  mirror = await attachMirror(config);
+  sync.enable(key, config, mirror);
+  conflictLog = await loadConflictLog(key);
+  renderSync();
+}
+
+/**
+ * Builds the mirror channel from the stored settings, if there are any.
+ *
+ * A folder that isn't there right now — an unmounted drive, an external disk
+ * still in a bag — is a note, not a refusal. The channel is attached anyway so
+ * it resumes by itself when the folder comes back, which is the whole point of
+ * a backup you don't have to think about.
+ */
+async function attachMirror(config) {
+  mirrorInfo = null;
+  mirrorWarning = null;
+  mirrorNotes = [];
+  if (!platform.mirror?.supported || !config?.mirrorRoot || !config?.deviceId) return null;
+  try {
+    mirrorInfo = await platform.mirror.check(config.mirrorRoot);
+    if (!mirrorInfo.syncthing) mirrorWarning = notWatchedWarning(mirrorInfo.root);
+  } catch (err) {
+    mirrorWarning = `${config.mirrorRoot} isn’t available right now — ${String(err.message ?? err)}`;
+  }
+  return createMirror({
+    fs: platform.mirror.fs(config.mirrorRoot),
+    device: config.deviceId,
+    salt: config.salt,
+  });
+}
+
+function notWatchedWarning(root) {
+  return `No .stfolder marker was found at or above ${root}, so Syncthing may not be carrying it. The backup is still written; it just may not reach your other machine.`;
+}
+
+/** Rewrites the vault under the same key, so the token is never re-entered. */
+async function saveSyncConfig(next) {
+  const { salt, ...stored } = next;
+  await updateVault(sessionKey, salt, stored);
+  syncConfig = next;
+}
+
+function renderMirror() {
+  const block = $("mirror");
+  block.hidden = !platform.mirror?.supported || !sync?.enabled;
+  if (block.hidden) return;
+
+  const on = Boolean(syncConfig?.mirrorRoot && syncConfig?.deviceId);
+  $("mirror-lede").textContent = on
+    ? "Every change is written here too, encrypted, for your other machine to pick up — no internet needed."
+    : "Point lexis at a folder Syncthing carries between your machines and it will keep an encrypted copy there as well as on GitHub.";
+  $("mirror-facts").hidden = !on;
+  $("mirror-form").hidden = on;
+  $("mirror-actions").hidden = !on;
+
+  if (on) {
+    $("mirror-path").textContent = mirrorInfo?.path ?? `${syncConfig.mirrorRoot}/lexis`;
+    $("mirror-file").textContent = peerFileName(syncConfig.deviceId);
+    const peers = mirror?.peerCount;
+    $("mirror-peers").textContent =
+      peers == null ? "—" : peers === 0 ? "none seen yet" : String(peers);
+  }
+
+  const notes = $("mirror-notes");
+  const all = [...(mirrorWarning ? [mirrorWarning] : []), ...mirrorNotes];
+  notes.replaceChildren(...all.map((n) => el("li", null, n)));
+  notes.hidden = all.length === 0;
+}
+
+$("mirror-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("mirror-error");
+  err.hidden = true;
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = "checking…";
+  try {
+    const typed = $("mirror-root").value.trim();
+    if (!typed) throw new Error("Type the folder both machines share.");
+    // Validate before committing anything: a folder that can't be written is
+    // better refused here than discovered as a status line three syncs later.
+    const info = await platform.mirror.check(typed);
+    await saveSyncConfig({
+      ...syncConfig,
+      mirrorRoot: info.root,
+      // Reused if the folder was turned off and on again, so an old file of
+      // ours is refreshed rather than orphaned beside a new one.
+      deviceId: syncConfig.deviceId ?? newDeviceId(),
+    });
+    mirror = await attachMirror(syncConfig);
+    sync.setMirror(mirror);
+    renderSync();
+    await sync.now();
+    await renderBank();
+    renderSync();
+  } catch (e2) {
+    err.textContent = String(e2.message ?? e2);
+    err.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "use this folder";
+  }
+});
+
+$("mirror-off").addEventListener("click", async () => {
+  const { mirrorRoot, deviceId } = syncConfig ?? {};
+  sync?.setMirror(null);
+  mirror = null;
+  // Take our file with us. Left behind it would age into a "stale peer" the
+  // other machine reports for six months and then still refuses to merge.
+  if (mirrorRoot && deviceId) {
+    try {
+      await platform.mirror.fs(mirrorRoot).remove(peerFileName(deviceId));
+    } catch {
+      /* the folder may already be gone; nothing here is load-bearing */
+    }
+  }
+  const next = { ...syncConfig };
+  delete next.mirrorRoot; // deviceId is kept, so turning it back on reuses the name
+  await saveSyncConfig(next);
+  mirrorInfo = null;
+  mirrorWarning = null;
+  mirrorNotes = [];
+  renderSync();
+});
+
+/* ---- conflicts ---- */
+
+let conflictLog = [];
+
+async function recordConflicts(fresh) {
+  conflictLog = foldConflicts(conflictLog, fresh);
+  try {
+    if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+  } catch (err) {
+    console.error(err); // the list still works this session
+  }
+  renderConflicts();
+}
+
+/**
+ * Marks a conflict dealt with rather than deleting it.
+ *
+ * Detection re-derives from the channels every pass, so a removed entry would
+ * simply be found again on the next poll. The flag is what makes "dismiss"
+ * and "use the other copy" stick.
+ */
+async function dropConflict(id) {
+  conflictLog = conflictLog.map((c) => (c.id === id ? { ...c, dismissed: true } : c));
+  try {
+    if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+  } catch (err) {
+    console.error(err);
+  }
+  renderConflicts();
+}
+
+function conflictNode(entry) {
+  const li = el("li", "conflict");
+  li.append(el("p", "conflict-word", entry.word));
+
+  const when = new Date(entry.at ?? 0);
+  const stamp = Number.isFinite(when.getTime())
+    ? `${when.toLocaleDateString()} ${String(when.getHours()).padStart(2, "0")}:${String(
+        when.getMinutes()
+      ).padStart(2, "0")}`
+    : "";
+  li.append(
+    el(
+      "p",
+      "conflict-why",
+      entry.kind === "delete"
+        ? `Deleted on ${entry.keptSide}, but ${entry.lostSide} had edited it since. ${stamp}`
+        : `Kept the copy from ${entry.keptSide}; the one from ${entry.lostSide} had ${entry.reasons.join(
+            ", "
+          )}. ${stamp}`
+    )
+  );
+
+  const actions = el("div", "conflict-actions");
+  const take = el(
+    "button",
+    "link-quiet",
+    entry.kind === "delete" ? "put the word back" : "use the other copy"
+  );
+  take.addEventListener("click", () =>
+    mutate(async () => {
+      take.disabled = true;
+      // Reinstated as an edit made now, so it wins on GitHub and in the
+      // folder by the ordinary rules rather than by a local special case.
+      await app.restoreWord(entry.lost);
+      await dropConflict(entry.id);
+      await renderBank();
+    })
+  );
+  const drop = el("button", "link-quiet", "dismiss");
+  drop.addEventListener("click", () => mutate(() => dropConflict(entry.id)));
+  actions.append(take, drop);
+  li.append(actions);
+  return li;
+}
+
+function renderConflicts() {
+  const open = conflictLog.filter((c) => !c.dismissed);
+  $("conflicts").hidden = open.length === 0;
+  $("conflict-list").replaceChildren(...open.map(conflictNode));
+}
+
+$("conflicts-clear").addEventListener("click", async () => {
+  conflictLog = [];
+  await clearConflictLog();
+  renderConflicts();
 });
 
 /* ---- updates (desktop only) ---- */
@@ -829,6 +1089,11 @@ function wireApp() {
   sync = createSyncController({
     app,
     onStatus: applySyncStatus,
+    onConflicts: recordConflicts,
+    onNotes: (notes) => {
+      mirrorNotes = notes;
+      renderMirror();
+    },
     onApplied: () => {
       // A sync can change anything; redraw whatever is on screen.
       const active = document.querySelector(".rail-link.active")?.dataset.view;
@@ -843,9 +1108,8 @@ async function startWeb(key, config) {
   platform.setKey(key);
   hideGate();
   wireApp();
-  syncConfig = config;
   await app.init();
-  sync.enable(key, config);
+  await startSync(key, config);
   essayText.value = loadEssayDraft();
   updateEssayCount();
   await renderBank();
@@ -943,8 +1207,7 @@ function buildDesktopUnlock() {
     try {
       const { key, config } = await unlockVault(pw.value);
       pw.value = "";
-      syncConfig = config;
-      sync.enable(key, config);
+      await startSync(key, config);
       form.remove();
       desktopUnlockForm = null;
       await sync.now();

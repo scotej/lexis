@@ -1,13 +1,26 @@
 /**
- * Drives sync on behalf of the interface: one sync at a time, coalesced
+ * Drives sync on behalf of the interface: one pass at a time, coalesced
  * while you work, and never so eager that typing a word turns into a commit
  * per keystroke.
+ *
+ * A pass covers both channels — the GitHub repository and, when it is turned
+ * on, the Syncthing folder (see `reconcile.js`). The controller stays free of
+ * anything platform-specific: the folder arrives as an already-built mirror
+ * object, because the browser has no filesystem to build one from.
  */
 
-import { syncOnce } from "./sync.js";
+import { reconcile } from "./reconcile.js";
 
 const DEBOUNCE_MS = 4000;
 const POLL_MS = 5 * 60 * 1000;
+
+/**
+ * The folder is on the local disk and costs one directory listing to check, so
+ * it is checked far more often than GitHub — a word added on the machine next
+ * to you shows up in seconds rather than minutes. Nothing is decrypted and no
+ * sync runs unless the listing actually changed.
+ */
+const MIRROR_POLL_MS = 8000;
 
 // When a sync fails on a bad network, waiting the full poll interval to try
 // again leaves the two ends out of step for minutes. Instead retry quickly and
@@ -16,13 +29,21 @@ const POLL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 5000;
 const RETRY_MAX_MS = 60 * 1000;
 
-export function createSyncController({ app, onStatus = () => {}, onApplied = () => {} }) {
+export function createSyncController({
+  app,
+  onStatus = () => {},
+  onApplied = () => {},
+  onConflicts = () => {},
+  onNotes = () => {},
+}) {
   let key = null;
   let config = null;
+  let mirror = null;
   let running = false;
   let queued = false;
   let timer = null;
   let poll = null;
+  let mirrorPoll = null;
   let retryTimer = null;
   let backoff = 0;
   let lastError = null;
@@ -38,32 +59,55 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
       return;
     }
     running = true;
+    let outcome = null;
     try {
       const localBank = await app.getBankSnapshot();
-      const { bank } = await syncOnce({
+      outcome = await reconcile({
         config,
         key,
         localBank,
+        mirror,
         onStatus: (t) => status(t, "busy"),
       });
+
       // A sync takes a second or two, and the user keeps working during it.
       // Merging the result against the *current* bank rather than assigning it
       // means a word added mid-flight isn't discarded by the swap. The merge is
       // idempotent, so this costs nothing when nothing changed; any edit it
       // picks up has already queued its own push via schedule().
-      await app.mergeBank(bank);
+      const bank = await app.mergeBank(outcome.bank);
+
+      // Only now — with the merged bank saved locally *and* written back to
+      // our own file in the folder — is a Syncthing conflict copy safe to
+      // remove. Two durable copies before the third goes.
+      if (mirror && outcome.retire.length) await mirror.retire(outcome.retire);
+
+      if (outcome.conflicts.length) onConflicts(outcome.conflicts);
+      onNotes(outcome.notes);
+      onApplied(bank);
+
+      // The folder is written even when GitHub fails, so the error is raised
+      // only after everything that could still succeed has.
+      if (outcome.error) throw outcome.error;
+
       lastError = null;
       // The network came back (or never left): stand down the fast-retry ladder.
       clearTimeout(retryTimer);
       backoff = 0;
-      status(syncedLabel(), "ok");
-      onApplied(bank);
+      status(syncedLabel(outcome), "ok");
     } catch (err) {
       lastError = err;
       if (offline(err)) {
         // A transient network problem — schedule our own quick, backing-off
-        // retry rather than waiting for the next poll.
-        status("offline — will retry", "error");
+        // retry rather than waiting for the next poll. When the folder took
+        // the change, say so: the work is already on its way to the other
+        // machine and "offline" alone would be misleading.
+        status(
+          outcome?.mirrored
+            ? "saved to the folder — GitHub offline, will retry"
+            : "offline — will retry",
+          outcome?.mirrored ? "ok" : "error"
+        );
         scheduleRetry();
       } else {
         // A real error (bad token, wrong password, oversized file): retrying
@@ -79,11 +123,12 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
     }
   }
 
-  function syncedLabel() {
+  function syncedLabel(outcome) {
     const t = new Date();
     const hh = String(t.getHours()).padStart(2, "0");
     const mm = String(t.getMinutes()).padStart(2, "0");
-    return `synced ${hh}:${mm}`;
+    if (outcome?.mirrorError) return `synced ${hh}:${mm} — folder unavailable`;
+    return `synced ${hh}:${mm}${mirror ? " · folder" : ""}`;
   }
 
   function offline(err) {
@@ -102,6 +147,26 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
     retryTimer = setTimeout(run, delay);
   }
 
+  /**
+   * Watches the folder for the other machine's work. Cheap by construction:
+   * one listing, compared against the last one, and a full pass only if it
+   * moved. Our own file is excluded from that comparison (see `mirror.js`) —
+   * counting it would make every push trigger the next poll for ever.
+   */
+  function watchMirror() {
+    clearInterval(mirrorPoll);
+    if (!mirror) return;
+    mirrorPoll = setInterval(async () => {
+      if (!key || running) return;
+      try {
+        if (await mirror.changed()) run();
+      } catch {
+        // The folder is unreachable — an unmounted drive, a folder the user
+        // moved. The GitHub poll carries on regardless.
+      }
+    }, MIRROR_POLL_MS);
+  }
+
   return {
     get enabled() {
       return Boolean(key && config);
@@ -109,23 +174,39 @@ export function createSyncController({ app, onStatus = () => {}, onApplied = () 
     get lastError() {
       return lastError;
     },
+    get mirroring() {
+      return Boolean(mirror);
+    },
+    get mirror() {
+      return mirror;
+    },
 
-    enable(k, cfg) {
+    enable(k, cfg, m = null) {
       key = k;
       config = cfg;
+      mirror = m;
       clearTimeout(retryTimer);
       backoff = 0;
       status("sync on", "idle");
       clearInterval(poll);
       poll = setInterval(() => run(), POLL_MS);
+      watchMirror();
+    },
+
+    /** Turns the folder on or off without disturbing the GitHub channel. */
+    setMirror(m) {
+      mirror = m;
+      watchMirror();
     },
 
     disable() {
       key = null;
       config = null;
+      mirror = null;
       clearTimeout(timer);
       clearTimeout(retryTimer);
       clearInterval(poll);
+      clearInterval(mirrorPoll);
       backoff = 0;
       status("sync off", "idle");
     },

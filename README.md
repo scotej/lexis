@@ -91,12 +91,46 @@ lives as a single encrypted file in a private repository of your own.
 From then on both ends pull on launch and push a few seconds after you change
 anything. Add a word on your laptop, tick it off in the browser at school.
 
+**A second copy, on your own network.** The desktop app can also keep an
+encrypted copy in a folder you already sync between machines — a Syncthing
+folder, or anything else that carries a directory across. Open **sync → local
+backup**, give it the folder (say `~/Documents/Crossing`), and every change is
+written there as well as to GitHub.
+
+It is a genuine second channel, not a mirror of the first. Two machines on the
+same desk reconcile through the folder with no internet at all, and they do it
+in seconds rather than minutes: the folder is checked every eight seconds for
+the price of a directory listing, where GitHub is polled every five. If GitHub
+is unreachable your work still crosses; if the folder is unreachable — an
+unmounted drive, a machine that is off — GitHub still carries it. Turn the
+folder off and nothing else changes.
+
+**One file per device.** Each machine writes only `bank.<device>.lexis.json`
+inside a `lexis` subfolder, and reads everyone else's. That is deliberate: one
+shared file with two writers is exactly what Syncthing cannot resolve, and
+would sprout `.sync-conflict-…` copies every time both machines were edited
+while apart. With a single writer per file there is nothing to conflict over.
+Conflict copies are still handled if they do appear — they are decrypted,
+merged in like any other peer, and removed only once their contents are safely
+in your bank. A peer file older than six months is left alone rather than
+merged, since it may hold words every live machine has since deleted.
+
 **How conflicts resolve.** Each word carries the time it was last edited, and
-deletions leave a tombstone, so two devices reconcile without a server: the
-most recent edit of a word wins, a delete beats an older edit, re-adding a
-word beats an older delete, and ticks made on both devices the same day are
-merged rather than overwritten. Writes use the file's blob SHA, so a device
-that committed while you were offline is never silently clobbered.
+deletions leave a tombstone, so devices reconcile without a server: the most
+recent edit of a word wins, a copy with review history beats a freshly retyped
+one, a delete beats an older edit, re-adding a word beats an older delete, and
+ticks made on both devices the same day are merged rather than overwritten.
+Writes to GitHub use the file's blob SHA, so a device that committed while you
+were offline is never silently clobbered.
+
+**And when resolving costs something, it says so.** A merge always produces an
+answer, but sometimes the answer discards real work — a definition you edited
+on one machine, a fortnight of reviews on the other. Those are listed under
+**sync → conflicts**, naming which copy was kept, which channel it came from,
+and what the losing copy held. Each one offers the discarded copy back: *use
+the other copy* reinstates it as an edit made now, so it propagates through
+GitHub and the folder by the ordinary rules. Nothing is deleted without
+appearing there first.
 
 ## Privacy
 
@@ -110,6 +144,12 @@ GitHub repository you nominate. It is encrypted on your device first, with a
 key derived from your password (PBKDF2-SHA256, then AES-256-GCM). GitHub
 stores ciphertext and never holds the key. Essays are never synced or
 uploaded; they are analysed locally and never leave the device.
+
+**The local backup folder is held to the same standard**, and for the same
+reason: a synced folder is a plain directory on two machines with possibly an
+untrusted relay in between. It gets the identical envelope under the identical
+key, so it holds ciphertext and a README explaining as much. Syncthing carries
+bytes it cannot read, and neither can anyone who copies the folder.
 
 **About the password, honestly.** GitHub Pages on a free account cannot serve
 a private page — the HTML and JavaScript are public no matter what, so a login
@@ -137,7 +177,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 The frontend is plain HTML/CSS/JS — no framework, no bundler, so "building"
 the web app is copying `src/`. The Rust backend (Tauri 2) is now a thin shell:
-it stores bytes and runs the updater, and everything else is the shared core.
+it stores bytes, lends the backup folder a filesystem, and runs the updater.
+Everything else — including what goes into that folder and how it is sealed —
+is the shared core.
 
 Web Crypto needs a secure context, so the web build requires `https://` or
 `localhost` — opening `index.html` as a `file://` URL won't work.

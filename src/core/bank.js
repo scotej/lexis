@@ -13,7 +13,7 @@ export const SCHEMA_VERSION = 3;
 export const TODAY_TARGET = 10;
 
 /** Tombstones older than this are pruned; well past any plausible offline gap. */
-const TOMBSTONE_TTL_DAYS = 180;
+export const TOMBSTONE_TTL_DAYS = 180;
 
 export function emptyBank() {
   return { version: SCHEMA_VERSION, words: [], deleted: [], today: null };
@@ -326,6 +326,51 @@ export function updateDefinition(bank, word, dictionary, now = Date.now()) {
   Object.assign(entry, next);
   entry.updated = Math.max(now, (entry.updated ?? 0) + 1);
   return true;
+}
+
+/**
+ * Puts a losing copy of a word back — the manual half of conflict resolution.
+ *
+ * A merge that had to choose is reported rather than hidden (see
+ * `conflict.js`), and this is what "keep the other copy instead" does. It is
+ * deliberately *not* a rollback: the record is reinstated as a fresh edit made
+ * now, so it wins the next merge on every channel by the ordinary rules rather
+ * than by a special case that only this device would understand.
+ *
+ * Two details make it stick. Essay-use events are unioned rather than replaced,
+ * because those were never in conflict and discarding them would turn one
+ * resolved conflict into a new loss. And restoring a word that another device
+ * deleted moves `created` past the tombstone — the only thing that survives a
+ * merge as a genuine re-add.
+ */
+export function reinstateWord(bank, record, now = Date.now()) {
+  const word = record.word;
+  const current = find(bank, word);
+
+  const events = { ...(record.essay_use_events ?? {}) };
+  for (const [id, count] of Object.entries(current?.essay_use_events ?? {})) {
+    events[id] = Math.max(events[id] ?? 0, count);
+  }
+
+  const tomb = (bank.deleted ?? []).find((d) => d.word === word);
+  const entry = {
+    ...record,
+    essay_use_events: events,
+    essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
+    // Ahead of both copies, and of any device whose clock ran ahead of ours.
+    updated: Math.max(now, (current?.updated ?? 0) + 1, (record.updated ?? 0) + 1),
+    created: tomb
+      ? Math.max(now, tomb.at + 1)
+      : current?.created ?? record.created ?? now,
+  };
+
+  if (current) {
+    bank.words = bank.words.map((w) => (w.word === word ? entry : w));
+    bank.deleted = (bank.deleted ?? []).filter((d) => d.word !== word);
+  } else {
+    insertWord(bank, entry, todayISO());
+  }
+  return entry;
 }
 
 export function removeWord(bank, word) {

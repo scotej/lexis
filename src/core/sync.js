@@ -319,8 +319,19 @@ export async function checkAccess({ token, owner, repo }) {
  * returned so the caller can persist it locally *before* worrying about the
  * push. If another device wrote in between, the SHA check fails and we retry
  * from a fresh read rather than clobbering it.
+ *
+ * `onRemote(remoteBank, localBank)` is handed both sides the instant the
+ * remote copy is decrypted and before either is folded into the other. It
+ * exists so the conflict report can see the two originals — after the merge
+ * the losing copy is gone, and reconstructing it is impossible.
  */
-export async function syncOnce({ config, key, localBank, onStatus = () => {} }) {
+export async function syncOnce({
+  config,
+  key,
+  localBank,
+  onStatus = () => {},
+  onRemote = () => {},
+}) {
   const MAX_ATTEMPTS = 3;
   let lastMerged = migrate(localBank);
 
@@ -343,6 +354,8 @@ export async function syncOnce({ config, key, localBank, onStatus = () => {} }) 
         );
       }
     }
+
+    if (remoteBank) onRemote(remoteBank, lastMerged);
 
     const merged = remoteBank
       ? mergeBanks(lastMerged, remoteBank)
