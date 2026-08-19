@@ -114,7 +114,9 @@ setNetworkOptions({ retries: 1, backoffMs: 1, maxBackoffMs: 2, timeoutMs: 500 })
 
 function memoryFolder() {
   const files = new Map(); // name -> { text, modified }
-  let clock = 1;
+  // Real mtimes are epoch milliseconds, and the staleness rule reads them; a
+  // counter starting at 1 would make every file look fifty-odd years old.
+  let clock = Date.now();
   const fs = {
     async list() {
       return [...files.entries()].map(([name, f]) => ({
@@ -466,4 +468,62 @@ test("with no folder configured, a pass is exactly the GitHub sync it always was
   assert.equal(result.mirrored, false);
   assert.deepEqual(result.retire, []);
   assert.deepEqual(result.notes, []);
+});
+
+/* ---- the audit's correctness findings, pinned ---- */
+
+test("a peer file of ours that vanished is written again on the next pass", async () => {
+  // `push` skips a write whose shape it believes is already on disk. If the
+  // file is deleted underneath us that belief is a lie, and the backup would
+  // silently never come back.
+  const folder = memoryFolder();
+  const me = createMirror({ fs: folder.fs, device: "aaaa", salt: SALT });
+  const b = bank([word("demise")]);
+
+  assert.equal(await me.push(KEY, b), true);
+  folder.files.delete(peerFileName("aaaa"));
+
+  await me.pull(KEY); // the listing shows our file is gone
+  assert.equal(await me.push(KEY, b), true, "the same bank is rewritten");
+  assert.ok(names(folder).includes(peerFileName("aaaa")));
+});
+
+test("a peer dated in the future is refused rather than made immortal", async () => {
+  // Age is measured against a stamp the peer wrote. One far enough ahead would
+  // never reach the staleness cutoff, so such a file could be merged for ever.
+  const folder = memoryFolder();
+  const ahead = Date.now() + 30 * 86_400_000;
+  await folder.fs.write(
+    peerFileName("fastclock"),
+    JSON.stringify(await sealMirror(KEY, SALT, bank([word("relic")]), "fastclock", ahead))
+  );
+
+  const seen = await createMirror({ fs: folder.fs, device: "aaaa", salt: SALT }).pull(KEY);
+  assert.equal(seen.peers.length, 0);
+  assert.equal(seen.unreadable.length, 1);
+  assert.match(seen.unreadable[0].reason, /future/);
+});
+
+test("a peer write during a pass still wakes the next poll", async () => {
+  // `push` used to re-baseline the folder signature from a fresh listing,
+  // quietly absorbing anything a peer wrote while GitHub was being talked to.
+  const folder = memoryFolder();
+  const me = createMirror({ fs: folder.fs, device: "aaaa", salt: SALT });
+  await me.pull(KEY);
+
+  const peer = createMirror({ fs: folder.fs, device: "bbbb", salt: SALT });
+  await peer.push(KEY, bank([word("elegy")])); // lands mid-pass
+  await me.push(KEY, bank([word("demise")])); // our own write ends the pass
+
+  assert.equal(await me.changed(), true, "the peer's work is still news");
+});
+
+test("a retired channel refuses to write, so switching the folder off sticks", async () => {
+  const folder = memoryFolder();
+  const me = createMirror({ fs: folder.fs, device: "aaaa", salt: SALT });
+  me.stop();
+
+  assert.equal(await me.push(KEY, bank([word("demise")])), false);
+  assert.deepEqual(names(folder), []);
+  assert.deepEqual(await me.retire(["bank.bbbb.lexis.sync-conflict-1-2-3.json"]), []);
 });

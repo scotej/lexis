@@ -947,28 +947,40 @@ $("mirror-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("mirror-off").addEventListener("click", async () => {
-  const { mirrorRoot, deviceId } = syncConfig ?? {};
-  sync?.setMirror(null);
-  mirror = null;
-  // Take our file with us. Left behind it would age into a "stale peer" the
-  // other machine reports for six months and then still refuses to merge.
-  if (mirrorRoot && deviceId) {
-    try {
-      await platform.mirror.fs(mirrorRoot).remove(peerFileName(deviceId));
-    } catch {
-      /* the folder may already be gone; nothing here is load-bearing */
+$("mirror-off").addEventListener("click", () =>
+  mutate(async () => {
+    const { mirrorRoot, deviceId } = syncConfig ?? {};
+
+    // Persist the decision *before* acting on it. A vault write can fail — a
+    // full disk, a locked store — and if it does, the recoverable state is the
+    // one where the folder is still running and the settings still describe
+    // it. Deleting the file first would leave the panel insisting the backup
+    // is on while the file it names is already gone.
+    const next = { ...syncConfig };
+    delete next.mirrorRoot; // deviceId is kept, so turning it back on reuses the name
+    delete next.mirrorQuiet; // a different folder deserves to be judged afresh
+    await saveSyncConfig(next);
+
+    // Retiring the channel here also stops a pass already in flight from
+    // rewriting the file a moment after we remove it.
+    sync?.setMirror(null);
+    mirror = null;
+
+    // Take our file with us. Left behind it would age into a "stale peer" the
+    // other machine reports for six months and then still refuses to merge.
+    if (mirrorRoot && deviceId) {
+      try {
+        await platform.mirror.fs(mirrorRoot).remove(peerFileName(deviceId));
+      } catch {
+        /* the folder may already be gone; nothing here is load-bearing */
+      }
     }
-  }
-  const next = { ...syncConfig };
-  delete next.mirrorRoot; // deviceId is kept, so turning it back on reuses the name
-  delete next.mirrorQuiet; // a different folder deserves to be judged afresh
-  await saveSyncConfig(next);
-  mirrorInfo = null;
-  mirrorWarning = null;
-  mirrorNotes = [];
-  renderSync();
-});
+    mirrorInfo = null;
+    mirrorWarning = null;
+    mirrorNotes = [];
+    renderSync();
+  })
+);
 
 /* ---- conflicts ---- */
 

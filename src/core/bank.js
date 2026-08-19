@@ -524,6 +524,31 @@ export function updateDefinition(bank, word, dictionary, now = Date.now()) {
  * replaced. Those were never in conflict, and dropping them would turn one
  * resolved conflict into a fresh loss of activity history.
  */
+/**
+ * Whichever of two copies carries more scheduling history. Ties keep `a`.
+ *
+ * Deliberately a local copy of `merge.js`'s ordering rather than an import:
+ * merge.js already imports this module, and closing that loop for one
+ * comparison is not worth a circular dependency.
+ */
+function richerHistory(a, b) {
+  const as = a?.srs ?? {};
+  const bs = b?.srs ?? {};
+  const bare = (w, s) =>
+    !s.last &&
+    (s.reps ?? 0) === 0 &&
+    (s.lapses ?? 0) === 0 &&
+    (w?.times_used ?? 0) === 0 &&
+    Object.keys(w?.review_events ?? {}).length === 0;
+  const ap = bare(a, as);
+  const bp = bare(b, bs);
+  if (ap !== bp) return ap ? b : a;
+  if ((as.reps ?? 0) !== (bs.reps ?? 0)) return (as.reps ?? 0) > (bs.reps ?? 0) ? a : b;
+  if ((as.lapses ?? 0) !== (bs.lapses ?? 0)) return (as.lapses ?? 0) > (bs.lapses ?? 0) ? a : b;
+  if ((as.last ?? "") !== (bs.last ?? "")) return (as.last ?? "") > (bs.last ?? "") ? a : b;
+  return a;
+}
+
 export function reinstateWord(bank, record, now = Date.now()) {
   const word = record.word;
   const current = find(bank, word);
@@ -545,9 +570,20 @@ export function reinstateWord(bank, record, now = Date.now()) {
   // Ahead of both copies, and of any device whose clock ran ahead of ours.
   const ahead = (...values) => Math.max(now, ...values.map((v) => (v ?? 0) + 1));
 
+  // The schedule is not what a restore is for, and it is the one thing that
+  // cannot be recovered once dropped. Taking whichever copy is further along
+  // means "use the other copy" never rewinds spaced repetition — and, just as
+  // importantly, it leaves the reinstated record non-pristine, which is the
+  // only reason `beats` ever reaches the `updated` comparison below. Restoring
+  // a pristine copy verbatim would lose to the peer on every future merge, so
+  // the restore would appear to work and then quietly undo itself.
+  const schedule = current ? richerHistory(record, current) : record;
+
   const tomb = (bank.deleted ?? []).find((d) => d.word === word);
   const entry = {
     ...record,
+    srs: schedule.srs,
+    times_used: Math.max(record.times_used ?? 0, current?.times_used ?? 0),
     essay_use_events: events,
     essay_uses: Object.values(events).reduce((sum, count) => sum + count, 0),
     review_events: reviews,

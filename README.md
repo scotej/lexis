@@ -156,9 +156,15 @@ schedule, more practice, different synonyms, or a different definition.
 A word's dictionary and its review schedule are resolved on separate clocks, so
 the two can be kept from *different* machines — and they are listed, and undone,
 separately. Each entry offers the discarded copy back: *use the other copy*
-reinstates the whole record, *use the other definition* replaces only the
-dictionary entry. Either is applied as an edit made now, so it propagates
-through GitHub and the folder by the ordinary rules.
+reinstates the record, *use the other definition* replaces only the dictionary
+entry. Either is applied as an edit made now, so it propagates through GitHub
+and the folder by the ordinary rules.
+
+Undoing never costs you scheduling. Whichever copy is further along keeps the
+review history, because the schedule is not what a restore is for and it is the
+one thing that cannot be recovered once dropped — so *use the other copy* takes
+the discarded definition, synonyms, and practice count without rewinding
+spaced repetition.
 
 ## Privacy
 

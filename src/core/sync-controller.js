@@ -41,6 +41,7 @@ export function createSyncController({
   let mirror = null;
   let running = false;
   let queued = false;
+  let inFlight = null;
   let timer = null;
   let poll = null;
   let mirrorPoll = null;
@@ -52,13 +53,34 @@ export function createSyncController({
     onStatus({ text, kind, enabled: Boolean(key) });
   }
 
-  async function run() {
-    if (!key || !config) return;
+  /**
+   * Runs passes until nothing more is queued, and hands back a promise that
+   * covers the lot.
+   *
+   * The coalescing matters to callers, not just to GitHub: `now()` is awaited
+   * by the interface before it redraws, and a bare "folded into the run in
+   * flight" return would have it report the folder's state a second before
+   * the write that changes it.
+   */
+  function run() {
+    if (!key || !config) return Promise.resolve();
     if (running) {
       queued = true; // fold this request into the run already in flight
-      return;
+      return inFlight ?? Promise.resolve();
     }
     running = true;
+    inFlight = (async () => {
+      do {
+        queued = false;
+        await pass();
+      } while (queued && key && config);
+    })().finally(() => {
+      running = false;
+    });
+    return inFlight;
+  }
+
+  async function pass() {
     let outcome = null;
     try {
       const localBank = await app.getBankSnapshot();
@@ -113,12 +135,6 @@ export function createSyncController({
         // A real error (bad token, wrong password, oversized file): retrying
         // fast won't help, so leave it to the poll or the user.
         status(String(err.message ?? err), "error");
-      }
-    } finally {
-      running = false;
-      if (queued) {
-        queued = false;
-        run();
       }
     }
   }
@@ -184,6 +200,7 @@ export function createSyncController({
     enable(k, cfg, m = null) {
       key = k;
       config = cfg;
+      if (mirror && mirror !== m) mirror.stop();
       mirror = m;
       clearTimeout(retryTimer);
       backoff = 0;
@@ -195,6 +212,9 @@ export function createSyncController({
 
     /** Turns the folder on or off without disturbing the GitHub channel. */
     setMirror(m) {
+      // Retire the outgoing channel so a pass still in flight cannot write to
+      // a folder the user has just left.
+      if (mirror && mirror !== m) mirror.stop();
       mirror = m;
       watchMirror();
     },
@@ -202,6 +222,7 @@ export function createSyncController({
     disable() {
       key = null;
       config = null;
+      mirror?.stop();
       mirror = null;
       clearTimeout(timer);
       clearTimeout(retryTimer);

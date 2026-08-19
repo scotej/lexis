@@ -563,3 +563,50 @@ test("reinstating a word keeps review events from both copies", () => {
   const restored = bank.reinstateWord(b, record);
   assert.deepEqual(Object.keys(restored.review_events).sort(), ["review:mine", "review:theirs"]);
 });
+
+test("reinstating a copy never rewinds the review schedule", () => {
+  // "use the other copy" recovers what a merge discarded; it is not a licence
+  // to throw away months of scheduling that was never in dispute.
+  const b = bank.emptyBank();
+  b.words = [
+    {
+      ...entry("demise"),
+      srs: { ...newSrs(DAY), reps: 12, last: "2026-07-19" },
+      times_used: 9,
+    },
+  ];
+  const loser = {
+    ...entry("demise"),
+    synonyms: [{ word: "downfall" }],
+    srs: { ...newSrs(DAY), reps: 1 },
+    times_used: 0,
+  };
+
+  const restored = bank.reinstateWord(b, loser);
+  assert.deepEqual(restored.synonyms, [{ word: "downfall" }], "the discarded copy is restored");
+  assert.equal(restored.srs.reps, 12, "but the better schedule is kept");
+  assert.equal(restored.times_used, 9);
+});
+
+test("reinstating a pristine copy survives the next merge", () => {
+  // A pristine record loses to one with history no matter how recent it is, so
+  // a verbatim restore would appear to work and then quietly undo itself.
+  const peer = {
+    ...entry("demise"),
+    srs: { ...newSrs(DAY), reps: 12, last: "2026-07-19" },
+    senses: [{ pos: "noun", def: "the peer's definition", example: null }],
+    definition_updated: 9000,
+  };
+  const b = bank.emptyBank();
+  b.words = [structuredClone(peer)];
+
+  const pristine = {
+    ...entry("demise"),
+    senses: [{ pos: "noun", def: "the copy I want back", example: null }],
+  };
+  bank.reinstateWord(b, pristine);
+
+  const merged = mergeBanks(b, { version: 3, words: [peer], deleted: [], today: null });
+  assert.equal(merged.words[0].senses[0].def, "the copy I want back", "the restore holds");
+  assert.equal(merged.words[0].srs.reps, 12, "and the history it had is intact");
+});

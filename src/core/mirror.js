@@ -58,6 +58,9 @@ export const STALE_PEER_DAYS = TOMBSTONE_TTL_DAYS;
 
 const DAY_MS = 86_400_000;
 
+/** How far ahead of us a peer's clock may plausibly be before we distrust it. */
+const FUTURE_SKEW_MS = 2 * DAY_MS;
+
 /* ---- names ---- */
 
 const PEER_RE = /^bank\.([0-9a-z]{4,32})\.lexis\.json$/i;
@@ -153,6 +156,7 @@ export function createMirror({ fs, device, salt }) {
   let lastSeen = null;
   let lastWrittenAt = 0;
   let lastPeers = null;
+  let stopped = false;
 
   const self = peerFileName(device).toLowerCase();
 
@@ -210,6 +214,12 @@ export function createMirror({ fs, device, salt }) {
       const entries = await fs.list();
       lastSeen = signature(entries);
 
+      // If our own file is gone — deleted by hand, lost in a folder reset — the
+      // in-memory "already pushed this" hash is a lie that would keep us from
+      // ever writing it again. The listing is already in hand, so this costs
+      // nothing and restores the promise that lexis rewrites its own file.
+      if (!entries.some((e) => e.name.toLowerCase() === self)) lastPushed = null;
+
       const peers = [];
       const conflicts = [];
       const stale = [];
@@ -242,9 +252,29 @@ export function createMirror({ fs, device, salt }) {
           continue;
         }
 
-        const ageDays = (now - (opened.written || 0)) / DAY_MS;
+        // The embedded stamp is the one to trust: it sits inside the ciphertext,
+        // so only someone with the password could have set it. The file's mtime
+        // is used *only* when there is no embedded stamp — a bank restored by
+        // hand — because Syncthing preserves the source's mtime, which makes it
+        // no more independent than the stamp and merely a second guess.
+        const stamped = opened.written || entry.modified || 0;
+
+        // A stamp well into the future means a broken clock somewhere, and it
+        // would make the file immortal: never old enough to be refused, for as
+        // long as the lie lasts. Report it instead of folding it in on trust.
+        // (Tombstones remain the real defence against resurrecting a deleted
+        // word; this cutoff is only a backstop for a bank left behind.)
+        if (stamped > now + FUTURE_SKEW_MS) {
+          unreadable.push({
+            name: entry.name,
+            reason: "dated in the future — check that machine's clock",
+          });
+          continue;
+        }
+
+        const ageDays = (now - stamped) / DAY_MS;
         if (ageDays > STALE_PEER_DAYS) {
-          stale.push({ name: entry.name, written: opened.written, days: Math.round(ageDays) });
+          stale.push({ name: entry.name, written: stamped, days: Math.round(ageDays) });
           continue;
         }
 
@@ -262,19 +292,20 @@ export function createMirror({ fs, device, salt }) {
      * already did. Returns whether anything was written.
      */
     async push(key, bank, now = Date.now()) {
+      // A pass already in flight when the folder is switched off would
+      // otherwise recreate the very file the user just removed: `reconcile`
+      // captured this object before `disable()` nulled the caller's reference.
+      if (stopped) return false;
       const shape = stable(bank);
       if (shape === lastPushed) return false;
       const envelope = await sealMirror(key, salt, bank, device, now);
       await fs.write(peerFileName(device), JSON.stringify(envelope, null, 2));
       lastPushed = shape;
       lastWrittenAt = now;
-      // Our own write changes the listing; re-baseline so the fast poll does
-      // not read it back as somebody else's news.
-      try {
-        lastSeen = signature(await fs.list());
-      } catch {
-        lastSeen = null; // the next poll will simply do a full pass
-      }
+      // `lastSeen` is deliberately left alone. The signature already excludes
+      // our own file, so writing it cannot move the baseline — and re-listing
+      // here would quietly absorb any peer write that landed during the GitHub
+      // round trip, swallowing the very wake-up the fast poll exists for.
       return true;
     },
 
@@ -287,6 +318,7 @@ export function createMirror({ fs, device, salt }) {
      * copy besides.
      */
     async retire(names) {
+      if (stopped) return [];
       const removed = [];
       for (const name of names) {
         if (!isConflictFile(name)) continue;
@@ -301,10 +333,12 @@ export function createMirror({ fs, device, salt }) {
       return removed;
     },
 
-    /** Forget the cached signature; the next poll does a full pass. */
-    invalidate() {
-      lastSeen = null;
-      lastPushed = null;
+    /**
+     * Retires this channel for good. Any pass still in flight will find its
+     * writes refused rather than resurrecting a folder the user has left.
+     */
+    stop() {
+      stopped = true;
     },
   };
 }
