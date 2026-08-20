@@ -220,7 +220,7 @@
             </dl>
 
             <form id="mirror-form" class="gate-form sync-form" autocomplete="off">
-              <label class="field">
+              <label class="field" id="mirror-path-field">
                 <span>folder</span>
                 <input
                   id="mirror-root"
@@ -234,9 +234,21 @@
                   device into a <em>lexis</em> subfolder and reads the others.
                 </small>
               </label>
-              <button class="button-primary" type="submit">use this folder</button>
+              <p class="field-note" id="mirror-pick-note" hidden>
+                Your browser will ask which folder to use. Choose the one Syncthing carries —
+                lexis writes one encrypted file per device into a <em>lexis</em> subfolder
+                inside it, and reads the others.
+              </p>
+              <button class="button-primary" id="mirror-submit" type="submit">use this folder</button>
               <p id="mirror-error" class="gate-error" hidden></p>
             </form>
+
+            <div class="sync-actions" id="mirror-reconnect-row" hidden>
+              <button id="mirror-reconnect" class="button-primary" type="button">
+                reconnect the folder
+              </button>
+              <button id="mirror-off-dormant" class="link-quiet" type="button">forget it</button>
+            </div>
 
             <div class="sync-actions" id="mirror-actions" hidden>
               <button id="mirror-off" class="link-quiet" type="button">
@@ -245,6 +257,24 @@
             </div>
 
             <ul id="mirror-notes" class="sync-warnings" hidden></ul>
+          </section>
+
+          <!-- the same envelope, carried by hand -->
+          <section id="backup-manual" class="sync-block" hidden>
+            <h2 class="sync-heading">by hand</h2>
+            <p class="sync-blurb" id="backup-lede"></p>
+            <div class="sync-actions">
+              <button id="backup-export" class="link-quiet" type="button">save a backup file</button>
+              <label class="link-quiet file-label" for="backup-import">open backup files…</label>
+              <input
+                id="backup-import"
+                type="file"
+                accept=".json,application/json"
+                multiple
+                hidden
+              />
+            </div>
+            <p id="backup-status" class="sync-note" hidden></p>
           </section>
 
           <!-- what the merge had to choose between -->

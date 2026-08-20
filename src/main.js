@@ -6,11 +6,12 @@
 import { createApp } from "./core/app.js";
 import { fetchDefinition } from "./core/dict.js";
 import { createSyncController } from "./core/sync-controller.js";
+import { absorbImports } from "./core/reconcile.js";
 import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
 import { createWebPlatform } from "./platform/web.js";
 import { hasVault, unlockVault, createVault, clearVault, updateVault } from "./core/vault.js";
 import { cryptoAvailable } from "./core/crypto.js";
-import { createMirror, newDeviceId, peerFileName } from "./core/mirror.js";
+import { createMirror, newDeviceId, peerFileName, sealMirror } from "./core/mirror.js";
 import {
   foldConflicts,
   loadConflictLog,
@@ -752,6 +753,7 @@ $("sync-disconnect").addEventListener("click", async () => {
       /* the folder may be gone; the vault is cleared either way */
     }
   }
+  await platform.mirror?.forget?.();
   await clearVault();
   // The log holds word records sealed under a key we are about to forget.
   await clearConflictLog();
@@ -805,6 +807,7 @@ let mirror = null;
 let mirrorInfo = null; // what the backend reported about the folder
 let mirrorWarning = null; // sticky: a folder problem found when it was chosen
 let mirrorNotes = []; // per-pass: stale peers, unreadable files, write failures
+let mirrorState = "granted"; // granted | prompt | denied | missing | none | unsupported
 
 /**
  * Turns sync on for this session, across every channel this build has.
@@ -834,13 +837,32 @@ async function attachMirror(config) {
   mirrorInfo = null;
   mirrorWarning = null;
   mirrorNotes = [];
+  mirrorState = "granted";
   if (!platform.mirror?.supported || !config?.mirrorRoot || !config?.deviceId) return null;
-  try {
-    mirrorInfo = await platform.mirror.check(config.mirrorRoot);
-    if (!mirrorInfo.syncthing) mirrorWarning = notWatchedWarning(mirrorInfo.root);
-  } catch (err) {
-    mirrorWarning = `${config.mirrorRoot} isn’t available right now — ${String(err.message ?? err)}`;
+
+  const attached = await platform.mirror.attach(config.mirrorRoot);
+  mirrorState = attached.state;
+  mirrorInfo = attached.info ?? null;
+
+  // A browser hands a folder back only on a click, and revokes a backgrounded
+  // tab's access routinely. That is a dormant channel with a button, not a
+  // failure — so nothing is attached, and nothing reads or writes, until the
+  // user reconnects it.
+  if (mirrorState === "prompt" || mirrorState === "denied" || mirrorState === "none") {
+    return null;
   }
+
+  if (mirrorState === "missing") {
+    // The desktop's folder is a path that may simply be unmounted. Attach it
+    // anyway: it resumes by itself when the drive comes back, which is the
+    // whole point of a backup you don't have to think about.
+    mirrorWarning = `${config.mirrorRoot} isn’t available right now${
+      attached.reason ? ` — ${attached.reason}` : ""
+    }`;
+  } else if (mirrorInfo?.syncthing === false) {
+    mirrorWarning = notWatchedWarning(mirrorInfo.root);
+  }
+
   return createMirror({
     fs: platform.mirror.fs(config.mirrorRoot),
     device: config.deviceId,
@@ -883,17 +905,34 @@ async function saveSyncConfig(next) {
 }
 
 function renderMirror() {
+  renderManualBackup();
+
   const block = $("mirror");
   block.hidden = !platform.mirror?.supported || !sync?.enabled;
   if (block.hidden) return;
 
-  const on = Boolean(syncConfig?.mirrorRoot && syncConfig?.deviceId);
-  $("mirror-lede").textContent = on
-    ? "Every change is written here too, encrypted, for your other machine to pick up — no internet needed."
-    : "Point lexis at a folder Syncthing carries between your machines and it will keep an encrypted copy there as well as on GitHub.";
+  const configured = Boolean(syncConfig?.mirrorRoot && syncConfig?.deviceId);
+  const dormant = configured && (mirrorState === "prompt" || mirrorState === "denied");
+  const on = configured && !dormant;
+  const picks = platform.kind === "web";
+
+  $("mirror-lede").textContent = dormant
+    ? "This browser has the folder but needs your permission again before it can read or write it."
+    : on
+      ? "Every change is written here too, encrypted, for your other machine to pick up — no internet needed."
+      : picks
+        ? "Give this browser the folder Syncthing carries between your machines and it will keep an encrypted copy there as well as on GitHub."
+        : "Point lexis at a folder Syncthing carries between your machines and it will keep an encrypted copy there as well as on GitHub.";
+
   $("mirror-facts").hidden = !on;
-  $("mirror-form").hidden = on;
+  $("mirror-form").hidden = configured;
   $("mirror-actions").hidden = !on;
+  $("mirror-reconnect-row").hidden = !dormant;
+
+  // The desktop is told a path; a browser can only be handed a directory.
+  $("mirror-path-field").hidden = picks;
+  $("mirror-pick-note").hidden = !picks;
+  $("mirror-submit").textContent = picks ? "choose a folder…" : "use this folder";
 
   if (on) {
     $("mirror-path").textContent = mirrorInfo?.path ?? `${syncConfig.mirrorRoot}/lexis`;
@@ -921,10 +960,14 @@ $("mirror-form").addEventListener("submit", async (e) => {
   button.textContent = "checking…";
   try {
     const typed = $("mirror-root").value.trim();
-    if (!typed) throw new Error("Type the folder both machines share.");
+    if (platform.kind !== "web" && !typed) {
+      throw new Error("Type the folder both machines share.");
+    }
     // Validate before committing anything: a folder that can't be written is
     // better refused here than discovered as a status line three syncs later.
-    const info = await platform.mirror.check(typed);
+    // On the web this is also the moment the picker opens — it needs the user
+    // gesture this submit provides, which is why it cannot happen at boot.
+    const info = await platform.mirror.choose(typed);
     await saveSyncConfig({
       ...syncConfig,
       mirrorRoot: info.root,
@@ -943,12 +986,31 @@ $("mirror-form").addEventListener("submit", async (e) => {
     err.hidden = false;
   } finally {
     button.disabled = false;
-    button.textContent = "use this folder";
+    button.textContent = platform.kind === "web" ? "choose a folder…" : "use this folder";
   }
 });
 
-$("mirror-off").addEventListener("click", () =>
+$("mirror-reconnect").addEventListener("click", () =>
   mutate(async () => {
+    // Must be a click: the permission prompt needs transient activation, which
+    // is exactly what boot does not have.
+    mirrorState = await platform.mirror.grant();
+    if (mirrorState !== "granted") {
+      mirrorNotes = ["The browser did not give the folder back. Try again, or choose it afresh."];
+      renderMirror();
+      return;
+    }
+    mirror = await attachMirror(syncConfig);
+    sync.setMirror(mirror);
+    renderSync();
+    await sync.now();
+    await renderBank();
+    renderSync();
+  })
+);
+
+function stopUsingFolder() {
+  return mutate(async () => {
     const { mirrorRoot, deviceId } = syncConfig ?? {};
 
     // Persist the decision *before* acting on it. A vault write can fail — a
@@ -975,10 +1037,115 @@ $("mirror-off").addEventListener("click", () =>
         /* the folder may already be gone; nothing here is load-bearing */
       }
     }
+    // Drop any stored directory handle as well. Left behind, it is a
+    // readwrite-capable grant sitting in this origin's storage for a folder
+    // the user has just said they are finished with.
+    await platform.mirror.forget?.();
+
     mirrorInfo = null;
     mirrorWarning = null;
     mirrorNotes = [];
+    mirrorState = "none";
     renderSync();
+  });
+}
+
+$("mirror-off").addEventListener("click", stopUsingFolder);
+$("mirror-off-dormant").addEventListener("click", stopUsingFolder);
+
+/* ---- the same envelope, carried by hand ---- */
+
+/**
+ * Export and import exist for the browsers that have no picker — Safari and
+ * Firefox ship none — but they are offered everywhere, because they are also
+ * the only way to act on a peer file the folder refuses as too old, and the
+ * only way to move a bank between two machines that never share a folder.
+ *
+ * The file is byte-for-byte what the folder holds, so the two paths are one
+ * format: a file saved here can be dropped straight into the folder, and a
+ * file taken out of the folder can be opened here.
+ */
+function renderManualBackup() {
+  const block = $("backup-manual");
+  block.hidden = !platform.mirror?.manual || !sync?.enabled;
+  if (block.hidden) return;
+  $("backup-lede").textContent = platform.mirror.automatic
+    ? "The same encrypted file, saved or opened by hand — for moving a bank to a machine that shares no folder, or for reading a backup the folder considers too old."
+    : "This browser cannot be given a folder, so the backup travels by hand: save the encrypted file into the folder yourself, and open the other machine's file from it.";
+}
+
+function backupStatus(text, isError = false) {
+  const node = $("backup-status");
+  node.textContent = text;
+  node.classList.toggle("error", isError);
+  node.hidden = !text;
+}
+
+$("backup-export").addEventListener("click", () =>
+  mutate(async () => {
+    // Minted here if the folder was never set up, and kept, so a machine's
+    // exports always land on the same filename instead of littering.
+    if (!syncConfig?.deviceId) {
+      await saveSyncConfig({ ...syncConfig, deviceId: newDeviceId() });
+    }
+    const bank = await app.getBankSnapshot();
+    const envelope = await sealMirror(sessionKey, syncConfig.salt, bank, syncConfig.deviceId);
+    const name = peerFileName(syncConfig.deviceId);
+
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" })
+    );
+    // In the document, not detached: Firefox — one of the two browsers this
+    // whole path exists for — ignores a click on an anchor that was never
+    // inserted.
+    const link = el("a");
+    link.href = url;
+    link.download = name;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+
+    backupStatus(
+      `Saved ${name}. Keep that exact name — a browser's “(1)” copy is not one lexis will read.`
+    );
+  })
+);
+
+$("backup-import").addEventListener("change", (e) =>
+  mutate(async () => {
+    const chosen = [...(e.target.files ?? [])];
+    e.target.value = ""; // so the same file can be opened twice
+    if (!chosen.length) return;
+
+    backupStatus(`Reading ${chosen.length} file${chosen.length === 1 ? "" : "s"}…`);
+    const files = await Promise.all(
+      chosen.map(async (file) => ({ name: file.name, text: await file.text() }))
+    );
+
+    const result = await absorbImports({
+      key: sessionKey,
+      localBank: await app.getBankSnapshot(),
+      files,
+    });
+
+    await app.mergeBank(result.bank);
+    if (result.conflicts.length) await recordConflicts(result.conflicts);
+    await renderBank();
+    renderSync();
+
+    const took = result.accepted.length;
+    backupStatus(
+      [
+        took
+          ? `Merged ${took} file${took === 1 ? "" : "s"}.`
+          : "Nothing could be read from those files.",
+        ...result.notes,
+      ].join(" "),
+      took === 0
+    );
+    sync?.schedule(); // push the result on through both channels
   })
 );
 
@@ -1204,6 +1371,11 @@ $("gate-unlock").addEventListener("submit", async (e) => {
 
 $("gate-reset").addEventListener("click", async () => {
   await clearVault();
+  await clearConflictLog();
+  // Starting over means starting over: a remembered directory handle is a
+  // standing readwrite grant, and leaving one behind would outlive everything
+  // else this button erases.
+  await platform.mirror?.forget?.();
   await platform.clearCache?.();
   location.reload();
 });
@@ -1246,6 +1418,11 @@ function wireApp() {
     onConflicts: recordConflicts,
     onNotes: (notes) => {
       mirrorNotes = notes;
+      // A browser can revoke a backgrounded tab's folder access at any moment.
+      // Re-reading the adapter's view of it here is what turns "the folder
+      // could not be read" into a button that fixes it.
+      const live = platform.mirror?.state?.();
+      if (live && live !== mirrorState) mirrorState = live;
       renderMirror();
     },
     onApplied: () => {

@@ -36,14 +36,36 @@ export function createDesktopPlatform() {
     },
 
     /**
-     * The Syncthing mirror's filesystem. Only the desktop build has one, which
-     * is why it lives here rather than in the shared core: the four calls are
-     * scoped to a directory the user nominates, and every byte crossing them is
-     * already encrypted (see core/mirror.js).
+     * The Syncthing mirror's filesystem. Every byte crossing these calls is
+     * already encrypted (see core/mirror.js); the backend only moves them.
+     *
+     * The shape matches the browser adapter's deliberately, even where the
+     * desktop has nothing to do. A native app is simply handed the filesystem,
+     * so `grant` and `forget` are constants here and `state` never leaves
+     * "granted" — but the interface can then drive both hosts through one set
+     * of calls instead of asking which one it is talking to.
      */
     mirror: {
       supported: true,
-      check: (root) => invoke("mirror_check", { root }),
+      automatic: true,
+      manual: true,
+
+      state: () => "granted",
+      grant: async () => "granted",
+      forget: async () => {},
+
+      /** Validates a typed path and prepares the subfolder inside it. */
+      choose: (root) => invoke("mirror_check", { root }),
+
+      /** Confirms a remembered folder is still there, without disturbing it. */
+      async attach(root) {
+        try {
+          return { state: "granted", info: await invoke("mirror_check", { root }) };
+        } catch (err) {
+          return { state: "missing", reason: String(err?.message ?? err) };
+        }
+      },
+
       fs(root) {
         return {
           list: () => invoke("mirror_list", { root }),

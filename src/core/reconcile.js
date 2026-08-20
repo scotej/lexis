@@ -33,6 +33,7 @@
  */
 
 import { syncOnce } from "./sync.js";
+import { openMirror, STALE_PEER_DAYS } from "./mirror.js";
 import { mergeBanks } from "./merge.js";
 import { migrate } from "./bank.js";
 import { detectConflicts } from "./conflict.js";
@@ -40,6 +41,7 @@ import { detectConflicts } from "./conflict.js";
 export const HERE = "this device";
 export const FOLDER = "the Syncthing folder";
 export const GITHUB = "GitHub";
+export const IMPORTED = "an imported file";
 
 /**
  * @param mirror  a `createMirror()` channel, or `null` when the folder is off
@@ -122,4 +124,62 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
   }
 
   return { bank, pushed, mirrored, conflicts, retire, notes, error, mirrorError };
+}
+
+/**
+ * Folds hand-supplied backup files into the bank.
+ *
+ * The manual counterpart to the folder: where a browser cannot be given a
+ * directory — Safari and Firefox have no picker — the same encrypted envelope
+ * can be carried across by hand. Exactly the same envelope, so a file exported
+ * from one machine is byte-for-byte the file the folder holds, and either can
+ * be fed to the other.
+ *
+ * This runs through `detectConflicts` like every other channel. It would be
+ * easy to skip — an import is a deliberate act, so surely the user meant it —
+ * but the promise is that nothing is discarded without being listed, and a
+ * merge does not stop costing something just because a person started it.
+ *
+ * Unlike a peer file sitting in a folder, an old import is *not* refused. A
+ * file that predates tombstone pruning can resurrect words every live device
+ * has deleted, so it is reported loudly; but refusing a restore somebody
+ * explicitly asked for would make the one case this exists for — recovering
+ * from a machine that is gone — impossible.
+ *
+ * @param files `[{ name, text }]`, as read from a file input
+ */
+export async function absorbImports({ key, localBank, files, now = Date.now() }) {
+  let bank = migrate(localBank);
+  const conflicts = [];
+  const notes = [];
+  const accepted = [];
+
+  for (const file of files) {
+    let opened;
+    try {
+      opened = await openMirror(key, JSON.parse(file.text));
+    } catch (err) {
+      notes.push(
+        `${file.name} could not be read (${
+          /decrypt|operation-specific/i.test(String(err?.message ?? err))
+            ? "it was written with a different password"
+            : String(err?.message ?? err)
+        }).`
+      );
+      continue;
+    }
+
+    const ageDays = Math.round((now - (opened.written || now)) / 86_400_000);
+    if (ageDays > STALE_PEER_DAYS) {
+      notes.push(
+        `${file.name} is ${ageDays} days old — old enough that words deleted since may come back. Check your bank.`
+      );
+    }
+
+    conflicts.push(...detectConflicts(bank, opened.bank, { mine: HERE, theirs: IMPORTED }));
+    bank = mergeBanks(bank, opened.bank);
+    accepted.push({ name: file.name, device: opened.device, written: opened.written });
+  }
+
+  return { bank, conflicts, notes, accepted };
 }

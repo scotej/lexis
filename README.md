@@ -101,24 +101,39 @@ lives as a single encrypted file in a private repository of your own.
 From then on both ends pull on launch and push a few seconds after you change
 anything. Add a word on your laptop, tick it off in the browser at school.
 
-**A second copy, on your own network.** The desktop app can also keep an
-encrypted copy in a folder you already sync between machines — a Syncthing
-folder, or anything else that carries a directory across. (lexis looks for
-Syncthing's `.stfolder` marker and says so if it can't find one; that notice is
-informational and can be silenced.)
+**A second copy, on your own network.** lexis can also keep an encrypted copy
+in a folder you already sync between machines — a Syncthing folder, or anything
+else that carries a directory across. (lexis looks for Syncthing's `.stfolder`
+marker and says so if it can't find one; that notice is informational and can
+be silenced.)
 
 Set it up per machine, after GitHub sync is connected on that machine — the
 folder section only appears once it is, because it is sealed with the same
 password-derived key:
 
 1. Connect GitHub sync as above, with **the same password** as your other device.
-2. Go to **sync → local backup**, type the folder's path *on this machine* (say
-   `~/Documents/Crossing`), and choose **use this folder**.
+2. Go to **sync → local backup** and nominate the folder *on this machine*: the
+   desktop app takes a path (say `~/Documents/Crossing`); a browser opens a
+   folder picker instead, because a page can be handed a directory but cannot
+   open one by name.
 3. Repeat on the other machine. The path is usually different there; take it
    from that machine's own Syncthing, not from this one.
 
-From then on every change is written there as well as to GitHub. The web build
-has no filesystem, so this is desktop-only.
+From then on every change is written there as well as to GitHub.
+
+**The browser can do this too.** Chrome and Edge let a page hold onto a folder
+you give it — choose *Allow on every visit* at the prompt (or install lexis as
+an app) and it reconnects by itself from then on. If a browser revokes that
+access, which Chrome does to backgrounded tabs, the panel says so and offers a
+button rather than failing quietly. Safari and Firefox ship no picker at all;
+there the same file travels by hand.
+
+**By hand, anywhere.** **sync → by hand** saves the identical encrypted
+envelope as a file, and opens files back. It is the fallback for browsers with
+no picker, and the way to read a backup the folder itself considers too old —
+a file taken out of the folder and a file saved here are the same format, so
+either can be fed to the other. Keep the filename lexis gives it: a browser's
+`… (1).json` copy is not one lexis will read.
 
 It is a genuine second channel, not a mirror of the first. Two machines on the
 same desk reconcile through the folder with no internet at all, and they do it
@@ -189,6 +204,11 @@ What the folder does *not* hide is metadata: anyone who can see the directory
 learns that you use lexis, how many devices you sync, each device's random id,
 and roughly how often and how much you write, from the file names, sizes, and
 timestamps. Only the contents are encrypted.
+
+In a browser, the folder you nominate is remembered as a handle in this
+origin's storage, and the folder's name is not encrypted the way the bank is —
+a handle cannot be. **Disconnect this device** and the gate's **start over**
+both drop it, so nothing that can reach your disk outlives them.
 
 **About the password, honestly.** GitHub Pages on a free account cannot serve
 a private page — the HTML and JavaScript are public no matter what, so a login

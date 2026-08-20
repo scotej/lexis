@@ -1114,3 +1114,29 @@ main {
   gap: 16px;
   margin-top: 8px;
 }
+
+.field-note {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--faint);
+  max-width: 46ch;
+}
+
+.field-note em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+/* A file input is unstylable, so its label carries the affordance. */
+.file-label {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+#backup-status {
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: 0;
+}

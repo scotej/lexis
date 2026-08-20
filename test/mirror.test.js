@@ -527,3 +527,88 @@ test("a retired channel refuses to write, so switching the folder off sticks", a
   assert.deepEqual(names(folder), []);
   assert.deepEqual(await me.retire(["bank.bbbb.lexis.sync-conflict-1-2-3.json"]), []);
 });
+
+/* ---- carrying the same envelope by hand ---- */
+
+const { absorbImports, IMPORTED } = await import("../src/core/reconcile.js");
+
+test("an exported file is the same envelope the folder holds", async () => {
+  // One format, both directions: a file exported from the browser can be
+  // dropped into the folder, and a file taken out of the folder can be
+  // imported. Anything else would be two formats to keep in step.
+  const folder = memoryFolder();
+  await createMirror({ fs: folder.fs, device: "aaaa", salt: SALT }).push(
+    KEY,
+    bank([word("demise")])
+  );
+  const fromFolder = folder.files.get(peerFileName("aaaa")).text;
+
+  const { bank: merged, accepted } = await absorbImports({
+    key: KEY,
+    localBank: bank([word("elegy")]),
+    files: [{ name: peerFileName("aaaa"), text: fromFolder }],
+  });
+
+  assert.deepEqual(accepted.map((a) => a.device), ["aaaa"]);
+  assert.deepEqual(merged.words.map((w) => w.word).sort(), ["demise", "elegy"]);
+});
+
+test("an imported file is conflict-checked like any other channel", async () => {
+  const mine = bank([
+    word("demise", { updated: 5000, srs: { ...newSrs(DAY), reps: 1 } }),
+  ]);
+  const theirs = bank([
+    word("demise", { updated: 2000, srs: { ...newSrs(DAY), reps: 9, last: "2026-07-19" } }),
+  ]);
+  const text = JSON.stringify(await sealMirror(KEY, SALT, theirs, "bbbb"));
+
+  const { conflicts } = await absorbImports({
+    key: KEY,
+    localBank: mine,
+    files: [{ name: "bank.bbbb.lexis.json", text }],
+  });
+
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].lostSide, IMPORTED);
+  assert.match(conflicts[0].reasons.join(" "), /9 reps vs 1/);
+});
+
+test("a file under a different password is reported, and the rest still import", async () => {
+  const good = JSON.stringify(await sealMirror(KEY, SALT, bank([word("demise")]), "aaaa"));
+  const stranger = JSON.stringify(
+    await sealMirror(OTHER_KEY, SALT, bank([word("elegy")]), "bbbb")
+  );
+
+  const { bank: merged, notes } = await absorbImports({
+    key: KEY,
+    localBank: bank([]),
+    files: [
+      { name: "stranger.json", text: stranger },
+      { name: "good.json", text: good },
+      { name: "rubbish.json", text: "not json at all" },
+    ],
+  });
+
+  assert.deepEqual(merged.words.map((w) => w.word), ["demise"]);
+  assert.equal(notes.length, 2);
+  assert.match(notes.join(" "), /different password/);
+});
+
+test("an ancient import is warned about rather than refused", async () => {
+  // The opposite of the folder's rule: a file sitting in a folder is silently
+  // left alone, but a restore somebody explicitly asked for must go through —
+  // recovering from a dead machine is the whole reason this exists.
+  const ancient = Date.now() - (STALE_PEER_DAYS + 30) * 86_400_000;
+  const text = JSON.stringify(
+    await sealMirror(KEY, SALT, bank([word("relic")]), "dead", ancient)
+  );
+
+  const { bank: merged, notes } = await absorbImports({
+    key: KEY,
+    localBank: bank([]),
+    files: [{ name: "old-backup.json", text }],
+  });
+
+  assert.deepEqual(merged.words.map((w) => w.word), ["relic"], "the restore goes through");
+  assert.match(notes.join(" "), /days old/);
+});
