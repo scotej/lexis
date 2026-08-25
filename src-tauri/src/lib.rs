@@ -1,6 +1,8 @@
+mod device_key;
 mod mirror;
 mod store;
 
+use device_key::DeviceKey;
 use serde::Serialize;
 use std::sync::Mutex;
 use store::Store;
@@ -17,6 +19,20 @@ fn load_bank(state: tauri::State<'_, Mutex<Store>>) -> Result<Option<String>, St
 fn save_bank(state: tauri::State<'_, Mutex<Store>>, json: String) -> Result<(), String> {
     let store = state.lock().map_err(|e| e.to_string())?;
     store.save(&json)
+}
+
+/* ---- the device key ----
+ *
+ * One command: hand the webview the raw key material it needs to seal AI
+ * settings (see `device_key.rs` for the threat model). The key is generated
+ * on first use and never leaves this process except over the IPC bridge —
+ * it is not written to logs, exports, or backups.
+ */
+
+#[tauri::command]
+fn ai_device_key(state: tauri::State<'_, Mutex<DeviceKey>>) -> Result<Vec<u8>, String> {
+    let bytes = state.lock().map_err(|e| e.to_string())?.get()?;
+    Ok(bytes.to_vec())
 }
 
 /* ---- the Syncthing mirror ----
@@ -111,12 +127,14 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
             let dir = app.path().app_data_dir()?;
-            app.manage(Mutex::new(Store::new(dir)));
+            app.manage(Mutex::new(Store::new(dir.clone())));
+            app.manage(Mutex::new(DeviceKey::new(dir)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             load_bank,
             save_bank,
+            ai_device_key,
             check_update,
             install_update,
             mirror_check,

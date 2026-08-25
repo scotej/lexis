@@ -18,6 +18,19 @@ import {
   clearConflictLog,
 } from "./core/conflict.js";
 import { installStatsView, renderStatsView } from "./stats-view.js";
+import {
+  aiEssayReview,
+  aiExampleSentences,
+  aiNuance,
+  aiSimilarWords,
+  fetchKeyInfo,
+  fetchModels,
+} from "./core/ai.js";
+import {
+  clearAiSettings,
+  loadAiSettings,
+  saveAiSettings,
+} from "./core/ai-settings.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -197,6 +210,7 @@ function entryNode(word) {
   if (clarification) meta.append(clarification);
   meta.append(del);
   body.append(meta);
+  attachWordTools(word.word, meta);
   wrap.append(body);
 
   head.addEventListener("click", () => {
@@ -497,6 +511,9 @@ function updateEssayCount() {
 
 function clearEssayReport() {
   $("essay-report").replaceChildren();
+  // The AI review reads the same draft; it is equally stale the moment the
+  // draft moves.
+  $("ai-review-output").replaceChildren();
 }
 
 essayText.addEventListener("input", () => {
@@ -588,6 +605,95 @@ $("essay-check").addEventListener("click", async () => {
     out.append(log);
   }
 });
+
+/* ---- AI essay review ---- */
+
+$("essay-ai-review").addEventListener("click", async () => {
+  const text = essayText.value;
+  const out = $("ai-review-output");
+  const seq = ++aiSeq;
+
+  out.replaceChildren();
+  if (!text.trim()) {
+    out.append(el("p", "empty", "Nothing to review yet — paste your essay above."));
+    return;
+  }
+  if (!aiReady()) return;
+
+  const button = $("essay-ai-review");
+  button.disabled = true;
+  button.textContent = "reading your draft…";
+  const card = el("div", "ai-review-card");
+  card.append(el("p", "add-status", "thinking — this takes a moment…"));
+  out.append(card);
+
+  try {
+    // The bank's headwords ride along so the tutor can point at openings for
+    // the student's own vocabulary; the draft itself is the payload.
+    const review = await aiEssayReview(aiSettings, {
+      essay: text,
+      bankWords: app.listWords().map((w) => w.word),
+    });
+    if (seq !== aiSeq) return; // a newer review superseded this one
+    out.replaceChildren();
+    renderAiReview(review);
+  } catch (err) {
+    console.error(err);
+    if (seq !== aiSeq) return;
+    card.replaceChildren(
+      el("p", "gate-error", String(err.message ?? err))
+    );
+  } finally {
+    button.disabled = false;
+    button.textContent = "ai feedback";
+  }
+});
+
+function renderAiReview(review) {
+  const out = $("ai-review-output");
+  const card = el("div", "ai-review-card");
+
+  card.append(el("h2", "ai-review-title", "how it reads"));
+  if (review.summary) {
+    card.append(el("p", "report-summary ai-summary", review.summary));
+  }
+
+  if (review.strengths.length) {
+    const strengths = el("div", "report-section");
+    strengths.append(el("p", "syn-label", "already working"));
+    const list = el("ul", "note-list");
+    review.strengths.forEach((s) => list.append(el("li", null, s)));
+    strengths.append(list);
+    card.append(strengths);
+  }
+
+  if (review.improvements.length) {
+    const improvements = el("div", "report-section");
+    improvements.append(el("p", "syn-label", "what would lift it most"));
+    review.improvements.forEach((imp) => {
+      const row = el("div", "report-word");
+      const head = el("div", "report-word-head");
+      head.append(el("span", "headword ai-imp-title", imp.title || "improvement"));
+      row.append(head);
+      if (imp.detail) row.append(el("p", "report-sentence", imp.detail));
+      improvements.append(row);
+    });
+    card.append(improvements);
+  }
+
+  if (review.focus.length) {
+    const focus = el("div", "report-section");
+    focus.append(el("p", "syn-label", "practise next"));
+    focus.append(el("p", "report-summary", review.focus.join(" · ")));
+    card.append(focus);
+  }
+
+  const note = el("p", "ai-review-note");
+  note.textContent =
+    "AI feedback is advice, not marking. Your teacher decides what counts.";
+  card.append(note);
+  out.append(card);
+}
 
 /* ---- quick lookup ----
    A definition without commitment: “/” (or ⌘K) opens a small overlay that
@@ -695,6 +801,7 @@ function renderLookupResult(word, dict) {
     meta.append(add);
   }
   lookupResult.append(meta);
+  attachWordTools(word, meta);
 }
 
 /* ---- sync view ---- */
@@ -1125,6 +1232,287 @@ settingsForm.addEventListener("submit", async (e) => {
   }
 });
 
+/* ---- AI assist ---- */
+
+let aiSettings = null; // decrypted in-memory copy: { key, model }
+let aiModels = null; // the catalogue, fetched lazily for suggestions
+let aiSeq = 0; // stale-response guard for the essay review
+
+function aiReady() {
+  return Boolean(aiSettings?.key);
+}
+
+function describeKeyInfo(info) {
+  const label = info.label ? info.label : "OpenRouter key";
+  if (info.remaining == null) {
+    return `${label} · ${info.usage.toFixed(2)} spent`;
+  }
+  return `${label} · ${info.usage.toFixed(2)} spent of ${info.limit.toFixed(2)}`;
+}
+
+async function renderAiSettings() {
+  const has = aiReady();
+  $("essay-ai-review").hidden = !has;
+  $("ai-remove").hidden = !has;
+  $("ai-key-note").hidden = has;
+  // The key field stays empty once saved; showing even a fragment invites copying.
+  $("ai-key").value = "";
+  $("ai-key").placeholder = has ? "saved — type to replace" : "sk-or-v1-…";
+  $("ai-model").value = aiSettings?.model ?? "";
+
+  const facts = $("ai-facts");
+  if (!has) {
+    facts.hidden = true;
+    return;
+  }
+  facts.hidden = false;
+  $("ai-key-label").textContent = "checking…";
+  $("ai-key-spent").textContent = "—";
+  try {
+    $("ai-key-label").textContent = describeKeyInfo(await fetchKeyInfo(aiSettings.key));
+  } catch (err) {
+    $("ai-key-label").textContent = String(err.message ?? err);
+  }
+  refreshModelSuggestions();
+}
+
+/** Fills the model datalist quietly; never an error worth showing. */
+async function refreshModelSuggestions() {
+  try {
+    if (!aiModels) aiModels = await fetchModels(aiSettings.key);
+    const options = aiModels.slice(0, 400).map((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.label = m.name;
+      return opt;
+    });
+    $("ai-model-list").replaceChildren(...options);
+  } catch {
+    /* suggestions are decorative */
+  }
+}
+
+$("ai-settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = $("ai-status");
+  status.hidden = true;
+  status.classList.remove("error");
+  const typedKey = $("ai-key").value.trim();
+  const model = $("ai-model").value.trim();
+  if (!typedKey && !aiReady()) {
+    status.textContent = "Paste your OpenRouter key first.";
+    status.classList.add("error");
+    status.hidden = false;
+    return;
+  }
+
+  const button = $("ai-save");
+  button.disabled = true;
+  try {
+    const next = await saveAiSettings(platform, {
+      key: typedKey || aiSettings.key,
+      model,
+    });
+    aiSettings = next;
+    // Prove the key works before celebrating it — but a verification failure
+    // must not read as a failed *save*, which it isn't.
+    let verified = null;
+    try {
+      verified = await fetchKeyInfo(next.key);
+    } catch (verifyErr) {
+      console.error(verifyErr);
+      status.textContent =
+        "Saved. Couldn’t reach OpenRouter to check the balance just now.";
+      status.hidden = false;
+      await renderAiSettings();
+      return;
+    }
+    status.textContent = `Saved and working — ${describeKeyInfo(verified)}.`;
+    status.hidden = false;
+    await renderAiSettings();
+  } catch (err) {
+    status.textContent = String(err.message ?? err);
+    status.classList.add("error");
+    status.hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("ai-remove").addEventListener("click", async () => {
+  try {
+    await clearAiSettings();
+  } catch (err) {
+    console.error(err); // removal is best-effort; the panel updates regardless
+  }
+  aiSettings = { key: "", model: "" };
+  aiModels = null;
+  renderAiSettings();
+});
+
+["ai-key", "ai-model"].forEach((id) =>
+  $(id).addEventListener("input", () => {
+    const status = $("ai-status");
+    status.hidden = true;
+    status.classList.remove("error");
+  })
+);
+
+/**
+ * Loads AI settings at unlock/boot. Never blocks or breaks startup: the app
+ * is fully usable without a key, and an unreadable vault just reads as
+ * "not set up".
+ */
+async function initAi() {
+  aiSettings = await loadAiSettings(platform);
+  renderAiSettings();
+  // The bank may already be on screen from boot; with a key present its
+  // entries now grow their AI triggers.
+  if (aiReady()) await renderBank();
+}
+
+/* ---- AI word tools (bank + lookup) ---- */
+
+/**
+ * One shared drawer for per-word AI results, wherever the word came from.
+ */
+async function runWordTool(mount, work, render) {
+  mount.replaceChildren();
+  const statusLine = el("p", "add-status");
+  statusLine.textContent = "thinking…";
+  mount.append(statusLine);
+  try {
+    const result = await work();
+    mount.replaceChildren();
+    if (result) render(result);
+  } catch (err) {
+    console.error(err);
+    statusLine.textContent = String(err.message ?? err);
+    statusLine.classList.add("error");
+    mount.replaceChildren(statusLine);
+  }
+}
+
+function similarWordsNode(word) {
+  const wrap = el("div", "ai-tool-result");
+  const head = el("p", "report-summary");
+  head.append(
+    el("span", "syn-label", "similar words"),
+    document.createTextNode(` — ways “${word}” can be said, with what makes each different`)
+  );
+  wrap.append(head);
+  const body = el("div", "ai-tool-body");
+  wrap.append(body);
+  // Where a “vs” comparison lands: beneath the list it belongs to.
+  const detail = el("div", "ai-nuance-detail");
+  wrap.append(detail);
+
+  const load = () =>
+    runWordTool(body, () => aiSimilarWords(aiSettings, word), ({ words }) => {
+      words.forEach((entry) => {
+        const row = el("div", "nuance-row");
+        row.append(el("span", "headword nuance-word", entry.word));
+        row.append(el("span", "nuance-note", entry.note || ""));
+        // The question a list of near-synonyms always provokes — “so can I
+        // swap them?” — answered in place rather than left hanging.
+        const vs = el("button", "link-quiet", "vs");
+        vs.type = "button";
+        vs.setAttribute("aria-label", `compare ${word} with ${entry.word}`);
+        vs.addEventListener("click", () => {
+          vs.disabled = true;
+          runWordTool(
+            detail,
+            () => aiNuance(aiSettings, [word, entry.word]),
+            ({ distinctions, guidance }) => {
+              distinctions.forEach((d) => {
+                if (!d.nuance) return;
+                const line = el("p", "nuance-distinction");
+                line.append(el("strong", null, d.word));
+                line.append(document.createTextNode(` — ${d.nuance}`));
+                detail.append(line);
+              });
+              if (guidance) detail.append(el("p", "nuance-guidance", guidance));
+            }
+          ).finally(() => {
+            if (vs.isConnected) vs.disabled = false;
+          });
+        });
+        row.append(vs);
+        body.append(row);
+      });
+      body.append(againButton("ask again", load));
+    });
+
+  const trigger = el("button", "link-quiet", "similar words (AI)");
+  trigger.type = "button";
+  trigger.addEventListener("click", () => {
+    wrap.hidden = !wrap.hidden;
+    if (!wrap.hidden && !body.childElementCount) load();
+  });
+  wrap.hidden = true;
+  return { node: wrap, trigger };
+}
+
+function examplesNode(word) {
+  const wrap = el("div", "ai-tool-result");
+  const head = el("p", "report-summary");
+  head.append(
+    el("span", "syn-label", "in your writing"),
+    document.createTextNode(` — three sentences that use “${word}”`)
+  );
+  wrap.append(head);
+  const body = el("div", "ai-tool-body");
+  wrap.append(body);
+
+  // The draft rides along as context when there is one, so the examples
+  // speak about the student's own text rather than a generic novel.
+  const load = () =>
+    runWordTool(
+      body,
+      () => aiExampleSentences(aiSettings, { word, context: essayText.value }),
+      ({ sentences }) => {
+        const list = el("ul", "note-list");
+        sentences.forEach((s) => list.append(el("li", "ai-example", s)));
+        body.append(list);
+        body.append(againButton("ask for three more", load));
+      }
+    );
+
+  const trigger = el("button", "link-quiet", "example sentences (AI)");
+  trigger.type = "button";
+  trigger.addEventListener("click", () => {
+    wrap.hidden = !wrap.hidden;
+    if (!wrap.hidden && !body.childElementCount) load();
+  });
+  wrap.hidden = true;
+  return { node: wrap, trigger };
+}
+
+/** The small "generate another batch" link at the foot of a result. */
+function againButton(label, load) {
+  const again = el("button", "link-quiet", label);
+  again.type = "button";
+  again.addEventListener("click", () => {
+    again.disabled = true;
+    load();
+  });
+  return again;
+}
+
+/**
+ * Attaches the two lazy AI tools beneath an expanded entry's synonyms.
+ * Built fresh on every render; a drawer that was open stays open only if
+ * its content is still cheap to show (it re-fetches on demand instead).
+ */
+function attachWordTools(word, afterNode) {
+  if (!aiReady()) return;
+  const similar = similarWordsNode(word);
+  const examples = examplesNode(word);
+  const triggers = el("p", "ai-triggers");
+  triggers.append(similar.trigger, document.createTextNode(" "), examples.trigger);
+  afterNode.after(triggers, similar.node, examples.node);
+}
+
 /* ---- updates (desktop only) ---- */
 
 async function offerUpdate() {
@@ -1269,6 +1657,7 @@ async function startWeb(key, config) {
   essayText.value = loadEssayDraft();
   updateEssayCount();
   await renderBank();
+  await initAi(); // after the session key exists; never blocks the UI
   addInput.focus();
   requestPersistence(); // upgrade local durability now that we have a gesture
   await sync.now(); // pull whatever the desktop app left behind
@@ -1302,6 +1691,7 @@ async function startDesktop() {
   essayText.value = loadEssayDraft();
   updateEssayCount();
   await renderBank();
+  await initAi(); // the device key comes from Rust; never blocks the UI
   addInput.focus();
 
   // Sync is opt-in on desktop; the app works fully without it.

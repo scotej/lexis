@@ -6,6 +6,8 @@
  * the password only comes into play when you turn sync on.
  */
 
+import { fromBase64, toBase64 } from "../core/crypto.js";
+
 const tauri = globalThis.__TAURI__;
 const invoke = tauri?.core?.invoke;
 
@@ -13,9 +15,43 @@ export function isDesktop() {
   return Boolean(invoke);
 }
 
+/**
+ * Imports raw key material as a non-extractable AES-GCM CryptoKey. The
+ * bytes themselves are never exposed to callers.
+ */
+function importRawAesKey(rawB64) {
+  return crypto.subtle.importKey(
+    "raw",
+    fromBase64(rawB64),
+    "AES-GCM",
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
 export function createDesktopPlatform() {
+  // Fetched once from Rust on first use and held only in this closure: the
+  // raw key material crosses the IPC bridge exactly once per launch.
+  let deviceKeyPromise = null;
+  const loadDeviceKey = () => {
+    if (!deviceKeyPromise) {
+      deviceKeyPromise = invoke("ai_device_key").then(toBase64);
+    }
+    return deviceKeyPromise;
+  };
+
   return {
     kind: "desktop",
+
+    /**
+     * The AES-GCM key that seals AI settings on this device. The desktop has
+     * no master password by design, so the Rust side supplies a random
+     * per-device key kept in a 0600 file beside the bank — see
+     * `src-tauri/src/device_key.rs` for the honest threat model.
+     */
+    deviceKey() {
+      return loadDeviceKey().then(importRawAesKey);
+    },
 
     storage: {
       async load() {

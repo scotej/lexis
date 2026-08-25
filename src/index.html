@@ -181,8 +181,10 @@
           </label>
           <span class="essay-count" id="essay-count"></span>
           <button id="essay-check" class="button-primary" type="button">check essay</button>
+          <button id="essay-ai-review" class="button-ai" type="button" hidden>ai feedback</button>
         </div>
         <div id="essay-report"></div>
+        <div id="ai-review-output"></div>
       </section>
 
       <!-- sync -->
@@ -319,6 +321,51 @@
           <button class="button-primary" type="submit">save settings</button>
           <p id="settings-status" class="add-status" role="status" hidden></p>
         </form>
+
+        <!-- ai assist: an OpenRouter key unlocks the writing features -->
+        <section class="ai-block">
+          <h2 class="sync-heading">ai assist</h2>
+          <form id="ai-settings-form" class="gate-form sync-form" autocomplete="off">
+            <label class="field">
+              <span>OpenRouter API key</span>
+              <input
+                id="ai-key"
+                type="password"
+                placeholder="sk-or-v1-…"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <small id="ai-key-note">
+                From <em>openrouter.ai/keys</em>. Stored encrypted on this device — never
+                synced, never baked into the build, sent only to openrouter.ai.
+              </small>
+            </label>
+            <label class="field">
+              <span>model</span>
+              <input
+                id="ai-model"
+                type="text"
+                placeholder="openrouter/auto, anthropic/claude…, or paste a chat URL"
+                spellcheck="false"
+                list="ai-model-list"
+              />
+              <datalist id="ai-model-list"></datalist>
+              <small>
+                Any chat model OpenRouter offers. Leave blank for
+                <em>openrouter/auto</em>, which picks a good one per request.
+              </small>
+            </label>
+            <div class="essay-actions">
+              <button class="button-primary" type="submit" id="ai-save">save</button>
+              <button class="link-quiet" type="button" id="ai-remove" hidden>remove key</button>
+            </div>
+            <p id="ai-status" class="add-status" role="status" hidden></p>
+          </form>
+          <dl class="sync-facts" id="ai-facts" hidden>
+            <div><dt>key</dt><dd id="ai-key-label"></dd></div>
+            <div><dt>spent</dt><dd id="ai-key-spent"></dd></div>
+          </dl>
+        </section>
       </section>
     </main>
 
