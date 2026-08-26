@@ -68,7 +68,10 @@ routing). That unlocks three things:
 - **Essay feedback.** A second button beside *check essay* sends the draft
   for structured feedback: what already works, the few changes that would
   lift it most, and what to practise next — with your bank's headwords in
-  view so it can point out where your own vocabulary belongs.
+  view so it can point out where your own vocabulary belongs. It streams, so
+  the opening verdict appears while the rest is still being written, and
+  **stop** calls it off. Editing the draft cancels whatever is in flight:
+  feedback on a paragraph you have already rewritten is worse than none.
 - **Similar words.** Each entry and lookup grows two links. *similar words*
   asks for near-neighbours suited to analytical writing, each with a note on
   what makes it different from the headword; any row's **vs** splits the pair
@@ -83,8 +86,22 @@ The key is a credential like the sync token: stored only as ciphertext on the
 device that holds it, never synced to GitHub or the backup folder, never
 baked into any build, and sent nowhere except to `openrouter.ai`. Requests go
 straight from the app to OpenRouter — there is no lexis server in between.
-What you send is what the feature needs: a draft for essay feedback, one word
-for the vocabulary tools.
+
+Your writing goes too, and that is worth saying plainly rather than leaving
+implied. Essay feedback sends the draft. The vocabulary tools send one word,
+and example sentences send the opening of whatever is in the editor so the
+examples suit your actual piece. OpenRouter is a router: it forwards that
+text to whichever provider serves the model, and some providers keep what
+they are sent. So **strict privacy** is on by default and every request
+carries it — providers that collect data or retain prompts are excluded, and
+lexis would rather fail to find a model than quietly use one of them. If a
+model you have chosen has no provider that qualifies, the error says so and
+points at the checkbox; turning it off is a decision you make, not a default
+you fall into.
+
+The panel also shows what the session has cost. Every request spends your own
+credit, so the figure is the one that matters — what today's work came to,
+not the lifetime total on your dashboard.
 
 ## Two ends, one app
 
@@ -212,7 +229,10 @@ uploaded; they are analysed locally and never leave the device.
 
 **With an AI key saved**, requests leave for OpenRouter when you ask for
 essay feedback or the vocabulary tools — never before, and only with what
-that feature needs (see *AI assist* above). The key itself is stored
+that feature needs (see *AI assist* above). That includes your draft, so it
+is held to the same standard as everything else here: strict privacy is on by
+default, and every request tells OpenRouter to route only to providers that
+neither collect nor retain what they are sent. The key itself is stored
 encrypted at rest: sealed under your password-derived session key on the web,
 and under a random per-device key held in a `0600` file beside the bank on
 the desktop. That protects it from other accounts on the machine and from
