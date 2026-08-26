@@ -688,10 +688,18 @@ $("essay-ai-review").addEventListener("click", async () => {
     failed.append(el("p", "gate-error", String(err.message ?? err)));
     out.replaceChildren(failed);
   } finally {
+    // A run that has been replaced must not touch the controls: aborting the
+    // old request happens before the new one takes over the button, so the
+    // old finally arrives last and would leave "ai feedback" sitting idle
+    // while its replacement is still working. Being cancelled by an edit to
+    // the draft is different — nothing replaces it, so it restores as normal.
+    const superseded = aiReviewAbort !== null && aiReviewAbort !== ctrl;
     if (aiReviewAbort === ctrl) aiReviewAbort = null;
-    cancel.hidden = true;
-    button.disabled = false;
-    button.textContent = "ai feedback";
+    if (!superseded) {
+      cancel.hidden = true;
+      button.disabled = false;
+      button.textContent = "ai feedback";
+    }
   }
 });
 
