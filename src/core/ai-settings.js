@@ -21,9 +21,16 @@ import { storeGet, storeSet, storeRemove } from "../platform/store.js";
 
 const SETTINGS_KEY = "lexis-ai";
 
-/** What a stored settings object looks like when decrypted. */
+/**
+ * What a stored settings object looks like when decrypted.
+ *
+ * `strictPrivacy` is on by default and stays on unless someone deliberately
+ * turns it off: it is what keeps a student's unpublished draft away from
+ * providers that retain or train on inputs. Defaulting it to true here also
+ * means settings saved before the option existed adopt the safe value.
+ */
 export function emptyAiSettings() {
-  return { key: "", model: "" };
+  return { key: "", model: "", strictPrivacy: true };
 }
 
 /** Reads and unseals the settings. Any failure reads as "not set up yet". */
@@ -31,7 +38,8 @@ export async function loadAiSettings(platform) {
   try {
     const envelope = await storeGet(SETTINGS_KEY);
     if (!envelope) return emptyAiSettings();
-    return await decryptJSON(await platform.deviceKey(), envelope);
+    const stored = await decryptJSON(await platform.deviceKey(), envelope);
+    return { ...emptyAiSettings(), ...stored };
   } catch {
     // Unreadable — a different device key after a reset, or tampered storage.
     // An empty panel is the honest recovery; there is no plaintext anywhere
@@ -49,6 +57,7 @@ export async function saveAiSettings(platform, settings) {
   const clean = {
     key: String(settings?.key ?? "").trim(),
     model: String(settings?.model ?? "").trim(),
+    strictPrivacy: settings?.strictPrivacy !== false,
   };
   if (!clean.key) throw new Error("Paste your OpenRouter key first.");
   const envelope = await encryptJSON(await platform.deviceKey(), clean);

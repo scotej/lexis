@@ -11,6 +11,18 @@
  * the transient failure modes (drops, stalls, 5xx, throttling) — while the
  * permanent ones (bad key, empty credits, unknown model) come back as plain,
  * specific errors the interface can show verbatim.
+ *
+ * Two things travel with every completion by default, because the person
+ * using this is a student sending unpublished school work to a router that
+ * picks a provider per request:
+ *
+ *   - `provider: { data_collection: "deny", zdr: true }` keeps the draft away
+ *     from providers that retain inputs or train on them. It can leave a
+ *     narrow model with no eligible endpoint, so it is a setting rather than
+ *     a constant — off is a deliberate choice, made in settings, not a
+ *     default someone falls into.
+ *   - `response_format` with a strict JSON schema, where the endpoint honours
+ *     it. parseJSONLoose() stays as the fallback for everything else.
  */
 
 const API_BASE = "https://openrouter.ai/api/v1";
@@ -18,6 +30,7 @@ const API_BASE = "https://openrouter.ai/api/v1";
 /** Network-resilience knobs; tests shrink them with setAiNetworkOptions(). */
 const net = {
   timeoutMs: 45000, // generation is slower than sync; give it room
+  stallMs: 25000, // once streaming, silence for this long is a dead stream
   retries: 2, // total attempts per request for *transient* failures
   backoffMs: 600,
   maxBackoffMs: 4000,
@@ -52,12 +65,47 @@ function transientError(message, cause) {
 }
 
 /**
+ * The user changed their mind. Distinct from every other failure: nothing
+ * went wrong, so the interface should say nothing rather than apologise.
+ */
+export function cancelledError() {
+  const err = new Error("cancelled");
+  err.cancelled = true;
+  return err;
+}
+
+export function isCancelled(err) {
+  return Boolean(err?.cancelled);
+}
+
+/**
+ * Mirrors an external abort onto our own controller and returns the cleanup.
+ *
+ * Deliberately not `AbortSignal.any()`: that landed in WebKit far too
+ * recently to bet the desktop webview on, and this is four lines.
+ */
+function linkAbort(external, ctrl) {
+  if (!external) return () => {};
+  if (external.aborted) {
+    ctrl.abort();
+    return () => {};
+  }
+  const onAbort = () => ctrl.abort();
+  external.addEventListener("abort", onAbort, { once: true });
+  return () => external.removeEventListener("abort", onAbort);
+}
+
+/**
  * One OpenRouter request that cannot hang forever. Retries the transient
  * failure modes exactly the way sync does; surfaces everything else through
  * describeError so the message names the actual cause — an expired key reads
  * differently from an empty balance.
+ *
+ * The timeout covers reaching the response *headers*. A streaming body is
+ * governed by the stall timer in readStream() instead, so a long answer that
+ * is still arriving is never cut off for taking its time.
  */
-async function apiFetch(path, apiKey, init = {}) {
+async function apiFetch(path, apiKey, init = {}, signal = null) {
   const url = `${API_BASE}${path}`;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
@@ -68,13 +116,19 @@ async function apiFetch(path, apiKey, init = {}) {
 
   for (let attempt = 1; attempt <= net.retries; attempt++) {
     const last = attempt >= net.retries;
+    if (signal?.aborted) throw cancelledError();
     const ctrl = new AbortController();
+    const unlink = linkAbort(signal, ctrl);
     const timer = setTimeout(() => ctrl.abort(), net.timeoutMs);
     let resp;
     try {
       resp = await fetch(url, { ...init, headers, signal: ctrl.signal });
     } catch (err) {
       clearTimeout(timer);
+      unlink();
+      // A cancelled request and a timed-out one both surface as AbortError;
+      // only the external signal tells them apart.
+      if (signal?.aborted) throw cancelledError();
       if (last) {
         throw transientError(
           err?.name === "AbortError"
@@ -87,6 +141,7 @@ async function apiFetch(path, apiKey, init = {}) {
       continue;
     }
     clearTimeout(timer);
+    unlink();
 
     // Throttling and server trouble are worth one polite retry.
     if ((resp.status === 429 || resp.status >= 500) && !last) {
@@ -104,15 +159,18 @@ async function apiFetch(path, apiKey, init = {}) {
 
 /** Turns a non-2xx response into the most specific honest message available. */
 async function describeError(status, resp) {
-  let detail = "";
-  try {
-    const body = await resp.json();
-    detail =
-      body?.error?.message ??
-      (typeof body?.error === "string" ? body.error : "") ??
-      "";
-  } catch {
-    /* HTML error pages and empty bodies happen */
+  // Read through a clone: callers may need to inspect the same body to decide
+  // whether the failure is worth one differently-shaped retry.
+  const detail = await errorDetail(resp);
+
+  // Strict privacy routing can empty the pool for a narrowly-hosted model.
+  // Left unexplained that reads as "the model is broken"; it isn't, and the
+  // way out is one checkbox away, so the message says which one.
+  if (noEndpoints(status, detail)) {
+    return (
+      "No provider for this model meets the privacy setting (no data collection, " +
+      "zero retention). Choose another model, or turn off strict privacy in AI assist."
+    );
   }
 
   switch (status) {
@@ -129,42 +187,224 @@ async function describeError(status, resp) {
   }
 }
 
-async function apiJSON(path, apiKey, init = {}) {
-  const resp = await apiFetch(path, apiKey, init);
+/** "Nothing matched your routing constraints", in the shapes OpenRouter says it. */
+function noEndpoints(status, detail) {
+  return (status === 404 || status === 400) && /no (?:allowed )?endpoints?/i.test(detail ?? "");
+}
+
+/** A 400 that is complaining specifically about the schema we attached. */
+function rejectedResponseFormat(status, detail) {
+  return status === 400 && /response_format|json_schema|structured output/i.test(detail ?? "");
+}
+
+/** Reads the error body once, so callers can inspect it and still report it. */
+async function errorDetail(resp) {
+  try {
+    const body = await resp.clone().json();
+    return body?.error?.message ?? (typeof body?.error === "string" ? body.error : "") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+async function apiJSON(path, apiKey, init = {}, signal = null) {
+  const resp = await apiFetch(path, apiKey, init, signal);
   if (!resp.ok) throw new Error(await describeError(resp.status, resp));
   return resp.json();
 }
 
 /* ---- the chat completion core ---- */
 
+/** Strict privacy is the default; only an explicit `false` turns it off. */
+export function privacyPreference(settings) {
+  return settings?.strictPrivacy === false ? null : { data_collection: "deny", zdr: true };
+}
+
+function completionBody(settings, opts, { schema, stream }) {
+  const { system, prompt, maxTokens = 700, temperature = 0.4, schemaName = "reply" } = opts;
+  const body = {
+    model: normalizeModel(settings.model),
+    max_tokens: maxTokens,
+    temperature,
+    messages: [
+      ...(system ? [{ role: "system", content: system }] : []),
+      { role: "user", content: prompt },
+    ],
+  };
+  const provider = privacyPreference(settings);
+  if (provider) body.provider = provider;
+  if (schema) {
+    body.response_format = {
+      type: "json_schema",
+      json_schema: { name: schemaName, strict: true, schema },
+    };
+  }
+  if (stream) body.stream = true;
+  return body;
+}
+
+/** OpenRouter returns usage on every response now; this is the shape we keep. */
+export function normalizeUsage(usage) {
+  if (!usage) return null;
+  const cost = Number(usage.cost ?? usage.total_cost);
+  return {
+    cost: Number.isFinite(cost) ? cost : null,
+    promptTokens: Number(usage.prompt_tokens) || 0,
+    completionTokens: Number(usage.completion_tokens) || 0,
+    totalTokens: Number(usage.total_tokens) || 0,
+  };
+}
+
+async function readWhole(resp) {
+  const data = await resp.json();
+  return { text: data?.choices?.[0]?.message?.content ?? "", usage: data?.usage ?? null };
+}
+
 /**
- * One completion. Returns the model's text, with leading/trailing whitespace
- * and empty responses handled here rather than in every caller.
+ * One read, under a stall timer.
+ *
+ * The overall timeout covers reaching the headers; from there a generation
+ * may legitimately run for a minute. What is *not* legitimate is silence, so
+ * the clock restarts on every chunk and only an actually-dead stream trips it.
  */
-export async function chat(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
-  if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
-  const data = await apiJSON("/chat/completions", settings.key, {
-    method: "POST",
-    body: JSON.stringify({
-      model: normalizeModel(settings.model),
-      max_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(system ? [{ role: "system", content: system }] : []),
-        { role: "user", content: prompt },
-      ],
-    }),
+function readWithStall(reader) {
+  let timer;
+  const stalled = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      // Reject before cancelling, not after. Cancelling a reader resolves its
+      // pending read as `{ done: true }`, and that resolution would win the
+      // race below — handing back a truncated answer as though the model had
+      // finished, which is the one outcome a stall must never produce.
+      reject(transientError("OpenRouter stopped sending mid-answer."));
+      reader.cancel().catch(() => {});
+    }, net.stallMs);
   });
-  const text = data?.choices?.[0]?.message?.content ?? "";
-  if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
-  return text.trim();
+  return Promise.race([reader.read(), stalled]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Server-sent events into text, one line at a time.
+ *
+ * Chunk boundaries fall wherever the network puts them — routinely mid-line —
+ * so lines are assembled in a buffer rather than parsed per chunk. Comment
+ * frames (OpenRouter sends `: OPENROUTER PROCESSING` as a keep-alive) and the
+ * terminating `[DONE]` are skipped; the final frame carries usage.
+ */
+async function readStream(resp, onDelta, signal) {
+  // `stream: true` is a request, not a guarantee: a provider is free to
+  // ignore it and answer with ordinary JSON, and a fetch polyfill may hand
+  // back a response with no readable body at all. Either way the answer is
+  // there — read it whole and deliver it in one piece rather than looking for
+  // events that were never sent and reporting an empty response.
+  const isEventStream = /text\/event-stream/i.test(resp.headers.get("content-type") ?? "");
+  if (!isEventStream || !resp.body?.getReader) {
+    const whole = await readWhole(resp);
+    if (whole.text) onDelta(whole.text, whole.text);
+    return whole;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  const onAbort = () => reader.cancel().catch(() => {});
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  let buffer = "";
+  let text = "";
+  let usage = null;
+  try {
+    for (;;) {
+      if (signal?.aborted) throw cancelledError();
+      const { done, value } = await readWithStall(reader);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line || line.startsWith(":") || !line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+
+        let frame;
+        try {
+          frame = JSON.parse(payload);
+        } catch {
+          continue; // a malformed frame is not worth losing the answer over
+        }
+        if (frame?.error) {
+          throw new Error(frame.error.message ?? "OpenRouter reported an error mid-answer.");
+        }
+        const choice = frame?.choices?.[0];
+        // Streamed deltas, plus the whole-message shape some providers emit.
+        const piece = choice?.delta?.content ?? choice?.message?.content ?? "";
+        if (piece) {
+          text += piece;
+          onDelta(piece, text);
+        }
+        if (frame?.usage) usage = frame.usage;
+      }
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+  // A cancelled stream ends as a clean `done`, so the check has to be here
+  // too — otherwise a half-written answer would be returned as a whole one.
+  if (signal?.aborted) throw cancelledError();
+  return { text, usage };
+}
+
+/**
+ * One completion. Returns `{ text, usage }` — the usage is what lets the
+ * interface show a student what their own key just spent.
+ *
+ * Pass `onDelta` to stream: it is called with (piece, textSoFar) as the
+ * answer arrives. Pass `signal` to let the user call it off. Pass `schema`
+ * to have the endpoint enforce the JSON shape where it is able to.
+ */
+export async function chat(settings, opts = {}) {
+  if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
+  const { signal = null, onDelta = null } = opts;
+  const streaming = typeof onDelta === "function";
+
+  // The schema is an optimisation, never a reason to fail: an endpoint that
+  // rejects the parameter outright gets one more try without it, and
+  // parseJSONLoose() handles whatever comes back either way.
+  let schema = opts.schema ?? null;
+  for (;;) {
+    const resp = await apiFetch(
+      "/chat/completions",
+      settings.key,
+      {
+        method: "POST",
+        body: JSON.stringify(completionBody(settings, opts, { schema, stream: streaming })),
+        ...(streaming ? { headers: { Accept: "text/event-stream" } } : {}),
+      },
+      signal
+    );
+
+    if (!resp.ok) {
+      const detail = await errorDetail(resp);
+      if (schema && rejectedResponseFormat(resp.status, detail)) {
+        schema = null;
+        continue;
+      }
+      throw new Error(await describeError(resp.status, resp));
+    }
+
+    const { text, usage } = streaming
+      ? await readStream(resp, onDelta, signal)
+      : await readWhole(resp);
+    if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
+    return { text: text.trim(), usage: normalizeUsage(usage) };
+  }
 }
 
 /* ---- key + catalogue ---- */
 
 /** Key facts: label, spend, and remaining credit. Cheap enough to show inline. */
-export async function fetchKeyInfo(apiKey) {
-  const data = await apiJSON("/key", apiKey);
+export async function fetchKeyInfo(apiKey, { signal = null } = {}) {
+  const data = await apiJSON("/key", apiKey, {}, signal);
   const d = data?.data ?? {};
   const usage = Number(d.usage ?? 0);
   // An absent/null limit means "no cap" — Number(null) would read as 0 and
@@ -180,8 +420,8 @@ export async function fetchKeyInfo(apiKey) {
 }
 
 /** The model catalogue, cheapest-reasonable sort is the caller's problem. */
-export async function fetchModels(apiKey) {
-  const data = await apiJSON("/models", apiKey);
+export async function fetchModels(apiKey, { signal = null } = {}) {
+  const data = await apiJSON("/models", apiKey, {}, signal);
   const rows = Array.isArray(data?.data) ? data.data : [];
   return rows.map((m) => ({
     id: m.id ?? m.canonical_slug,
@@ -278,6 +518,69 @@ function jsonOnlyInstruction(schemaHint) {
   return `Respond with JSON only — no preamble, no markdown fences. Shape: ${schemaHint}`;
 }
 
+/* ---- the shapes, said twice ----
+ *
+ * Once in prose for models that only read the prompt, and once as a schema
+ * the endpoint can enforce where it supports strict mode. Strict mode wants
+ * every property required and no extras, which is also exactly what the
+ * mappers below expect — so saying it this way costs nothing.
+ */
+
+const strictObject = (properties) => ({
+  type: "object",
+  additionalProperties: false,
+  required: Object.keys(properties),
+  properties,
+});
+
+const stringList = { type: "array", items: { type: "string" } };
+
+const ESSAY_REVIEW_SCHEMA = strictObject({
+  summary: { type: "string" },
+  strengths: stringList,
+  improvements: {
+    type: "array",
+    items: strictObject({ title: { type: "string" }, detail: { type: "string" } }),
+  },
+  focus: stringList,
+});
+
+const SIMILAR_WORDS_SCHEMA = strictObject({
+  words: {
+    type: "array",
+    items: strictObject({ word: { type: "string" }, note: { type: "string" } }),
+  },
+});
+
+const SENTENCES_SCHEMA = strictObject({ sentences: stringList });
+
+const NUANCE_SCHEMA = strictObject({
+  distinctions: {
+    type: "array",
+    items: strictObject({ word: { type: "string" }, nuance: { type: "string" } }),
+  },
+  guidance: { type: "string" },
+});
+
+/**
+ * Reads the `summary` field out of a half-finished JSON response.
+ *
+ * Streaming JSON can't be parsed until the braces close, so a progress line
+ * would be the only thing to show for the whole generation. But `summary` is
+ * the first field the model writes, and it is complete the moment its closing
+ * quote arrives — which is early enough to start reading. Everything else
+ * waits for the real parse.
+ */
+export function peekSummary(partial) {
+  const match = /"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(String(partial ?? ""));
+  if (!match) return "";
+  try {
+    return asString(JSON.parse(`"${match[1]}"`));
+  } catch {
+    return "";
+  }
+}
+
 /* ---- feature: essay review ---- */
 
 const ESSAY_MAX_CHARS = 40000;
@@ -287,7 +590,10 @@ const ESSAY_MAX_CHARS = 40000;
  * next. The bank's headwords ride along so the tutor can suggest where the
  * student's own vocabulary belongs.
  */
-export async function aiEssayReview(settings, { essay, bankWords = [], topicNote = "" }) {
+export async function aiEssayReview(
+  settings,
+  { essay, bankWords = [], topicNote = "", signal = null, onProgress = null }
+) {
   const text = String(essay ?? "");
   if (!text.trim()) throw new Error("There’s no essay to review yet.");
   const trimmed = text.length > ESSAY_MAX_CHARS ? text.slice(0, ESSAY_MAX_CHARS) : text;
@@ -312,16 +618,28 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
     .filter(Boolean)
     .join("\n\n");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction(
-        '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
-      )}`,
-      prompt,
-      maxTokens: 1600,
-      temperature: 0.6,
-    })
-  );
+  // The one long-running feature, so it is the one that streams: the caller
+  // gets the summary as soon as its closing quote lands, and a growing
+  // character count before that, instead of a spinner for the whole minute.
+  let seen = "";
+  const { text: raw, usage } = await chat(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction(
+      '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
+    )}`,
+    prompt,
+    maxTokens: 1600,
+    temperature: 0.6,
+    schema: ESSAY_REVIEW_SCHEMA,
+    schemaName: "essay_review",
+    signal,
+    onDelta: onProgress
+      ? (_piece, soFar) => {
+          seen = peekSummary(soFar) || seen;
+          onProgress({ chars: soFar.length, summary: seen });
+        }
+      : null,
+  });
+  const parsed = parseJSONLoose(raw);
 
   const improvements = Array.isArray(parsed.improvements)
     ? parsed.improvements
@@ -339,7 +657,7 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
   if (!summary && !strengths.length && !improvements.length) {
     throw new Error("The response didn’t contain any readable feedback. Try again.");
   }
-  return { summary, strengths, improvements, focus };
+  return { summary, strengths, improvements, focus, usage };
 }
 
 /* ---- feature: similar words ---- */
@@ -349,22 +667,24 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
  * synonyms: each comes with a register note saying when it fits, which is
  * what a corpus listing can't tell you.
  */
-export async function aiSimilarWords(settings, word) {
+export async function aiSimilarWords(settings, word, { signal = null } = {}) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
-      prompt: [
-        `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
-        'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
-        "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
-        "Exclude “" + w + "” itself and simple inflections of it.",
-      ].join("\n"),
-      maxTokens: 600,
-      temperature: 0.5,
-    })
-  );
+  const { text, usage } = await chat(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
+    prompt: [
+      `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
+      'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
+      "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
+      "Exclude “" + w + "” itself and simple inflections of it.",
+    ].join("\n"),
+    maxTokens: 600,
+    temperature: 0.5,
+    schema: SIMILAR_WORDS_SCHEMA,
+    schemaName: "similar_words",
+    signal,
+  });
+  const parsed = parseJSONLoose(text);
 
   const words = Array.isArray(parsed.words) ? parsed.words : Array.isArray(parsed) ? parsed : [];
   const seen = new Set();
@@ -381,7 +701,7 @@ export async function aiSimilarWords(settings, word) {
     if (out.length >= 10) break;
   }
   if (!out.length) throw new Error("No usable alternatives came back. Try again.");
-  return { words: out };
+  return { words: out, usage };
 }
 
 /* ---- feature: example sentences ---- */
@@ -393,31 +713,33 @@ const CONTEXT_CHARS = 2400;
  * student has a draft underway, its opening rides along as context, so the
  * examples speak about *their* text rather than a generic novel.
  */
-export async function aiExampleSentences(settings, { word, context = "" }) {
+export async function aiExampleSentences(settings, { word, context = "", signal = null }) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
   const excerpt = String(context ?? "").replace(/\s+/g, " ").trim().slice(0, CONTEXT_CHARS);
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
-      prompt: [
-        `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
-        excerpt
-          ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
-          : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
-        "Vary sentence openings. No numbering, no explanation outside the JSON.",
-      ].join("\n"),
-      maxTokens: 400,
-      temperature: 0.7,
-    })
-  );
+  const { text, usage } = await chat(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
+    prompt: [
+      `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
+      excerpt
+        ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
+        : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
+      "Vary sentence openings. No numbering, no explanation outside the JSON.",
+    ].join("\n"),
+    maxTokens: 400,
+    temperature: 0.7,
+    schema: SENTENCES_SCHEMA,
+    schemaName: "example_sentences",
+    signal,
+  });
+  const parsed = parseJSONLoose(text);
 
   const sentences = asStringArray(
     Array.isArray(parsed.sentences) ? parsed.sentences : Array.isArray(parsed) ? parsed : [],
     6
   );
   if (!sentences.length) throw new Error("No sentences came back. Try again.");
-  return { sentences };
+  return { sentences, usage };
 }
 
 /* ---- feature: nuance comparison ---- */
@@ -426,7 +748,7 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
  * Splits near-synonyms apart: what each word claims, connotes, and costs.
  * This is the question students actually ask — “can I swap these?”
  */
-export async function aiNuance(settings, words) {
+export async function aiNuance(settings, words, { signal = null } = {}) {
   const list = (Array.isArray(words) ? words : String(words ?? "").split(/[;,/]/))
     .map((w) => String(w ?? "").trim())
     .filter(Boolean);
@@ -434,18 +756,20 @@ export async function aiNuance(settings, words) {
   if (unique.length < 2) throw new Error("Give at least two words to compare.");
   if (unique.length > 6) throw new Error("Compare up to six words at a time.");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
-      prompt: [
-        `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
-        'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
-        '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
-      ].join("\n"),
-      maxTokens: 800,
-      temperature: 0.4,
-    })
-  );
+  const { text, usage } = await chat(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
+    prompt: [
+      `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
+      'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
+      '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
+    ].join("\n"),
+    maxTokens: 800,
+    temperature: 0.4,
+    schema: NUANCE_SCHEMA,
+    schemaName: "nuance",
+    signal,
+  });
+  const parsed = parseJSONLoose(text);
 
   const byWord = new Map();
   const rows = Array.isArray(parsed.distinctions) ? parsed.distinctions : [];
@@ -459,5 +783,5 @@ export async function aiNuance(settings, words) {
   if (!guidance && distinctions.every((d) => !d.nuance)) {
     throw new Error("The comparison came back empty. Try again.");
   }
-  return { distinctions, guidance };
+  return { distinctions, guidance, usage };
 }
