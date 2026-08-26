@@ -800,3 +800,32 @@ test("the privacy choice survives a round trip", async () => {
 test("an empty settings object still carries strict privacy", () => {
   assert.equal(emptyAiSettings().strictPrivacy, true);
 });
+
+// --- the gap the rest of this file cannot see ---------------------------
+//
+// Every test above talks to a fake through a replaced global fetch, which is
+// exactly why none of them noticed that the desktop build's CSP did not list
+// openrouter.ai and refused every real request before it left the webview.
+// A unit test cannot catch that. Reading the two files and comparing them can.
+
+test("every host the client calls is allowed by the desktop CSP", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const root = new URL("../", import.meta.url);
+  const client = await readFile(new URL("src/core/ai.js", root), "utf8");
+  const conf = JSON.parse(await readFile(new URL("src-tauri/tauri.conf.json", root), "utf8"));
+
+  const hosts = [...client.matchAll(/https:\/\/[a-z0-9.-]+/gi)].map((m) => m[0].toLowerCase());
+  assert.ok(hosts.length, "the client should name at least one host");
+
+  const csp = conf.app.security.csp;
+  const connect = /connect-src([^;]*)/i.exec(csp);
+  assert.ok(connect, "the CSP should have a connect-src");
+
+  for (const host of new Set(hosts)) {
+    assert.ok(
+      connect[1].includes(host),
+      `${host} is fetched by core/ai.js but missing from connect-src — ` +
+        "the desktop build would refuse every request to it"
+    );
+  }
+});
