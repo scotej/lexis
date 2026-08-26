@@ -25,9 +25,11 @@ import {
   aiSimilarWords,
   fetchKeyInfo,
   fetchModels,
+  isCancelled,
 } from "./core/ai.js";
 import {
   clearAiSettings,
+  emptyAiSettings,
   loadAiSettings,
   saveAiSettings,
 } from "./core/ai-settings.js";
@@ -104,7 +106,10 @@ function switchView(name) {
   if (name === "stats") renderStatsView(app.getBank());
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
-  if (name === "settings") renderSettings();
+  if (name === "settings") {
+    renderSettings();
+    refreshAiFacts(); // the one place the key check and catalogue are worth fetching
+  }
 }
 
 // 1–7 jump straight to a view, top to bottom, matching the rail. Bare digits
@@ -512,8 +517,16 @@ function updateEssayCount() {
 function clearEssayReport() {
   $("essay-report").replaceChildren();
   // The AI review reads the same draft; it is equally stale the moment the
-  // draft moves.
+  // draft moves. Clearing the output is not enough on its own — a request
+  // already in flight would arrive afterwards and render feedback about
+  // sentences the student has since rewritten, so the sequence moves too and
+  // the answer is discarded when it lands. Anything still running is called
+  // off outright: nobody wants to pay for advice on a draft that is gone.
   $("ai-review-output").replaceChildren();
+  aiSeq++;
+  aiReviewAbort?.abort();
+  aiReviewAbort = null;
+  $("essay-ai-cancel").hidden = true;
 }
 
 essayText.addEventListener("input", () => {
@@ -621,10 +634,22 @@ $("essay-ai-review").addEventListener("click", async () => {
   if (!aiReady()) return;
 
   const button = $("essay-ai-review");
+  const cancel = $("essay-ai-cancel");
+  // One controller per run: the cancel button aborts it, and so does the next
+  // review, so two clicks never leave a request burning credit unwatched.
+  aiReviewAbort?.abort();
+  const ctrl = new AbortController();
+  aiReviewAbort = ctrl;
+
   button.disabled = true;
   button.textContent = "reading your draft…";
+  cancel.hidden = false;
+
   const card = el("div", "ai-review-card");
-  card.append(el("p", "add-status", "thinking — this takes a moment…"));
+  const progress = el("p", "add-status", "reading your draft…");
+  const early = el("p", "report-summary ai-summary ai-summary-early");
+  early.hidden = true;
+  card.append(progress, early);
   out.append(card);
 
   try {
@@ -633,20 +658,46 @@ $("essay-ai-review").addEventListener("click", async () => {
     const review = await aiEssayReview(aiSettings, {
       essay: text,
       bankWords: app.listWords().map((w) => w.word),
+      signal: ctrl.signal,
+      // The answer is one JSON object, so nothing parses until it closes —
+      // but "summary" is written first, and showing it the moment its closing
+      // quote lands turns a minute of spinner into something to read.
+      onProgress: ({ chars, summary }) => {
+        if (seq !== aiSeq) return;
+        progress.textContent = summary
+          ? "still writing — the rest is on its way…"
+          : `writing… ${chars.toLocaleString()} characters`;
+        if (summary && summary !== early.textContent) {
+          early.textContent = summary;
+          early.hidden = false;
+        }
+      },
     });
     if (seq !== aiSeq) return; // a newer review superseded this one
     out.replaceChildren();
     renderAiReview(review);
+    noteAiSpend(review.usage);
   } catch (err) {
+    if (isCancelled(err)) return; // the user called it off; say nothing
     console.error(err);
-    if (seq !== aiSeq) return;
-    card.replaceChildren(
-      el("p", "gate-error", String(err.message ?? err))
-    );
+    if (seq !== aiSeq) return; // the draft moved on; the error is stale too
+    // Write into the output node rather than the card, which an edit to the
+    // draft may already have detached — an error nobody can see is worse
+    // than no error at all.
+    const failed = el("div", "ai-review-card");
+    failed.append(el("p", "gate-error", String(err.message ?? err)));
+    out.replaceChildren(failed);
   } finally {
+    if (aiReviewAbort === ctrl) aiReviewAbort = null;
+    cancel.hidden = true;
     button.disabled = false;
     button.textContent = "ai feedback";
   }
+});
+
+$("essay-ai-cancel").addEventListener("click", () => {
+  aiReviewAbort?.abort();
+  $("ai-review-output").replaceChildren();
 });
 
 function renderAiReview(review) {
@@ -1234,9 +1285,12 @@ settingsForm.addEventListener("submit", async (e) => {
 
 /* ---- AI assist ---- */
 
-let aiSettings = null; // decrypted in-memory copy: { key, model }
+let aiSettings = null; // decrypted in-memory copy: { key, model, strictPrivacy }
 let aiModels = null; // the catalogue, fetched lazily for suggestions
 let aiSeq = 0; // stale-response guard for the essay review
+let aiReviewAbort = null; // the in-flight review, so it can be called off
+let aiSessionCost = 0; // what this session has spent, in USD
+let aiSessionCounted = false; // whether any response actually reported a cost
 
 function aiReady() {
   return Boolean(aiSettings?.key);
@@ -1244,13 +1298,51 @@ function aiReady() {
 
 function describeKeyInfo(info) {
   const label = info.label ? info.label : "OpenRouter key";
-  if (info.remaining == null) {
-    return `${label} · ${info.usage.toFixed(2)} spent`;
-  }
-  return `${label} · ${info.usage.toFixed(2)} spent of ${info.limit.toFixed(2)}`;
+  // What is left matters more than what is gone, when there is a cap to be
+  // left of. An uncapped key can only report what it has spent.
+  if (info.remaining == null) return `${label} · ${formatUSD(info.usage)} spent to date`;
+  return `${label} · ${formatUSD(info.remaining)} of ${formatUSD(info.limit)} left`;
 }
 
-async function renderAiSettings() {
+/** Money, at the resolution these amounts actually land on. */
+function formatUSD(amount) {
+  if (amount >= 0.01 || amount === 0) return `$${amount.toFixed(2)}`;
+  return `$${amount.toFixed(4)}`;
+}
+
+/**
+ * Adds one response's cost to the session total.
+ *
+ * Every request spends the student's own money, so the number they care about
+ * is not the lifetime figure on their OpenRouter dashboard but what this
+ * afternoon's work has cost. OpenRouter returns usage on every response, so
+ * this is free to keep.
+ */
+function noteAiSpend(usage) {
+  if (usage?.cost == null) return;
+  aiSessionCost += usage.cost;
+  aiSessionCounted = true;
+  renderAiSpend();
+}
+
+function renderAiSpend() {
+  const spent = $("ai-key-spent");
+  if (!spent) return;
+  spent.textContent = aiSessionCounted
+    ? `${formatUSD(aiSessionCost)} this session`
+    : "nothing yet this session";
+}
+
+/**
+ * The cheap half of the panel: what is on screen, and nothing that touches
+ * the network. Safe to call at boot and on every settings change.
+ *
+ * Bank entries carry their AI links only when a key exists, and that decision
+ * is made when they are drawn — so a key arriving or leaving has to redraw
+ * them, or the affordances and the actual state disagree in whichever
+ * direction the change went.
+ */
+function renderAiPanel() {
   const has = aiReady();
   $("essay-ai-review").hidden = !has;
   $("ai-remove").hidden = !has;
@@ -1259,19 +1351,25 @@ async function renderAiSettings() {
   $("ai-key").value = "";
   $("ai-key").placeholder = has ? "saved — type to replace" : "sk-or-v1-…";
   $("ai-model").value = aiSettings?.model ?? "";
+  $("ai-privacy").checked = aiSettings?.strictPrivacy !== false;
+  $("ai-facts").hidden = !has;
+  renderAiSpend();
+}
 
-  const facts = $("ai-facts");
-  if (!has) {
-    facts.hidden = true;
-    return;
-  }
-  facts.hidden = false;
-  $("ai-key-label").textContent = "checking…";
-  $("ai-key-spent").textContent = "—";
+/**
+ * The half that costs a round trip: the key's standing and the model
+ * catalogue. Called when the settings view is actually opened, never at boot
+ * — an app that starts on the bank has no reason to talk to OpenRouter before
+ * anybody has asked it for anything.
+ */
+async function refreshAiFacts() {
+  if (!aiReady()) return;
+  const label = $("ai-key-label");
+  label.textContent = "checking…";
   try {
-    $("ai-key-label").textContent = describeKeyInfo(await fetchKeyInfo(aiSettings.key));
+    label.textContent = describeKeyInfo(await fetchKeyInfo(aiSettings.key));
   } catch (err) {
-    $("ai-key-label").textContent = String(err.message ?? err);
+    label.textContent = String(err.message ?? err);
   }
   refreshModelSuggestions();
 }
@@ -1310,10 +1408,17 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
   button.disabled = true;
   try {
     const next = await saveAiSettings(platform, {
-      key: typedKey || aiSettings.key,
+      key: typedKey || aiSettings?.key,
       model,
+      strictPrivacy: $("ai-privacy").checked,
     });
+    const wasReady = aiReady();
     aiSettings = next;
+    renderAiPanel();
+    // Entries drawn before the key existed have no AI links; draw them again
+    // now that they should.
+    if (!wasReady) await renderBank();
+
     // Prove the key works before celebrating it — but a verification failure
     // must not read as a failed *save*, which it isn't.
     let verified = null;
@@ -1324,12 +1429,12 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
       status.textContent =
         "Saved. Couldn’t reach OpenRouter to check the balance just now.";
       status.hidden = false;
-      await renderAiSettings();
       return;
     }
+    $("ai-key-label").textContent = describeKeyInfo(verified);
     status.textContent = `Saved and working — ${describeKeyInfo(verified)}.`;
     status.hidden = false;
-    await renderAiSettings();
+    refreshModelSuggestions();
   } catch (err) {
     status.textContent = String(err.message ?? err);
     status.classList.add("error");
@@ -1345,9 +1450,19 @@ $("ai-remove").addEventListener("click", async () => {
   } catch (err) {
     console.error(err); // removal is best-effort; the panel updates regardless
   }
-  aiSettings = { key: "", model: "" };
+  // Anything still running belongs to a key that no longer exists.
+  aiReviewAbort?.abort();
+  aiReviewAbort = null;
+  aiSeq++;
+  aiSettings = emptyAiSettings();
   aiModels = null;
-  renderAiSettings();
+  aiSessionCost = 0;
+  aiSessionCounted = false;
+  $("ai-review-output").replaceChildren();
+  renderAiPanel();
+  // Without this the bank keeps the AI links it was drawn with, and every one
+  // of them is now a button that can only produce an error.
+  await renderBank();
 });
 
 ["ai-key", "ai-model"].forEach((id) =>
@@ -1358,6 +1473,31 @@ $("ai-remove").addEventListener("click", async () => {
   })
 );
 
+// Privacy is a saved setting, not a per-request flag, so a change to it is a
+// change to the settings — save it the moment it is made rather than making
+// someone press save to confirm a checkbox.
+$("ai-privacy").addEventListener("change", async () => {
+  if (!aiReady()) return;
+  const status = $("ai-status");
+  try {
+    aiSettings = await saveAiSettings(platform, {
+      ...aiSettings,
+      strictPrivacy: $("ai-privacy").checked,
+    });
+    status.classList.remove("error");
+    status.textContent = aiSettings.strictPrivacy
+      ? "Strict privacy on — requests avoid providers that keep or train on your writing."
+      : "Strict privacy off — any provider OpenRouter routes to may see your drafts.";
+    status.hidden = false;
+  } catch (err) {
+    console.error(err);
+    $("ai-privacy").checked = aiSettings?.strictPrivacy !== false;
+    status.textContent = String(err.message ?? err);
+    status.classList.add("error");
+    status.hidden = false;
+  }
+});
+
 /**
  * Loads AI settings at unlock/boot. Never blocks or breaks startup: the app
  * is fully usable without a key, and an unreadable vault just reads as
@@ -1365,7 +1505,10 @@ $("ai-remove").addEventListener("click", async () => {
  */
 async function initAi() {
   aiSettings = await loadAiSettings(platform);
-  renderAiSettings();
+  // Local work only: unsealing the settings and drawing the panel. Checking
+  // the key's balance and pulling the model catalogue wait until someone
+  // opens settings — see refreshAiFacts().
+  renderAiPanel();
   // The bank may already be on screen from boot; with a key present its
   // entries now grow their AI triggers.
   if (aiReady()) await renderBank();
@@ -1375,18 +1518,35 @@ async function initAi() {
 
 /**
  * One shared drawer for per-word AI results, wherever the word came from.
+ *
+ * Each mount keeps its own sequence number. Several comparisons can be asked
+ * for before any of them answers — every “vs” in a list writes into the same
+ * node — and without this the reader gets whichever one happened to finish
+ * last under whichever heading arrived first.
  */
+const wordToolSeq = new WeakMap();
+
 async function runWordTool(mount, work, render) {
+  const seq = (wordToolSeq.get(mount) ?? 0) + 1;
+  wordToolSeq.set(mount, seq);
+  const current = () => wordToolSeq.get(mount) === seq;
+
   mount.replaceChildren();
   const statusLine = el("p", "add-status");
   statusLine.textContent = "thinking…";
   mount.append(statusLine);
   try {
     const result = await work();
+    if (!current()) return;
     mount.replaceChildren();
-    if (result) render(result);
+    if (result) {
+      render(result);
+      noteAiSpend(result.usage);
+    }
   } catch (err) {
+    if (isCancelled(err)) return;
     console.error(err);
+    if (!current()) return;
     statusLine.textContent = String(err.message ?? err);
     statusLine.classList.add("error");
     mount.replaceChildren(statusLine);
