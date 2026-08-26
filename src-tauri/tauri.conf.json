@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.dictionaryapi.dev https://api.datamuse.com https://en.wiktionary.org https://api.github.com"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://openrouter.ai https://api.dictionaryapi.dev https://api.datamuse.com https://en.wiktionary.org https://api.github.com"
     }
   },
   "plugins": {
