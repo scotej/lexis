@@ -184,7 +184,7 @@
           <button id="essay-ai-review" class="button-ai" type="button" hidden>ai feedback</button>
         </div>
         <div id="essay-report"></div>
-        <div id="ai-review-output"></div>
+        <div id="ai-review-output" aria-live="polite"></div>
       </section>
 
       <!-- sync -->
@@ -334,10 +334,22 @@
                 placeholder="sk-or-v1-…"
                 autocomplete="off"
                 spellcheck="false"
+                aria-label="OpenRouter API key"
               />
               <small id="ai-key-note">
                 From <em>openrouter.ai/keys</em>. Stored encrypted on this device — never
                 synced, never baked into the build, sent only to openrouter.ai.
+              </small>
+              <small class="ai-data-note">
+                What you ask about goes with it. <em>ai feedback</em> sends the whole
+                draft and your bank's headwords; <em>example sentences</em> sends the
+                word plus the opening of whatever draft is in the essay view;
+                <em>similar words</em> and <em>vs</em> send the words alone.
+                OpenRouter forwards that text to whichever provider serves the model,
+                and whether either keeps it is governed by your account's privacy
+                settings at <em>openrouter.ai/settings/privacy</em> — free models
+                generally require allowing prompt logging. Read them before sending
+                work that is being assessed.
               </small>
             </label>
             <label class="field">
@@ -348,6 +360,7 @@
                 placeholder="openrouter/auto, anthropic/claude…, or paste a chat URL"
                 spellcheck="false"
                 list="ai-model-list"
+                aria-label="Model"
               />
               <datalist id="ai-model-list"></datalist>
               <small>
@@ -355,7 +368,7 @@
                 <em>openrouter/auto</em>, which picks a good one per request.
               </small>
             </label>
-            <div class="essay-actions">
+            <div class="form-actions">
               <button class="button-primary" type="submit" id="ai-save">save</button>
               <button class="link-quiet" type="button" id="ai-remove" hidden>remove key</button>
             </div>
@@ -363,8 +376,12 @@
           </form>
           <dl class="sync-facts" id="ai-facts" hidden>
             <div><dt>key</dt><dd id="ai-key-label"></dd></div>
-            <div><dt>spent</dt><dd id="ai-key-spent"></dd></div>
+            <div><dt>spent</dt><dd id="ai-key-spent" aria-live="polite"></dd></div>
+            <div><dt>this session</dt><dd id="ai-session-usage"></dd></div>
           </dl>
+          <p class="form-actions" id="ai-facts-actions" hidden>
+            <button class="link-quiet" type="button" id="ai-refresh">refresh balance</button>
+          </p>
         </section>
       </section>
     </main>

@@ -430,6 +430,18 @@ main {
   color: var(--pen);
 }
 
+/* A quiet link that is busy still has to look busy: several seconds of an AI
+   request would otherwise pass with no sign the click registered. */
+.link-quiet:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
+.link-quiet:disabled:hover {
+  color: var(--faint);
+}
+
 /* ---- today ---- */
 
 .today-heading {
@@ -445,6 +457,9 @@ main {
 
 .today-heading .link-quiet:disabled {
   color: var(--hairline);
+  /* This one dims by colour alone; the global rule's opacity on top of an
+     already-hairline grey would fade it to nothing. */
+  opacity: 1;
   cursor: default;
   text-decoration: none;
 }
@@ -1050,6 +1065,23 @@ main {
   color: var(--faint);
   font-weight: 400;
   margin-bottom: 16px;
+}
+
+/* A row of buttons at the foot of any form. (The essay view has its own
+   `.essay-actions`; this is the same shape without the borrowed name.) */
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+/* What leaves the device is the part worth reading twice, so it keeps the
+   full line height of prose rather than shrinking away like a footnote. */
+.field small.ai-data-note {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.65;
 }
 
 /* The AI affordances are quiet by design — a pen-coloured outline rather

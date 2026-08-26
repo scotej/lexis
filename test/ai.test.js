@@ -83,7 +83,7 @@ function json(status, body, headers = {}) {
 
 globalThis.fetch = (url, init) => baseFetch(url, init);
 
-const { setAiNetworkOptions, chat, fetchKeyInfo, fetchModels, normalizeModel, parseJSONLoose, stripEmphasis, aiSimilarWords, aiExampleSentences, aiNuance, aiEssayReview } =
+const { setAiNetworkOptions, chat, fetchKeyInfo, fetchModels, normalizeModel, parseJSONLoose, stripEmphasis, aiSimilarWords, aiExampleSentences, aiNuance, aiEssayReview, aiSessionUsage, resetAiSessionUsage } =
   await import("../src/core/ai.js");
 const { loadAiSettings, saveAiSettings, clearAiSettings, emptyAiSettings } =
   await import("../src/core/ai-settings.js");
@@ -213,6 +213,78 @@ test("a permanently dead network gives up as a transient error", async () => {
   );
   // No journal entries: the requests never reached any server.
   assert.equal(calls.length, 0);
+});
+
+test("a stalled body is aborted by the timeout rather than hanging forever", async () => {
+  let stalled = false;
+  globalThis.fetch = (url, init) => {
+    if (!stalled) {
+      stalled = true;
+      // Headers arrive promptly; the body never does. A timer that stops at
+      // the headers leaves this read hanging with nothing to interrupt it.
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: () =>
+          new Promise((_, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+            );
+          }),
+      });
+    }
+    return baseFetch(url, init);
+  };
+  const text = await chat(SETTINGS, { prompt: "slow body" });
+  assert.match(text, /echo:slow body/, "the retry carried it through");
+});
+
+test("a 200 that isn’t JSON reads as a human error, not a crash", async () => {
+  globalThis.fetch = () =>
+    new Response("<html>gateway</html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }), /couldn’t read/);
+});
+
+// --- the session ledger --------------------------------------------------
+
+test("the session ledger totals requests, tokens, and cost", async () => {
+  resetAiSessionUsage();
+  globalThis.fetch = () =>
+    json(200, {
+      choices: [{ message: { content: "ok" } }],
+      usage: { prompt_tokens: 120, completion_tokens: 30, cost: 0.0021 },
+    });
+  await chat(SETTINGS, { prompt: "one" });
+  await chat(SETTINGS, { prompt: "two" });
+
+  const usage = aiSessionUsage();
+  assert.equal(usage.requests, 2);
+  assert.equal(usage.totalTokens, 300);
+  assert.ok(Math.abs(usage.cost - 0.0042) < 1e-9, "cost accumulates");
+});
+
+test("a request that never succeeded is not counted as spend", async () => {
+  resetAiSessionUsage();
+  globalThis.fetch = () => json(401, { error: { message: "revoked" } });
+  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }));
+  assert.equal(aiSessionUsage().requests, 0, "a rejected key spent nothing");
+});
+
+test("an unpriced reply adds tokens without inventing a cost", async () => {
+  resetAiSessionUsage();
+  globalThis.fetch = () =>
+    json(200, {
+      choices: [{ message: { content: "ok" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+  await chat(SETTINGS, { prompt: "x" });
+  const usage = aiSessionUsage();
+  assert.equal(usage.totalTokens, 15);
+  assert.equal(usage.cost, 0, "absent is not a guess");
 });
 
 // --- key facts and catalogue --------------------------------------------

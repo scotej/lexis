@@ -83,8 +83,20 @@ The key is a credential like the sync token: stored only as ciphertext on the
 device that holds it, never synced to GitHub or the backup folder, never
 baked into any build, and sent nowhere except to `openrouter.ai`. Requests go
 straight from the app to OpenRouter — there is no lexis server in between.
-What you send is what the feature needs: a draft for essay feedback, one word
-for the vocabulary tools.
+What you send is what the feature needs, and no more: essay feedback sends the
+draft along with your bank's headwords; example sentences send the word and the
+opening of whatever draft is in the essay view, so they can speak about your
+text; similar words and **vs** send the words alone.
+
+**Know what leaves the device.** Everything else in lexis is analysed here;
+these three features are not, and cannot be. Your draft goes to OpenRouter,
+which forwards it to whichever provider serves the model you chose. Whether
+either of them keeps it is decided by your own account settings at
+[openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy) —
+and free models generally require allowing prompt logging in exchange. Worth
+reading before you send work that is being assessed. The settings panel shows
+what this session has spent, so the cost of asking never comes as a surprise
+either.
 
 ## Two ends, one app
 
@@ -210,15 +222,24 @@ key derived from your password (PBKDF2-SHA256, then AES-256-GCM). GitHub
 stores ciphertext and never holds the key. Essays are never synced or
 uploaded; they are analysed locally and never leave the device.
 
-**With an AI key saved**, requests leave for OpenRouter when you ask for
-essay feedback or the vocabulary tools — never before, and only with what
-that feature needs (see *AI assist* above). The key itself is stored
-encrypted at rest: sealed under your password-derived session key on the web,
-and under a random per-device key held in a `0600` file beside the bank on
-the desktop. That protects it from other accounts on the machine and from
-file copies; nothing stored on your behalf can protect it from malware
-already running as you, on this or any app. Removing the key in settings
-erases the stored ciphertext entirely.
+**With an AI key saved**, your work leaves for OpenRouter only when you ask
+for essay feedback or the vocabulary tools, and only with what that feature
+needs (see *AI assist* above, including what OpenRouter and the model's
+provider may retain). The one other request the app makes on its own account
+is a balance and model-catalogue check when you open **settings → ai assist** —
+it carries the key and nothing else, and it happens when you open that panel,
+not when the app starts.
+
+The key itself is stored encrypted at rest: sealed under your
+password-derived session key on the web, and under a random per-device key
+held in a `0600` file beside the bank on the desktop. That protects it from
+other accounts on the machine and from file copies; nothing stored on your
+behalf can protect it from malware already running as you, on this or any
+app. Removing the key in settings erases the stored ciphertext entirely — and
+so, on the web, do *use a different account* and *disconnect this device*,
+since both discard the session key that sealed it at the same moment. On the
+desktop neither touches it: the device key it is sealed under has nothing to
+do with sync.
 
 **The local backup folder is held to the same standard**, and for the same
 reason: a synced folder is a plain directory on two machines with possibly an

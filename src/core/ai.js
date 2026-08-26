@@ -56,6 +56,11 @@ function transientError(message, cause) {
  * failure modes exactly the way sync does; surfaces everything else through
  * describeError so the message names the actual cause — an expired key reads
  * differently from an empty balance.
+ *
+ * The timeout deliberately spans the *whole* exchange, body included. A
+ * server that sends its headers promptly and then stalls mid-body is a real
+ * failure mode, and clearing the timer at the headers would leave the read
+ * hanging forever with the interface stuck on "thinking…".
  */
 async function apiFetch(path, apiKey, init = {}) {
   const url = `${API_BASE}${path}`;
@@ -71,10 +76,11 @@ async function apiFetch(path, apiKey, init = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), net.timeoutMs);
     let resp;
+    let text;
     try {
       resp = await fetch(url, { ...init, headers, signal: ctrl.signal });
+      text = await resp.text();
     } catch (err) {
-      clearTimeout(timer);
       if (last) {
         throw transientError(
           err?.name === "AbortError"
@@ -85,8 +91,9 @@ async function apiFetch(path, apiKey, init = {}) {
       }
       await sleep(backoffDelay(attempt));
       continue;
+    } finally {
+      clearTimeout(timer);
     }
-    clearTimeout(timer);
 
     // Throttling and server trouble are worth one polite retry.
     if ((resp.status === 429 || resp.status >= 500) && !last) {
@@ -96,17 +103,17 @@ async function apiFetch(path, apiKey, init = {}) {
         continue;
       }
     }
-    return resp;
+    return { ok: resp.ok, status: resp.status, text };
   }
   // Unreachable: every path above returns or throws.
   throw transientError("Couldn’t reach OpenRouter.");
 }
 
 /** Turns a non-2xx response into the most specific honest message available. */
-async function describeError(status, resp) {
+function describeError(status, text) {
   let detail = "";
   try {
-    const body = await resp.json();
+    const body = JSON.parse(text ?? "");
     detail =
       body?.error?.message ??
       (typeof body?.error === "string" ? body.error : "") ??
@@ -130,9 +137,44 @@ async function describeError(status, resp) {
 }
 
 async function apiJSON(path, apiKey, init = {}) {
-  const resp = await apiFetch(path, apiKey, init);
-  if (!resp.ok) throw new Error(await describeError(resp.status, resp));
-  return resp.json();
+  const { ok, status, text } = await apiFetch(path, apiKey, init);
+  if (!ok) throw new Error(describeError(status, text));
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("OpenRouter sent a reply we couldn’t read.");
+  }
+}
+
+/* ---- what this session has spent ----
+ *
+ * The settings panel can show a balance, but only by asking OpenRouter. This
+ * ledger costs nothing: every completion already reports its own token usage,
+ * so the running total for the session is free to keep and answers the
+ * question the balance can't — "what have I spent *since I opened the app*".
+ */
+
+const session = { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+
+function recordUsage(usage) {
+  session.requests += 1;
+  session.promptTokens += Number(usage?.prompt_tokens ?? 0) || 0;
+  session.completionTokens += Number(usage?.completion_tokens ?? 0) || 0;
+  // OpenRouter reports `cost` on many routes but not all; absent is not zero,
+  // so an unpriced request simply adds nothing rather than pretending.
+  session.cost += Number(usage?.cost ?? 0) || 0;
+}
+
+/** A snapshot of what this session has asked for. */
+export function aiSessionUsage() {
+  return { ...session, totalTokens: session.promptTokens + session.completionTokens };
+}
+
+export function resetAiSessionUsage() {
+  session.requests = 0;
+  session.promptTokens = 0;
+  session.completionTokens = 0;
+  session.cost = 0;
 }
 
 /* ---- the chat completion core ---- */
@@ -155,6 +197,7 @@ export async function chat(settings, { system, prompt, maxTokens = 700, temperat
       ],
     }),
   });
+  recordUsage(data?.usage);
   const text = data?.choices?.[0]?.message?.content ?? "";
   if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
   return text.trim();

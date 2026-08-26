@@ -6,8 +6,6 @@
  * the password only comes into play when you turn sync on.
  */
 
-import { fromBase64, toBase64 } from "../core/crypto.js";
-
 const tauri = globalThis.__TAURI__;
 const invoke = tauri?.core?.invoke;
 
@@ -16,17 +14,25 @@ export function isDesktop() {
 }
 
 /**
- * Imports raw key material as a non-extractable AES-GCM CryptoKey. The
- * bytes themselves are never exposed to callers.
+ * Whatever shape the IPC bridge hands back for a Rust `Vec<u8>` — an array of
+ * numbers today, possibly a buffer tomorrow — as bytes.
  */
-function importRawAesKey(rawB64) {
-  return crypto.subtle.importKey(
-    "raw",
-    fromBase64(rawB64),
-    "AES-GCM",
-    false,
-    ["encrypt", "decrypt"]
-  );
+function toBytes(raw) {
+  if (raw instanceof Uint8Array) return raw;
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+  return Uint8Array.from(raw);
+}
+
+/**
+ * Imports raw key material as a non-extractable AES-GCM CryptoKey. The bytes
+ * go straight from the bridge into Web Crypto: no base64 detour, so the key
+ * never exists as an immutable JS string that can't be dropped on demand.
+ */
+function importRawAesKey(raw) {
+  return crypto.subtle.importKey("raw", toBytes(raw), "AES-GCM", false, [
+    "encrypt",
+    "decrypt",
+  ]);
 }
 
 export function createDesktopPlatform() {
@@ -35,7 +41,15 @@ export function createDesktopPlatform() {
   let deviceKeyPromise = null;
   const loadDeviceKey = () => {
     if (!deviceKeyPromise) {
-      deviceKeyPromise = invoke("ai_device_key").then(toBase64);
+      // A *rejection* must not be cached. One failed invoke would otherwise
+      // disable AI for the rest of the session, with no way back but a
+      // restart; forgetting it lets the next attempt try again.
+      deviceKeyPromise = invoke("ai_device_key")
+        .then(importRawAesKey)
+        .catch((err) => {
+          deviceKeyPromise = null;
+          throw err;
+        });
     }
     return deviceKeyPromise;
   };
@@ -50,7 +64,7 @@ export function createDesktopPlatform() {
      * `src-tauri/src/device_key.rs` for the honest threat model.
      */
     deviceKey() {
-      return loadDeviceKey().then(importRawAesKey);
+      return loadDeviceKey();
     },
 
     storage: {

@@ -156,7 +156,6 @@ mod tests {
     fn a_stale_temp_file_does_not_wedge_creation_forever() {
         let dir = tmpdir("stale-tmp");
         let mut key = DeviceKey::new(dir);
-        key.path.with_extension("key.tmp");
         std::fs::write(key.path.with_extension("key.tmp"), b"junk").unwrap();
         assert!(key.get().is_ok(), "creation recovers from leftover tmp");
     }
