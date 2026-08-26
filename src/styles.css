@@ -1293,3 +1293,35 @@ main {
   gap: 16px;
   margin-top: 8px;
 }
+
+/* A checkbox is still a field, but its label belongs beside the box rather
+   than above it — the note underneath stays where every other field's does. */
+.field-check > .check-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--faint);
+}
+
+.field-check input[type="checkbox"] {
+  accent-color: var(--pen);
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+
+/* The summary, shown the moment it finishes streaming and before the rest of
+   the review has arrived. Held slightly back so it reads as provisional. */
+.ai-summary-early {
+  color: var(--faint);
+  border-left: 2px solid var(--hairline);
+  padding-left: 10px;
+  margin-top: 8px;
+}
+
+#essay-ai-cancel {
+  margin-left: 2px;
+}

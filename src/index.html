@@ -182,6 +182,7 @@
           <span class="essay-count" id="essay-count"></span>
           <button id="essay-check" class="button-primary" type="button">check essay</button>
           <button id="essay-ai-review" class="button-ai" type="button" hidden>ai feedback</button>
+          <button id="essay-ai-cancel" class="link-quiet" type="button" hidden>stop</button>
         </div>
         <div id="essay-report"></div>
         <div id="ai-review-output"></div>
@@ -355,6 +356,17 @@
                 <em>openrouter/auto</em>, which picks a good one per request.
               </small>
             </label>
+            <label class="field field-check">
+              <span class="check-row">
+                <input id="ai-privacy" type="checkbox" checked />
+                <span>strict privacy</span>
+              </span>
+              <small>
+                Only send your writing to providers that don't keep it or train on
+                it. Leave this on. Turning it off widens the choice of models — a
+                few are only hosted by providers that retain what they're sent.
+              </small>
+            </label>
             <div class="essay-actions">
               <button class="button-primary" type="submit" id="ai-save">save</button>
               <button class="link-quiet" type="button" id="ai-remove" hidden>remove key</button>
@@ -362,8 +374,8 @@
             <p id="ai-status" class="add-status" role="status" hidden></p>
           </form>
           <dl class="sync-facts" id="ai-facts" hidden>
-            <div><dt>key</dt><dd id="ai-key-label"></dd></div>
-            <div><dt>spent</dt><dd id="ai-key-spent"></dd></div>
+            <div><dt>key</dt><dd id="ai-key-label">—</dd></div>
+            <div><dt>spent</dt><dd id="ai-key-spent">nothing yet this session</dd></div>
           </dl>
         </section>
       </section>
