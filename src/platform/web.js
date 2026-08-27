@@ -298,6 +298,17 @@ export function createWebPlatform() {
 
     mirror: createDirectoryMirror(),
 
+    /**
+     * The key that seals AI settings at rest: the same password-derived
+     * session key that already protects the bank cache and the conflict log.
+     * A shared or borrowed computer therefore leaves the OpenRouter key just
+     * as unreadable as everything else once the tab closes.
+     */
+    deviceKey: async () => {
+      if (!key) throw new Error("locked");
+      return key;
+    },
+
     openUrl(url) {
       globalThis.open(url, "_blank", "noopener,noreferrer");
     },

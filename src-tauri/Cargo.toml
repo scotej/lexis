@@ -27,6 +27,8 @@ serde = { version = "1", features = ["derive"] }
 # Not used directly, but `tauri::generate_context!` expands to code that
 # expects it in scope.
 serde_json = "1"
+# Random bytes for the per-device key that seals AI settings at rest.
+rand = "0.9"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

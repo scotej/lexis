@@ -55,6 +55,49 @@ later removed.
 commitment: type a word, read its senses, `esc` to close — or add it to the
 bank after all. The seven views answer to the keys `1`–`7`.
 
+## AI assist (optional, via OpenRouter)
+
+Everything above works offline and always will. On top of it, lexis offers a
+layer of AI help for the parts a dictionary can't answer — and it stays off
+until you hand it a key.
+
+Paste an [OpenRouter](https://openrouter.ai) API key into **settings → ai
+assist** (any model works; leave the model blank for OpenRouter's automatic
+routing). That unlocks three things:
+
+- **Essay feedback.** A second button beside *check essay* sends the draft
+  for structured feedback: what already works, the few changes that would
+  lift it most, and what to practise next — with your bank's headwords in
+  view so it can point out where your own vocabulary belongs.
+- **Similar words.** Each entry and lookup grows two links. *similar words*
+  asks for near-neighbours suited to analytical writing, each with a note on
+  what makes it different from the headword; any row's **vs** splits the pair
+  apart properly — which word implies what, where each would feel wrong, and
+  which to prefer in an essay.
+- **Example sentences.** The second link writes three sentences using the
+  word the way an analytical essay would — drawing on your open draft when
+  there is one, so the examples speak about your text rather than a generic
+  novel.
+
+The key is a credential like the sync token: stored only as ciphertext on the
+device that holds it, never synced to GitHub or the backup folder, never
+baked into any build, and sent nowhere except to `openrouter.ai`. Requests go
+straight from the app to OpenRouter — there is no lexis server in between.
+What you send is what the feature needs, and no more: essay feedback sends the
+draft along with your bank's headwords; example sentences send the word and the
+opening of whatever draft is in the essay view, so they can speak about your
+text; similar words and **vs** send the words alone.
+
+**Know what leaves the device.** Everything else in lexis is analysed here;
+these three features are not, and cannot be. Your draft goes to OpenRouter,
+which forwards it to whichever provider serves the model you chose. Whether
+either of them keeps it is decided by your own account settings at
+[openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy) —
+and free models generally require allowing prompt logging in exchange. Worth
+reading before you send work that is being assessed. The settings panel shows
+what this session has spent, so the cost of asking never comes as a surprise
+either.
+
 ## Two ends, one app
 
 lexis runs as a desktop app and as a web app, with the same features in both.
@@ -183,16 +226,35 @@ spaced repetition.
 
 ## Privacy
 
-**On the desktop, nothing changes.** Without sync, the only network requests
-are dictionary and thesaurus lookups when you add a word. Your bank, your
-review history, and every essay you check stay on your machine in a single
-JSON file in the app data directory.
+**On the desktop, nothing changes.** Without sync and without an AI key, the
+only network requests are dictionary and thesaurus lookups when you add a
+word. Your bank, your review history, and every essay you check stay on your
+machine in a single JSON file in the app data directory.
 
 **With sync on**, your bank — and only your bank — is copied to the private
 GitHub repository you nominate. It is encrypted on your device first, with a
 key derived from your password (PBKDF2-SHA256, then AES-256-GCM). GitHub
 stores ciphertext and never holds the key. Essays are never synced or
 uploaded; they are analysed locally and never leave the device.
+
+**With an AI key saved**, your work leaves for OpenRouter only when you ask
+for essay feedback or the vocabulary tools, and only with what that feature
+needs (see *AI assist* above, including what OpenRouter and the model's
+provider may retain). The one other request the app makes on its own account
+is a balance and model-catalogue check when you open **settings → ai assist** —
+it carries the key and nothing else, and it happens when you open that panel,
+not when the app starts.
+
+The key itself is stored encrypted at rest: sealed under your
+password-derived session key on the web, and under a random per-device key
+held in a `0600` file beside the bank on the desktop. That protects it from
+other accounts on the machine and from file copies; nothing stored on your
+behalf can protect it from malware already running as you, on this or any
+app. Removing the key in settings erases the stored ciphertext entirely — and
+so, on the web, do *use a different account* and *disconnect this device*,
+since both discard the session key that sealed it at the same moment. On the
+desktop neither touches it: the device key it is sealed under has nothing to
+do with sync.
 
 **The local backup folder is held to the same standard**, and for the same
 reason: a synced folder is a plain directory on two machines with possibly an
@@ -236,9 +298,9 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 The frontend is plain HTML/CSS/JS — no framework, no bundler, so "building"
 the web app is copying `src/`. The Rust backend (Tauri 2) is now a thin shell:
-it stores bytes, lends the backup folder a filesystem, and runs the updater.
-Everything else — including what goes into that folder and how it is sealed —
-is the shared core.
+it stores bytes, lends the backup folder a filesystem, keeps the per-device
+key that seals AI settings, and runs the updater. Everything else — including
+what goes into that folder and how it is sealed — is the shared core.
 
 Web Crypto needs a secure context, so the web build requires `https://` or
 `localhost` — opening `index.html` as a `file://` URL won't work.
