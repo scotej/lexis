@@ -240,6 +240,68 @@ test("a stalled body is aborted by the timeout rather than hanging forever", asy
   assert.match(text, /echo:slow body/, "the retry carried it through");
 });
 
+test("an answer cut off at the token limit says so, not 'wrong shape'", async () => {
+  // The reply parses as nothing useful either way, but "try again" is bad
+  // advice for a limit that will cut the retry off in the same place.
+  globalThis.fetch = () =>
+    json(200, {
+      choices: [{ finish_reason: "length", message: { content: '{"summary": "The draft opens' } }],
+    });
+  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }), /cut off/);
+});
+
+test("a refusal speaks for itself rather than reading as an empty reply", async () => {
+  globalThis.fetch = () =>
+    json(200, {
+      choices: [{ finish_reason: "stop", message: { content: "", refusal: "I can't help with that." } }],
+    });
+  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }), /can't help with that/);
+});
+
+test("strict privacy rides on every completion, and only off by choice", async () => {
+  await chat(SETTINGS, { prompt: "x" });
+  assert.deepEqual(
+    calls.at(-1).body.provider,
+    { data_collection: "deny", zdr: true },
+    "the default constrains routing"
+  );
+
+  await chat({ ...SETTINGS, strictPrivacy: false }, { prompt: "x" });
+  assert.equal(calls.at(-1).body.provider, undefined, "turning it off sends no constraint");
+});
+
+test("an empty provider pool names the setting that emptied it", async () => {
+  for (const message of [
+    "No allowed providers are available for the selected model.",
+    "No endpoints found matching your data policy.",
+  ]) {
+    globalThis.fetch = () => json(404, { error: { message } });
+    await assert.rejects(
+      () => chat(SETTINGS, { prompt: "x" }),
+      /strict privacy/,
+      `the way out is a checkbox, so the message says so: ${message}`
+    );
+  }
+});
+
+test("with strict privacy off, a 404 is not blamed on the privacy setting", async () => {
+  // Otherwise the advice is to uncheck a box that is already unchecked.
+  globalThis.fetch = () => json(404, { error: { message: "No endpoints found for zzz/nope." } });
+  await assert.rejects(() => chat({ ...SETTINGS, strictPrivacy: false }, { prompt: "x" }), (err) => {
+    assert.doesNotMatch(err.message, /strict privacy/);
+    return true;
+  });
+});
+
+test("a non-string error message doesn’t reach the student as [object Object]", async () => {
+  globalThis.fetch = () => json(500, { error: { message: { code: 7, reason: "upstream" } } });
+  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }), (err) => {
+    assert.doesNotMatch(err.message, /\[object Object\]/);
+    assert.match(err.message, /OpenRouter returned 500/);
+    return true;
+  });
+});
+
 test("a 200 that isn’t JSON reads as a human error, not a crash", async () => {
   globalThis.fetch = () =>
     new Response("<html>gateway</html>", {
@@ -334,6 +396,37 @@ test("parseJSONLoose tolerates trailing commas", () => {
 
 test("parseJSONLoose throws a human error on garbage", () => {
   assert.throws(() => parseJSONLoose("no json here at all"), /shape we asked for|wasn’t the shape/);
+});
+
+test("a brace in the model's sign-off doesn't swallow the answer", () => {
+  // Reaching for the *last* closing brace took it out of the prose and threw
+  // away the perfectly good object in front of it.
+  assert.deepEqual(
+    parseJSONLoose('{"summary": "Good work."}\n\nTell me if you want more on {structure}.'),
+    { summary: "Good work." }
+  );
+  assert.deepEqual(parseJSONLoose('["a", "b"]\n\nSee [the notes] for more.'), ["a", "b"]);
+});
+
+test("a brace in the preamble doesn't win over the real object", () => {
+  assert.deepEqual(parseJSONLoose('Sure {here}: {"a": 1}'), { a: 1 });
+});
+
+test("a fence inside a string value is the student's own text, not a wrapper", () => {
+  // Stripping every ``` in the reply ate words out of the middle of a quote
+  // of the draft. Only a fence on a line of its own is a wrapper.
+  assert.deepEqual(parseJSONLoose('{"detail": "wrap it in ``` marks"}'), {
+    detail: "wrap it in ``` marks",
+  });
+  assert.deepEqual(parseJSONLoose('```json\n{"detail": "use ``` here"}\n```'), {
+    detail: "use ``` here",
+  });
+});
+
+test("braces inside string values don't confuse the scan", () => {
+  assert.deepEqual(parseJSONLoose('{"detail": "the phrase \\"a {sudden} turn\\" works"}'), {
+    detail: 'the phrase "a {sudden} turn" works',
+  });
 });
 
 test("stripEmphasis removes bold and italic markers", () => {
@@ -530,6 +623,27 @@ test("saving without a key is refused before anything is written", async () => {
     /Paste your OpenRouter key/
   );
   assert.equal(await storeGet("lexis-ai"), null, "nothing was persisted");
+});
+
+test("strict privacy defaults on, survives a round trip, and can be turned off", async () => {
+  const { platform } = await seededPlatform();
+  assert.equal(emptyAiSettings().strictPrivacy, true, "the safe value is the default");
+
+  const saved = await saveAiSettings(platform, { key: "sk-or-v1-a", model: "" });
+  assert.equal(saved.strictPrivacy, true, "not passing it does not turn it off");
+  assert.equal((await loadAiSettings(platform)).strictPrivacy, true);
+
+  await saveAiSettings(platform, { key: "sk-or-v1-a", model: "", strictPrivacy: false });
+  assert.equal((await loadAiSettings(platform)).strictPrivacy, false, "an explicit choice sticks");
+});
+
+test("settings sealed before the option existed come back covered by it", async () => {
+  const { key, platform } = await seededPlatform();
+  // Exactly what an older build wrote: no strictPrivacy field at all.
+  await storeSet("lexis-ai", await encryptJSON(key, { key: "sk-or-v1-old", model: "a/b" }));
+  const loaded = await loadAiSettings(platform);
+  assert.equal(loaded.key, "sk-or-v1-old");
+  assert.equal(loaded.strictPrivacy, true, "absent must not read as opted out");
 });
 
 test("clear removes the envelope entirely", async () => {

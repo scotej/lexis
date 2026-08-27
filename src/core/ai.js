@@ -11,6 +11,10 @@
  * the transient failure modes (drops, stalls, 5xx, throttling) — while the
  * permanent ones (bad key, empty credits, unknown model) come back as plain,
  * specific errors the interface can show verbatim.
+ *
+ * Every completion also carries a routing constraint by default — see
+ * privacyRouting() — because OpenRouter is a router, and an essay draft is
+ * the student's own unpublished work.
  */
 
 const API_BASE = "https://openrouter.ai/api/v1";
@@ -109,15 +113,46 @@ async function apiFetch(path, apiKey, init = {}) {
   throw transientError("Couldn’t reach OpenRouter.");
 }
 
-/** Turns a non-2xx response into the most specific honest message available. */
-function describeError(status, text) {
+/**
+ * "Nothing matched your routing constraints", in the shapes OpenRouter says it
+ * — it names endpoints, providers, or the data policy depending on the route.
+ *
+ * Strict privacy can empty the pool for a narrowly-hosted model. Left
+ * unexplained that reads as "this model is broken" — it isn't, and the way
+ * out is one checkbox away, so the message says which one.
+ */
+function noEndpointsLeft(status, detail) {
+  if (status !== 404 && status !== 400) return false;
+  return (
+    /\bno (?:allowed |eligible |available )?(?:endpoints?|providers?)\b/i.test(detail) ||
+    /\bdata policy\b/i.test(detail)
+  );
+}
+
+/**
+ * Turns a non-2xx response into the most specific honest message available.
+ *
+ * `strict` says whether this request actually carried the privacy constraint.
+ * Without it an unrelated 404 would be blamed on a setting the student had
+ * already turned off — sending them to uncheck a box that is not checked.
+ */
+function describeError(status, text, { strict = false } = {}) {
   let detail = "";
   try {
     const body = JSON.parse(text ?? "");
-    detail =
-      body?.error?.message ?? (typeof body?.error === "string" ? body.error : "");
+    const raw = body?.error?.message ?? (typeof body?.error === "string" ? body.error : "");
+    // An `error.message` is not always a string — some gateways nest an object
+    // there, and interpolating one prints "[object Object]" at the student.
+    detail = typeof raw === "string" ? raw : "";
   } catch {
     /* HTML error pages and empty bodies happen */
+  }
+
+  if (strict && noEndpointsLeft(status, detail)) {
+    return (
+      "No provider for this model meets the privacy setting (no training on your " +
+      "text, nothing retained). Pick another model, or turn off strict privacy in AI assist."
+    );
   }
 
   switch (status) {
@@ -134,9 +169,9 @@ function describeError(status, text) {
   }
 }
 
-async function apiJSON(path, apiKey, init = {}) {
+async function apiJSON(path, apiKey, init = {}, opts = {}) {
   const { ok, status, text } = await apiFetch(path, apiKey, init);
-  if (!ok) throw new Error(describeError(status, text));
+  if (!ok) throw new Error(describeError(status, text, opts));
   try {
     return JSON.parse(text);
   } catch {
@@ -195,26 +230,76 @@ function messageText(message) {
 }
 
 /**
+ * A model's own words for why it declined, when it gives any.
+ *
+ * A refusal arrives as an empty `content` beside a populated `refusal`.
+ * Reporting it as "empty response" tells the student their key or the network
+ * misbehaved, which sends them to fix something that isn't broken.
+ */
+function refusalText(message) {
+  const refusal = message?.refusal;
+  if (typeof refusal !== "string") return "";
+  // Model-written text, so it has no length OpenRouter's own errors are held
+  // to; a paragraph of it in the status line would push the form off screen.
+  const trimmed = refusal.trim();
+  return trimmed.length > 240 ? `${trimmed.slice(0, 239)}…` : trimmed;
+}
+
+/**
+ * Where the request is allowed to be routed.
+ *
+ * The person using this is a student sending unpublished school work to a
+ * router that picks a provider per request, and some providers keep — and
+ * train on — what they are sent. So the default is to exclude them, and
+ * turning that off is a deliberate choice made in settings rather than a
+ * default nobody was told about. Absent the flag entirely (settings saved
+ * before the option existed) still counts as on.
+ */
+export function privacyRouting(settings) {
+  return settings?.strictPrivacy === false
+    ? null
+    : { data_collection: "deny", zdr: true };
+}
+
+/**
  * One completion. Returns the model's text, with leading/trailing whitespace
  * and empty responses handled here rather than in every caller.
  */
 export async function chat(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
-  const data = await apiJSON("/chat/completions", settings.key, {
-    method: "POST",
-    body: JSON.stringify({
-      model: normalizeModel(settings.model),
-      max_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(system ? [{ role: "system", content: system }] : []),
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  const body = {
+    model: normalizeModel(settings.model),
+    max_tokens: maxTokens,
+    temperature,
+    messages: [
+      ...(system ? [{ role: "system", content: system }] : []),
+      { role: "user", content: prompt },
+    ],
+  };
+  const provider = privacyRouting(settings);
+  if (provider) body.provider = provider;
+
+  const data = await apiJSON(
+    "/chat/completions",
+    settings.key,
+    { method: "POST", body: JSON.stringify(body) },
+    { strict: Boolean(provider) }
+  );
   recordUsage(data?.usage);
-  const text = messageText(data?.choices?.[0]?.message);
-  if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
+  const choice = data?.choices?.[0];
+  const text = messageText(choice?.message);
+  if (!text.trim()) {
+    throw new Error(refusalText(choice?.message) || "OpenRouter returned an empty response.");
+  }
+  // Every caller here parses this as JSON, so a reply the model was cut off
+  // mid-way through is unusable — and it fails as "the wrong shape, try
+  // again", which is both wrong about the cause and useless as advice: the
+  // retry is cut off in exactly the same place. Name the real problem.
+  if (choice?.finish_reason === "length") {
+    throw new Error(
+      "The answer was cut off before it finished. Try again — and if it keeps happening, send a shorter draft."
+    );
+  }
   return text.trim();
 }
 
@@ -293,32 +378,83 @@ function parseJSONObject(text) {
   }
 }
 
+/**
+ * A line that is nothing but a markdown fence, opening or closing.
+ *
+ * Stripping fences by line rather than by substring is what keeps a draft
+ * that happens to discuss code intact: `{"detail": "wrap it in ``` marks"}`
+ * is a perfectly good answer, and a global replace of every ``` in the text
+ * quietly ate the student's own words out of the middle of it. JSON forbids a
+ * raw newline inside a string, so a fence that occupies a whole line is never
+ * part of a value — which makes this the one safe place to cut.
+ */
+const FENCE_LINE = /^[ \t]*```[A-Za-z0-9_+-]*[ \t]*$/;
+
+function stripFenceLines(text) {
+  if (!text.includes("```")) return text;
+  const lines = text.split(/\r?\n/);
+  return lines.some((line) => FENCE_LINE.test(line))
+    ? lines.filter((line) => !FENCE_LINE.test(line)).join("\n")
+    : text;
+}
+
+/**
+ * The balanced JSON value that starts at `from`, or "" if it never closes.
+ *
+ * Counting depth — and knowing when it is inside a string — is the whole
+ * point. Reaching for the *last* closing brace in the text instead is what
+ * broke on the commonest chatty reply there is: a clean object followed by
+ * “Tell me if you want more on {structure}.” takes the brace out of the
+ * sign-off, and the JSON in front of it is thrown away with it.
+ */
+function balancedSlice(text, from) {
+  const opener = text[from];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === opener) depth++;
+    else if (ch === closer && --depth === 0) return text.slice(from, i + 1);
+  }
+  return ""; // ran off the end: the answer was cut short mid-structure
+}
+
+/** How many openers are worth trying before calling the reply unreadable. */
+const MAX_JSON_CANDIDATES = 20;
+
 /** Pulls the outermost JSON object or array out of whatever came back. */
 export function parseJSONLoose(text) {
-  const cleaned = String(text ?? "")
-    .replace(/^\uFEFF/, "")
-    .replace(/```(?:json)?\s*/gi, "")
-    .replace(/```/g, "")
-    .trim();
+  const cleaned = stripFenceLines(String(text ?? "").replace(/^\uFEFF/, "")).trim();
 
-  const candidates = [];
-  const firstBrace = cleaned.indexOf("{");
-  const firstBracket = cleaned.indexOf("[");
-  const start = firstBrace === -1 ? firstBracket : firstBracket === -1 ? firstBrace : Math.min(firstBrace, firstBracket);
-  if (start !== -1) {
-    const opener = cleaned[start];
-    const closer = opener === "{" ? "}" : "]";
-    const last = cleaned.lastIndexOf(closer);
-    if (last > start) candidates.push(cleaned.slice(start, last + 1));
-  }
-  candidates.push(cleaned);
+  const attempt = (candidate) =>
+    parseJSONObject(candidate) ??
+    parseJSONObject(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
 
-  for (const candidate of candidates) {
-    const value =
-      parseJSONObject(candidate) ??
-      parseJSONObject(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
+  // Each opening brace or bracket in turn, outermost first: a preamble may
+  // contain one of its own (“Sure {here}: {…}”), so the first candidate
+  // is not always the answer.
+  let tried = 0;
+  for (let i = 0; i < cleaned.length && tried < MAX_JSON_CANDIDATES; i++) {
+    const ch = cleaned[i];
+    if (ch !== "{" && ch !== "[") continue;
+    tried++;
+    const slice = balancedSlice(cleaned, i);
+    if (!slice) continue;
+    const value = attempt(slice);
     if (value !== undefined) return value;
   }
+
+  const whole = attempt(cleaned);
+  if (whole !== undefined) return whole;
   throw new Error("The response wasn’t the shape we asked for. Try again.");
 }
 

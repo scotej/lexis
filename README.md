@@ -90,13 +90,20 @@ text; similar words and **vs** send the words alone.
 
 **Know what leaves the device.** Everything else in lexis is analysed here;
 these three features are not, and cannot be. Your draft goes to OpenRouter,
-which forwards it to whichever provider serves the model you chose. Whether
-either of them keeps it is decided by your own account settings at
-[openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy) —
-and free models generally require allowing prompt logging in exchange. Worth
-reading before you send work that is being assessed. The settings panel shows
-what this session has spent, so the cost of asking never comes as a surprise
-either.
+which forwards it to whichever provider serves the model you chose — and some
+providers keep what they are sent, or train on it.
+
+So **strict privacy** is on by default, and every request carries it:
+providers that collect or retain prompts are excluded from the routing, and
+lexis would rather fail to find a model than quietly use one of them. A
+narrowly-hosted model — free ones especially — may have no provider that
+qualifies; when that happens the error says exactly that and points at the
+checkbox, so turning it off is a decision you make rather than a default you
+fall into. Your own account settings at
+[openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy)
+still apply on top. Worth reading before you send work that is being
+assessed. The settings panel also shows what this session has spent, so the
+cost of asking never comes as a surprise either.
 
 ## Two ends, one app
 
@@ -239,8 +246,10 @@ uploaded; they are analysed locally and never leave the device.
 
 **With an AI key saved**, your work leaves for OpenRouter only when you ask
 for essay feedback or the vocabulary tools, and only with what that feature
-needs (see *AI assist* above, including what OpenRouter and the model's
-provider may retain). The one other request the app makes on its own account
+needs (see *AI assist* above). Because that includes your draft, it is held to
+the same standard as everything else here: strict privacy is on by default,
+and every request tells OpenRouter to route only to providers that neither
+collect nor retain what they are sent. The one other request the app makes on its own account
 is a balance and model-catalogue check when you open **settings → ai assist** —
 it carries the key and nothing else, and it happens when you open that panel,
 not when the app starts.
