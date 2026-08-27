@@ -18,6 +18,23 @@ import {
   clearConflictLog,
 } from "./core/conflict.js";
 import { installStatsView, renderStatsView } from "./stats-view.js";
+import {
+  aiEssayReview,
+  aiExampleSentences,
+  aiNuance,
+  aiSessionUsage,
+  aiSimilarWords,
+  exampleContext,
+  fetchKeyInfo,
+  fetchModels,
+  normalizeModel,
+  resetAiSessionUsage,
+} from "./core/ai.js";
+import {
+  clearAiSettings,
+  loadAiSettings,
+  saveAiSettings,
+} from "./core/ai-settings.js";
 
 /* ---- tiny DOM helper: everything is textContent, never innerHTML ---- */
 function el(tag, className, text) {
@@ -91,7 +108,13 @@ function switchView(name) {
   if (name === "stats") renderStatsView(app.getBank());
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
-  if (name === "settings") renderSettings();
+  if (name === "settings") {
+    renderSettings();
+    // Only a deliberate visit opens the AI panel. renderSettings() is also
+    // called when a background sync lands, and repainting the panel there
+    // would wipe a key the student was halfway through typing.
+    openAiPanel();
+  }
 }
 
 // 1–7 jump straight to a view, top to bottom, matching the rail. Bare digits
@@ -197,12 +220,27 @@ function entryNode(word) {
   if (clarification) meta.append(clarification);
   meta.append(del);
   body.append(meta);
+
+  // Built the first time the entry is opened, not once per row: a bank of
+  // several hundred words would otherwise carry thousands of nodes for
+  // drawers nobody has looked at.
+  let toolsBuilt = false;
+  const ensureWordTools = () => {
+    if (toolsBuilt) return;
+    toolsBuilt = true;
+    attachWordTools(word.word, meta);
+  };
+  if (!body.hidden) ensureWordTools();
   wrap.append(body);
 
   head.addEventListener("click", () => {
     body.hidden = !body.hidden;
-    if (body.hidden) expandedWords.delete(word.word);
-    else expandedWords.add(word.word);
+    if (body.hidden) {
+      expandedWords.delete(word.word);
+    } else {
+      expandedWords.add(word.word);
+      ensureWordTools();
+    }
   });
   return wrap;
 }
@@ -216,6 +254,13 @@ async function renderBank() {
   const liveWords = new Set(words.map((word) => word.word));
   for (const word of expandedWords) {
     if (!liveWords.has(word)) expandedWords.delete(word);
+  }
+  // A removed word's drawer state is meaningless, so it goes with the word.
+  // The cached answers behind it stay: re-adding the word should not have to
+  // pay for them a second time.
+  for (const key of aiOpenDrawers) {
+    const word = key.slice(0, key.indexOf("\u0000"));
+    if (!liveWords.has(word)) aiOpenDrawers.delete(key);
   }
   const list = $("word-list");
   list.replaceChildren();
@@ -497,6 +542,12 @@ function updateEssayCount() {
 
 function clearEssayReport() {
   $("essay-report").replaceChildren();
+  // The AI review reads the same draft, so it is equally stale the moment the
+  // draft moves — and so is any review still in flight. Bumping the sequence
+  // here is what actually discards that one: without it, feedback on the text
+  // the student has since rewritten would land in this freshly emptied panel.
+  aiSeq++;
+  $("ai-review-output").replaceChildren();
 }
 
 essayText.addEventListener("input", () => {
@@ -588,6 +639,102 @@ $("essay-check").addEventListener("click", async () => {
     out.append(log);
   }
 });
+
+/* ---- AI essay review ---- */
+
+$("essay-ai-review").addEventListener("click", async () => {
+  const text = essayText.value;
+  const out = $("ai-review-output");
+  const seq = ++aiSeq;
+
+  out.replaceChildren();
+  if (!text.trim()) {
+    out.append(el("p", "empty", "Nothing to review yet — paste your essay above."));
+    return;
+  }
+  if (!aiReady()) {
+    out.append(
+      el("p", "empty", "Add your OpenRouter key in settings → ai assist first.")
+    );
+    return;
+  }
+
+  const button = $("essay-ai-review");
+  button.disabled = true;
+  button.textContent = "reading your draft…";
+  const card = el("div", "ai-review-card");
+  card.append(el("p", "add-status", "thinking — this takes a moment…"));
+  out.append(card);
+
+  try {
+    // The bank's headwords ride along so the tutor can point at openings for
+    // the student's own vocabulary; the draft itself is the payload.
+    const review = await aiEssayReview(aiSettings, {
+      essay: text,
+      bankWords: app.listWords().map((w) => w.word),
+    });
+    if (seq !== aiSeq) return; // the draft moved, or a newer review superseded this
+    out.replaceChildren();
+    renderAiReview(review);
+  } catch (err) {
+    console.error(err);
+    // Same test, plus the card itself: an error has nowhere to go once the
+    // panel it was written into has been cleared out from under it.
+    if (seq !== aiSeq || !card.isConnected) return;
+    card.replaceChildren(
+      el("p", "gate-error", String(err.message ?? err))
+    );
+  } finally {
+    button.disabled = false;
+    button.textContent = "ai feedback";
+  }
+});
+
+function renderAiReview(review) {
+  const out = $("ai-review-output");
+  const card = el("div", "ai-review-card");
+
+  card.append(el("h2", "ai-review-title", "how it reads"));
+  if (review.summary) {
+    card.append(el("p", "report-summary ai-summary", review.summary));
+  }
+
+  if (review.strengths.length) {
+    const strengths = el("div", "report-section");
+    strengths.append(el("p", "syn-label", "already working"));
+    const list = el("ul", "note-list");
+    review.strengths.forEach((s) => list.append(el("li", null, s)));
+    strengths.append(list);
+    card.append(strengths);
+  }
+
+  if (review.improvements.length) {
+    const improvements = el("div", "report-section");
+    improvements.append(el("p", "syn-label", "what would lift it most"));
+    review.improvements.forEach((imp) => {
+      const row = el("div", "report-word");
+      const head = el("div", "report-word-head");
+      head.append(el("span", "headword ai-imp-title", imp.title || "improvement"));
+      row.append(head);
+      if (imp.detail) row.append(el("p", "report-sentence", imp.detail));
+      improvements.append(row);
+    });
+    card.append(improvements);
+  }
+
+  if (review.focus.length) {
+    const focus = el("div", "report-section");
+    focus.append(el("p", "syn-label", "practise next"));
+    focus.append(el("p", "report-summary", review.focus.join(" · ")));
+    card.append(focus);
+  }
+
+  const note = el("p", "ai-review-note");
+  note.textContent =
+    "AI feedback is advice, not marking. Your teacher decides what counts.";
+  card.append(note);
+  out.append(card);
+}
 
 /* ---- quick lookup ----
    A definition without commitment: “/” (or ⌘K) opens a small overlay that
@@ -695,6 +842,7 @@ function renderLookupResult(word, dict) {
     meta.append(add);
   }
   lookupResult.append(meta);
+  attachWordTools(word, meta);
 }
 
 /* ---- sync view ---- */
@@ -761,6 +909,7 @@ $("sync-disconnect").addEventListener("click", async () => {
   syncConfig = null;
   sessionKey = null;
   if (platform.kind === "web") {
+    await forgetSessionSealedAiKey();
     await platform.clearCache();
     location.reload();
   } else {
@@ -1125,6 +1274,596 @@ settingsForm.addEventListener("submit", async (e) => {
   }
 });
 
+/* ---- AI assist ---- */
+
+let aiSettings = null; // decrypted in-memory copy: { key, model }
+let aiModels = null; // the catalogue, fetched lazily for suggestions
+let aiModelsPromise = null; // the fetch in flight, so two askers share one request
+let aiKeyInfo = null; // the last balance OpenRouter gave us, or null for "not asked"
+let aiSeq = 0; // stale-response guard for the essay review
+
+function aiReady() {
+  return Boolean(aiSettings?.key);
+}
+
+function keyLabel(info) {
+  return info.label || "OpenRouter key";
+}
+
+/**
+ * Spend, in the currency OpenRouter actually bills in. `usage` and `limit`
+ * arrive as bare numbers, and a bare "1.25 of 10.00" invites reading a US
+ * dollar balance as whatever the student happens to think in.
+ */
+function keySpend(info) {
+  const spent = `US$${info.usage.toFixed(2)} spent`;
+  if (info.remaining == null) return `${spent} · no limit set`;
+  return `${spent} of US$${info.limit.toFixed(2)} · US$${info.remaining.toFixed(2)} left`;
+}
+
+/** The one-line form, for the status message after a save. */
+function describeKeyInfo(info) {
+  return `${keyLabel(info)} · ${keySpend(info)}`;
+}
+
+/**
+ * What this session has asked for. The client's own ledger, so it costs no
+ * request — and it answers the question a balance can't: what has this sitting
+ * spent, as against what the key has spent since it was minted.
+ */
+function describeSessionUsage() {
+  const usage = aiSessionUsage();
+  if (!usage.requests) return "nothing yet";
+  const requests = `${usage.requests} request${usage.requests === 1 ? "" : "s"}`;
+  const tokens = usage.totalTokens
+    ? ` · ${usage.totalTokens.toLocaleString()} tokens`
+    : "";
+  const cost = usage.cost ? ` · about US$${usage.cost.toFixed(4)}` : "";
+  return `${requests}${tokens}${cost}`;
+}
+
+function showAiStatus(text, isError = false) {
+  const status = $("ai-status");
+  status.textContent = text;
+  status.classList.toggle("error", isError);
+  status.hidden = false;
+}
+
+/**
+ * Paints the panel from what is already known. Deliberately free of network
+ * calls: the app promises that nothing leaves for OpenRouter until a feature
+ * is asked for, and a panel that checked the balance on every render would
+ * break that promise at every boot.
+ */
+function renderAiSettings() {
+  const has = aiReady();
+  $("essay-ai-review").hidden = !has;
+  $("ai-remove").hidden = !has;
+  $("ai-key-note").hidden = has;
+  // The key field stays empty once saved; showing even a fragment invites copying.
+  $("ai-key").value = "";
+  $("ai-key").placeholder = has ? "saved — type to replace" : "sk-or-v1-…";
+  $("ai-model").value = aiSettings?.model ?? "";
+  $("ai-facts").hidden = !has;
+  $("ai-facts-actions").hidden = !has;
+  if (has) renderAiFacts();
+}
+
+/** The facts table, from the last answer OpenRouter gave — never a fresh one. */
+function renderAiFacts() {
+  $("ai-key-label").textContent = aiKeyInfo ? keyLabel(aiKeyInfo) : "saved";
+  $("ai-key-spent").textContent = aiKeyInfo ? keySpend(aiKeyInfo) : "not checked yet";
+  $("ai-session-usage").textContent = describeSessionUsage();
+}
+
+/**
+ * The only place the settings panel asks OpenRouter anything — and it runs
+ * when the panel is opened, not when the app starts. Asked once a session
+ * unless the student presses refresh.
+ */
+async function refreshAiFacts(force = false) {
+  if (!aiReady()) return;
+  if (aiKeyInfo && !force) return renderAiFacts();
+  $("ai-key-spent").textContent = "checking…";
+  try {
+    aiKeyInfo = await fetchKeyInfo(aiSettings.key);
+  } catch (err) {
+    aiKeyInfo = null;
+    renderAiFacts();
+    $("ai-key-spent").textContent = String(err.message ?? err);
+    return;
+  }
+  renderAiFacts();
+}
+
+/**
+ * Called when the settings view opens. The first moment the panel is actually
+ * looked at is the first moment it is worth spending a request on it.
+ */
+function openAiPanel() {
+  renderAiSettings();
+  if (!aiReady()) return;
+  refreshAiFacts();
+  refreshModelSuggestions();
+}
+
+/**
+ * The catalogue, fetched at most once a session — and at most once even when
+ * the panel's suggestions and a save-time check ask for it in the same breath,
+ * which is exactly what opening settings and pressing save does. A failure is
+ * forgotten rather than cached, so the next attempt may still succeed.
+ */
+function loadAiModels(key) {
+  if (aiModels) return Promise.resolve(aiModels);
+  if (!aiModelsPromise) {
+    aiModelsPromise = fetchModels(key)
+      .then((models) => {
+        aiModels = models;
+        return models;
+      })
+      .finally(() => {
+        aiModelsPromise = null;
+      });
+  }
+  return aiModelsPromise;
+}
+
+/** Fills the model datalist quietly; never an error worth showing. */
+async function refreshModelSuggestions() {
+  try {
+    const models = await loadAiModels(aiSettings.key);
+    const options = models.slice(0, 400).map((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.label = m.name;
+      return opt;
+    });
+    $("ai-model-list").replaceChildren(...options);
+  } catch {
+    /* suggestions are decorative */
+  }
+}
+
+/**
+ * Whether OpenRouter would reject this model id, phrased for a human.
+ *
+ * A typo saves cleanly and verifies cleanly — `/key` doesn't check the model —
+ * and then fails at first *use*, with a raw 400, long after this screen said
+ * "saved". Better to catch it while the student is still looking at the field
+ * they typed it into. Returns null when there is nothing to say, including
+ * when the catalogue couldn't be fetched: a list we failed to load is no
+ * grounds for refusing to save.
+ */
+async function modelObjection(key, model) {
+  if (!model) return null; // blank is legitimate: openrouter/auto routes it
+  const wanted = normalizeModel(model);
+  let models;
+  try {
+    models = await loadAiModels(key);
+  } catch {
+    return null;
+  }
+  if (!models.length || models.some((m) => m.id === wanted)) return null;
+  const near = models
+    .filter((m) => m.id.includes(wanted) || wanted.includes(m.id))
+    .slice(0, 3)
+    .map((m) => m.id);
+  return near.length
+    ? `OpenRouter has no model called “${wanted}”. Did you mean ${near.join(", ")}?`
+    : `OpenRouter has no model called “${wanted}”. Pick one from the list, or leave it blank for automatic routing.`;
+}
+
+$("ai-settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = $("ai-status");
+  status.hidden = true;
+  status.classList.remove("error");
+  const typedKey = $("ai-key").value.trim();
+  const model = $("ai-model").value.trim();
+  if (!typedKey && !aiReady()) {
+    showAiStatus("Paste your OpenRouter key first.", true);
+    return;
+  }
+
+  const button = $("ai-save");
+  button.disabled = true;
+  try {
+    const key = typedKey || aiSettings.key;
+    const objection = await modelObjection(key, model);
+    if (objection) {
+      showAiStatus(objection, true);
+      return;
+    }
+    const next = await saveAiSettings(platform, { key, model });
+    aiSettings = next;
+    aiKeyInfo = null; // a replaced key has its own balance
+    // Prove the key works before celebrating it — but a verification failure
+    // must not read as a failed *save*, which it isn't.
+    let verified = null;
+    try {
+      verified = await fetchKeyInfo(next.key);
+    } catch (verifyErr) {
+      console.error(verifyErr);
+      renderAiSettings();
+      showAiStatus("Saved. Couldn’t reach OpenRouter to check the balance just now.");
+      return;
+    }
+    aiKeyInfo = verified;
+    renderAiSettings();
+    showAiStatus(`Saved and working — ${describeKeyInfo(verified)}.`);
+  } catch (err) {
+    showAiStatus(String(err.message ?? err), true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("ai-refresh").addEventListener("click", async () => {
+  const button = $("ai-refresh");
+  button.disabled = true;
+  try {
+    await refreshAiFacts(true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/**
+ * Everything this session knows about the key, dropped in one place.
+ *
+ * The session ledger goes with it: it sits directly under the balance of the
+ * key it was spent on, so leaving it standing would bill a freshly pasted key
+ * for requests its predecessor made.
+ */
+function forgetAiKeyInSession() {
+  aiSettings = { key: "", model: "" };
+  aiModels = null;
+  aiModelsPromise = null;
+  aiKeyInfo = null;
+  aiWordCache.clear();
+  aiOpenDrawers.clear();
+  resetAiSessionUsage();
+}
+
+$("ai-remove").addEventListener("click", async () => {
+  let erased = true;
+  try {
+    await clearAiSettings();
+  } catch (err) {
+    console.error(err); // the panel updates regardless, but don't claim more
+    erased = false;
+  }
+  forgetAiKeyInSession();
+  renderAiSettings();
+  showAiStatus(
+    erased
+      ? "Key removed. The stored ciphertext is gone."
+      : "Key removed from this session, but the stored copy could not be erased — try again.",
+    !erased
+  );
+  // Every entry on screen still carries AI triggers that now lead nowhere;
+  // the bank has to be redrawn for them to disappear.
+  await renderBank();
+});
+
+["ai-key", "ai-model"].forEach((id) =>
+  $(id).addEventListener("input", () => {
+    const status = $("ai-status");
+    status.hidden = true;
+    status.classList.remove("error");
+  })
+);
+
+/**
+ * Loads AI settings at unlock/boot. Never blocks or breaks startup: the app
+ * is fully usable without a key, and an unreadable vault just reads as
+ * "not set up". Nothing here touches the network — the balance is asked for
+ * when the settings panel is opened, not when the app starts.
+ *
+ * Callers run this *before* the first renderBank(), so entries carry their AI
+ * triggers from the first paint rather than costing a second full render of
+ * the whole bank to grow them.
+ */
+async function initAi() {
+  aiSettings = await loadAiSettings(platform);
+  renderAiSettings();
+}
+
+/**
+ * Forgets the AI key when the thing that sealed it is being thrown away.
+ *
+ * On the web that seal *is* the password-derived session key. Clearing the
+ * vault without clearing this leaves an envelope nobody can open — and one
+ * that would silently spring back to life if the same password and repository
+ * were ever paired again, handing a re-paired session the previous account's
+ * key. The desktop seals under a device key that has nothing to do with sync,
+ * so disconnecting there must leave it exactly where it is.
+ */
+async function forgetSessionSealedAiKey() {
+  if (platform?.kind !== "web") return;
+  try {
+    await clearAiSettings();
+  } catch (err) {
+    console.error(err); // best-effort; the reload follows either way
+  }
+  forgetAiKeyInSession();
+}
+
+/* ---- AI word tools (bank + lookup) ---- */
+
+/**
+ * Answers already paid for, kept for the life of the session.
+ *
+ * A bank re-render happens on every add, delete and sort, and it rebuilds
+ * every entry from scratch. Without this, a redraw silently discarded results
+ * the student had just spent credit on — so adding one word threw away the
+ * comparison they were reading. Cached, a redraw costs nothing and "ask
+ * again" stays the only thing that spends money.
+ */
+const aiWordCache = new Map(); // word -> { similar, examples, examplesSeed, nuance: Map }
+
+/** Which drawers were left open, so a redraw puts the view back as it was. */
+const aiOpenDrawers = new Set(); // `${word}\u0000similar` | `${word}\u0000examples`
+
+function wordCache(word) {
+  let entry = aiWordCache.get(word);
+  if (!entry) {
+    entry = { similar: null, examples: null, examplesSeed: null, nuance: new Map() };
+    aiWordCache.set(word, entry);
+  }
+  return entry;
+}
+
+/**
+ * Exactly the draft excerpt aiExampleSentences() sends as context — the rule
+ * itself lives in ai.js, so the cache can never key on a stale copy of it.
+ *
+ * Similar words and nuance depend only on the headword, so those answers stay
+ * true for as long as the session lasts. Example sentences are seeded from the
+ * open draft, so they are worth reusing only while that seed is unchanged —
+ * otherwise the cache would quietly hand back sentences written about a
+ * paragraph the student has since deleted.
+ */
+function exampleSeed() {
+  return exampleContext(essayText.value);
+}
+
+// A NUL separator, because a headword may contain a space: “big cat” with
+// tool “x” must never collide with “big” and tool “cat x”.
+const drawerKey = (word, tool) => `${word}\u0000${tool}`;
+
+/**
+ * One shared drawer for per-word AI results, wherever the word came from.
+ * `stillWanted` lets a caller abandon a reply that a later click superseded.
+ */
+async function runWordTool(mount, work, render, stillWanted = () => true) {
+  mount.replaceChildren();
+  const statusLine = el("p", "add-status");
+  statusLine.textContent = "thinking…";
+  mount.append(statusLine);
+  try {
+    const result = await work();
+    if (!stillWanted()) return;
+    mount.replaceChildren();
+    if (result) render(result);
+  } catch (err) {
+    console.error(err);
+    if (!stillWanted()) return;
+    statusLine.textContent = String(err.message ?? err);
+    statusLine.classList.add("error");
+    mount.replaceChildren(statusLine);
+  }
+}
+
+/**
+ * The shell every word tool sits in: a quiet trigger that says whether it is
+ * expanded, a drawer that remembers whether it was open, and a body that
+ * announces itself when the answer finally arrives — seconds after the click,
+ * long after focus has moved on.
+ *
+ * A restored drawer re-opens only when its answer is already cached, so a
+ * redraw can never quietly spend money re-fetching something.
+ */
+function toolDrawer({ word, tool, label, heading, note, cached, load }) {
+  const wrap = el("div", "ai-tool-result");
+  const head = el("p", "report-summary");
+  head.append(el("span", "syn-label", heading), document.createTextNode(note));
+  wrap.append(head);
+
+  const body = el("div", "ai-tool-body");
+  body.setAttribute("aria-live", "polite");
+  wrap.append(body);
+
+  const trigger = el("button", "link-quiet", label);
+  trigger.type = "button";
+  const key = drawerKey(word, tool);
+
+  /** The visible state, with no opinion about what the student wanted. */
+  const applyOpen = (open) => {
+    wrap.hidden = !open;
+    trigger.setAttribute("aria-expanded", String(open));
+  };
+
+  /** A click: the visible state *and* the remembered intent. */
+  const setOpen = (open) => {
+    applyOpen(open);
+    if (open) aiOpenDrawers.add(key);
+    else aiOpenDrawers.delete(key);
+  };
+
+  /**
+   * A failed load leaves its error line sitting in the body, which would
+   * otherwise read as "already answered" — closing and reopening the drawer
+   * would show the same stale error, and a network hiccup would wedge the tool
+   * until something unrelated redrew the bank. An in-flight "thinking…" line
+   * carries no `.error`, so this still can't fire twice over one request.
+   */
+  const needsLoad = () =>
+    !body.childElementCount || Boolean(body.querySelector(".error"));
+
+  trigger.addEventListener("click", () => {
+    const opening = wrap.hidden;
+    setOpen(opening);
+    if (opening && needsLoad()) load(body);
+  });
+
+  // Restoring is a read, so it uses applyOpen: a redraw that lands while the
+  // answer is still in flight must not be mistaken for the student closing
+  // the drawer, which would erase the very intent this Set exists to keep.
+  applyOpen(cached() && aiOpenDrawers.has(key));
+  if (!wrap.hidden) load(body); // from cache: no request, no flicker
+  return { node: wrap, trigger, body };
+}
+
+function similarWordsNode(word) {
+  const cache = wordCache(word);
+  // Where a “vs” comparison lands: beneath the list it belongs to.
+  const detail = el("div", "ai-nuance-detail");
+  detail.setAttribute("aria-live", "polite");
+  // Only the most recently asked-for comparison may write here. Two rows
+  // clicked in quick succession would otherwise land in whatever order the
+  // network chose rather than the order the student asked for.
+  let nuanceSeq = 0;
+
+  const renderList = (body, { words }) => {
+    words.forEach((entry) => {
+      const row = el("div", "nuance-row");
+      row.append(el("span", "headword nuance-word", entry.word));
+      row.append(el("span", "nuance-note", entry.note || ""));
+      // The question a list of near-synonyms always provokes — “so can I
+      // swap them?” — answered in place rather than left hanging.
+      const vs = el("button", "link-quiet", "vs");
+      vs.type = "button";
+      vs.setAttribute("aria-label", `compare ${word} with ${entry.word}`);
+      vs.addEventListener("click", () => {
+        const seq = ++nuanceSeq;
+        vs.disabled = true;
+        runWordTool(
+          detail,
+          async () => {
+            const hit = cache.nuance.get(entry.word);
+            if (hit) return hit;
+            const result = await aiNuance(aiSettings, [word, entry.word]);
+            cache.nuance.set(entry.word, result);
+            return result;
+          },
+          ({ distinctions, guidance }) => {
+            distinctions.forEach((d) => {
+              if (!d.nuance) return;
+              const line = el("p", "nuance-distinction");
+              line.append(el("strong", null, d.word));
+              line.append(document.createTextNode(` — ${d.nuance}`));
+              detail.append(line);
+            });
+            if (guidance) detail.append(el("p", "nuance-guidance", guidance));
+          },
+          () => seq === nuanceSeq
+        ).finally(() => {
+          if (vs.isConnected) vs.disabled = false;
+        });
+      });
+      row.append(vs);
+      body.append(row);
+    });
+    body.append(againButton("ask again", () => load(body, true)));
+  };
+
+  const load = (body, force = false) => {
+    // A new list can't be read beside a comparison of a word it may no longer
+    // contain, and an in-flight one must not land in the space just cleared.
+    nuanceSeq++;
+    detail.replaceChildren();
+    return runWordTool(
+      body,
+      async () => {
+        if (!force && cache.similar) return cache.similar;
+        const result = await aiSimilarWords(aiSettings, word);
+        cache.similar = result;
+        return result;
+      },
+      (result) => renderList(body, result)
+    );
+  };
+
+  const drawer = toolDrawer({
+    word,
+    tool: "similar",
+    label: "similar words (AI)",
+    heading: "similar words",
+    note: ` — ways “${word}” can be said, with what makes each different`,
+    cached: () => Boolean(cache.similar),
+    load,
+  });
+  drawer.node.append(detail);
+  return drawer;
+}
+
+function examplesNode(word) {
+  const cache = wordCache(word);
+
+  // The draft rides along as context when there is one, so the examples
+  // speak about the student's own text rather than a generic novel.
+  const load = (body, force = false) =>
+    runWordTool(
+      body,
+      async () => {
+        const seed = exampleSeed();
+        if (!force && cache.examples && cache.examplesSeed === seed) return cache.examples;
+        const result = await aiExampleSentences(aiSettings, {
+          word,
+          context: essayText.value,
+        });
+        cache.examples = result;
+        cache.examplesSeed = seed;
+        return result;
+      },
+      ({ sentences }) => {
+        const list = el("ul", "note-list");
+        sentences.forEach((s) => list.append(el("li", "ai-example", s)));
+        body.append(list);
+        body.append(againButton("ask for three more", () => load(body, true)));
+      }
+    );
+
+  return toolDrawer({
+    word,
+    tool: "examples",
+    label: "example sentences (AI)",
+    heading: "in your writing",
+    note: ` — three sentences that use “${word}”`,
+    cached: () => Boolean(cache.examples) && cache.examplesSeed === exampleSeed(),
+    load,
+  });
+}
+
+/** The small "generate another batch" link at the foot of a result. */
+function againButton(label, load) {
+  const again = el("button", "link-quiet", label);
+  again.type = "button";
+  again.addEventListener("click", () => {
+    again.disabled = true;
+    load();
+  });
+  return again;
+}
+
+/**
+ * Attaches the two AI tools beneath an entry's metadata line.
+ *
+ * Called the first time an entry is opened rather than once per row: a bank
+ * of several hundred words would otherwise build thousands of nodes nobody
+ * has looked at. Drawers left open — and the answers in them — come back
+ * from the session cache, so a redraw costs neither a request nor the view.
+ */
+function attachWordTools(word, afterNode) {
+  if (!aiReady()) return;
+  const similar = similarWordsNode(word);
+  const examples = examplesNode(word);
+  const triggers = el("p", "ai-triggers");
+  triggers.append(similar.trigger, document.createTextNode(" "), examples.trigger);
+  afterNode.after(triggers, similar.node, examples.node);
+}
+
 /* ---- updates (desktop only) ---- */
 
 async function offerUpdate() {
@@ -1204,6 +1943,7 @@ $("gate-unlock").addEventListener("submit", async (e) => {
 
 $("gate-reset").addEventListener("click", async () => {
   await clearVault();
+  await forgetSessionSealedAiKey();
   await platform.clearCache?.();
   location.reload();
 });
@@ -1268,6 +2008,7 @@ async function startWeb(key, config) {
   await startSync(key, config);
   essayText.value = loadEssayDraft();
   updateEssayCount();
+  await initAi(); // after the session key exists, before the bank is painted
   await renderBank();
   addInput.focus();
   requestPersistence(); // upgrade local durability now that we have a gesture
@@ -1301,6 +2042,7 @@ async function startDesktop() {
   await app.init();
   essayText.value = loadEssayDraft();
   updateEssayCount();
+  await initAi(); // the device key comes from Rust; before the bank is painted
   await renderBank();
   addInput.focus();
 

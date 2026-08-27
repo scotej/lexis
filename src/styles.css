@@ -430,6 +430,18 @@ main {
   color: var(--pen);
 }
 
+/* A quiet link that is busy still has to look busy: several seconds of an AI
+   request would otherwise pass with no sign the click registered. */
+.link-quiet:disabled {
+  opacity: 0.5;
+  cursor: default;
+  text-decoration: none;
+}
+
+.link-quiet:disabled:hover {
+  color: var(--faint);
+}
+
 /* ---- today ---- */
 
 .today-heading {
@@ -445,6 +457,9 @@ main {
 
 .today-heading .link-quiet:disabled {
   color: var(--hairline);
+  /* This one dims by colour alone; the global rule's opacity on top of an
+     already-hairline grey would fade it to nothing. */
+  opacity: 1;
   cursor: default;
   text-decoration: none;
 }
@@ -1033,6 +1048,202 @@ main {
 .sync-form {
   max-width: 380px;
   margin-top: 4px;
+}
+
+/* ---- ai assist ---- */
+
+.ai-block {
+  margin-top: 40px;
+  padding-top: 22px;
+  border-top: 1px solid var(--hairline);
+}
+
+.ai-block .sync-heading {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 400;
+  margin-bottom: 16px;
+}
+
+/* A row of buttons at the foot of any form. (The essay view has its own
+   `.essay-actions`; this is the same shape without the borrowed name.) */
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+/* What leaves the device is the part worth reading twice, so it keeps the
+   full line height of prose rather than shrinking away like a footnote. */
+.field small.ai-data-note {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.65;
+}
+
+/* The AI affordances are quiet by design — a pen-coloured outline rather
+   than the solid ink of a primary button, so the non-AI path stays the
+   default and the AI reads as an optional layer. */
+.button-ai {
+  font-size: 14px;
+  padding: 8px 18px;
+  border: 1px solid var(--pen);
+  color: var(--pen);
+  border-radius: 3px;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.button-ai:hover {
+  background: var(--pen);
+  color: var(--paper);
+}
+
+.button-ai:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ai-triggers {
+  margin-top: 10px;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ai-tool-result {
+  margin-top: 12px;
+  padding: 12px 0 4px;
+  border-top: 1px dashed var(--hairline);
+}
+
+.ai-tool-result .report-summary {
+  margin-bottom: 10px;
+}
+
+.ai-tool-body {
+  user-select: text;
+}
+
+.ai-tool-body .add-status {
+  margin: 4px 0 8px;
+}
+
+.nuance-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 5px 0;
+}
+
+.nuance-word {
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+
+.nuance-note {
+  font-family: var(--serif);
+  font-size: 14.5px;
+  color: var(--faint);
+}
+
+.ai-nuance-detail {
+  margin-top: 8px;
+  user-select: text;
+}
+
+.nuance-distinction {
+  font-family: var(--serif);
+  font-size: 14.5px;
+  line-height: 1.55;
+  padding-left: 14px;
+  border-left: 2px solid var(--hairline);
+  margin-top: 6px;
+}
+
+.nuance-distinction strong {
+  font-weight: 700;
+}
+
+.nuance-guidance {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14.5px;
+  color: var(--faint);
+  margin-top: 10px;
+}
+
+.ai-example {
+  font-family: var(--serif);
+  user-select: text;
+  cursor: text;
+}
+
+/* ---- ai essay review ---- */
+
+#ai-review-output {
+  margin-top: 26px;
+}
+
+.ai-review-card {
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--pen);
+  border-radius: 3px;
+  padding: 20px 22px 16px;
+  animation: settle 180ms ease;
+}
+
+.ai-review-title {
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 400;
+  margin-bottom: 12px;
+}
+
+.ai-summary {
+  font-family: var(--serif);
+  font-size: 16px;
+}
+
+.ai-review-card .syn-label {
+  display: block;
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+
+.ai-review-card .report-section {
+  margin-top: 18px;
+}
+
+.ai-review-card .report-word {
+  border-bottom: none;
+  padding: 8px 0;
+}
+
+.ai-imp-title {
+  font-size: 15.5px;
+}
+
+.ai-review-card .report-sentence {
+  margin-top: 4px;
+}
+
+.ai-review-note {
+  margin-top: 18px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--faint);
 }
 
 /* ---- local backup + conflicts ---- */
