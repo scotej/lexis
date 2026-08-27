@@ -35,17 +35,20 @@ impl DeviceKey {
     /// `store.rs` uses for the bank), so an interrupted first run leaves
     /// either no file or a whole one — never a truncated key that would
     /// silently decrypt to garbage forever after.
+    ///
+    /// A file of the wrong length can therefore only be one somebody else
+    /// clobbered, and whatever it once sealed is unreadable either way. So it
+    /// is replaced rather than reported: an error here would wedge AI settings
+    /// permanently, since re-entering them is itself what calls this.
     pub fn get(&mut self) -> Result<[u8; 32], String> {
         if let Some(bytes) = self.bytes {
             return Ok(bytes);
         }
         let bytes = match fs::read(&self.path) {
-            Ok(data) => {
-                let arr: [u8; 32] = data.try_into().map_err(|_| {
-                    "the device key file is corrupt; AI settings must be re-entered".to_string()
-                })?;
-                arr
-            }
+            Ok(data) => match <[u8; 32]>::try_from(data) {
+                Ok(arr) => arr,
+                Err(_) => self.create()?,
+            },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => self.create()?,
             Err(err) => return Err(err.to_string()),
         };
@@ -149,6 +152,20 @@ mod tests {
         key.get().unwrap();
         let mode = fs::metadata(key.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "no group or world access");
+    }
+
+    #[test]
+    fn a_wrong_length_key_file_is_replaced_rather_than_reported() {
+        let dir = tmpdir("corrupt");
+        let mut key = DeviceKey::new(dir);
+        fs::write(key.path(), b"too short").unwrap();
+        let bytes = key.get().expect("a clobbered key file must not wedge the feature");
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(
+            fs::read(key.path()).unwrap().len(),
+            32,
+            "the replacement was written back"
+        );
     }
 
     #[cfg(unix)]

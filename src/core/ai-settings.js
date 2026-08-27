@@ -16,7 +16,7 @@
  * pretend to.
  */
 
-import { encryptJSON, decryptJSON, randomSalt } from "./crypto.js";
+import { encryptJSON, decryptJSON } from "./crypto.js";
 import { storeGet, storeSet, storeRemove } from "../platform/store.js";
 
 const SETTINGS_KEY = "lexis-ai";
@@ -59,6 +59,3 @@ export async function saveAiSettings(platform, settings) {
 export async function clearAiSettings() {
   await storeRemove(SETTINGS_KEY);
 }
-
-/** The salt shape crypto.js uses elsewhere, exported for tests of the seal. */
-export { randomSalt };

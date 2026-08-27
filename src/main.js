@@ -24,9 +24,11 @@ import {
   aiNuance,
   aiSessionUsage,
   aiSimilarWords,
+  exampleContext,
   fetchKeyInfo,
   fetchModels,
   normalizeModel,
+  resetAiSessionUsage,
 } from "./core/ai.js";
 import {
   clearAiSettings,
@@ -1276,6 +1278,7 @@ settingsForm.addEventListener("submit", async (e) => {
 
 let aiSettings = null; // decrypted in-memory copy: { key, model }
 let aiModels = null; // the catalogue, fetched lazily for suggestions
+let aiModelsPromise = null; // the fetch in flight, so two askers share one request
 let aiKeyInfo = null; // the last balance OpenRouter gave us, or null for "not asked"
 let aiSeq = 0; // stale-response guard for the essay review
 
@@ -1384,11 +1387,32 @@ function openAiPanel() {
   refreshModelSuggestions();
 }
 
+/**
+ * The catalogue, fetched at most once a session — and at most once even when
+ * the panel's suggestions and a save-time check ask for it in the same breath,
+ * which is exactly what opening settings and pressing save does. A failure is
+ * forgotten rather than cached, so the next attempt may still succeed.
+ */
+function loadAiModels(key) {
+  if (aiModels) return Promise.resolve(aiModels);
+  if (!aiModelsPromise) {
+    aiModelsPromise = fetchModels(key)
+      .then((models) => {
+        aiModels = models;
+        return models;
+      })
+      .finally(() => {
+        aiModelsPromise = null;
+      });
+  }
+  return aiModelsPromise;
+}
+
 /** Fills the model datalist quietly; never an error worth showing. */
 async function refreshModelSuggestions() {
   try {
-    if (!aiModels) aiModels = await fetchModels(aiSettings.key);
-    const options = aiModels.slice(0, 400).map((m) => {
+    const models = await loadAiModels(aiSettings.key);
+    const options = models.slice(0, 400).map((m) => {
       const opt = document.createElement("option");
       opt.value = m.id;
       opt.label = m.name;
@@ -1413,15 +1437,14 @@ async function refreshModelSuggestions() {
 async function modelObjection(key, model) {
   if (!model) return null; // blank is legitimate: openrouter/auto routes it
   const wanted = normalizeModel(model);
-  if (!aiModels) {
-    try {
-      aiModels = await fetchModels(key);
-    } catch {
-      return null;
-    }
+  let models;
+  try {
+    models = await loadAiModels(key);
+  } catch {
+    return null;
   }
-  if (!aiModels.length || aiModels.some((m) => m.id === wanted)) return null;
-  const near = aiModels
+  if (!models.length || models.some((m) => m.id === wanted)) return null;
+  const near = models
     .filter((m) => m.id.includes(wanted) || wanted.includes(m.id))
     .slice(0, 3)
     .map((m) => m.id);
@@ -1485,6 +1508,23 @@ $("ai-refresh").addEventListener("click", async () => {
   }
 });
 
+/**
+ * Everything this session knows about the key, dropped in one place.
+ *
+ * The session ledger goes with it: it sits directly under the balance of the
+ * key it was spent on, so leaving it standing would bill a freshly pasted key
+ * for requests its predecessor made.
+ */
+function forgetAiKeyInSession() {
+  aiSettings = { key: "", model: "" };
+  aiModels = null;
+  aiModelsPromise = null;
+  aiKeyInfo = null;
+  aiWordCache.clear();
+  aiOpenDrawers.clear();
+  resetAiSessionUsage();
+}
+
 $("ai-remove").addEventListener("click", async () => {
   let erased = true;
   try {
@@ -1493,11 +1533,7 @@ $("ai-remove").addEventListener("click", async () => {
     console.error(err); // the panel updates regardless, but don't claim more
     erased = false;
   }
-  aiSettings = { key: "", model: "" };
-  aiModels = null;
-  aiKeyInfo = null;
-  aiWordCache.clear();
-  aiOpenDrawers.clear();
+  forgetAiKeyInSession();
   renderAiSettings();
   showAiStatus(
     erased
@@ -1523,13 +1559,14 @@ $("ai-remove").addEventListener("click", async () => {
  * is fully usable without a key, and an unreadable vault just reads as
  * "not set up". Nothing here touches the network — the balance is asked for
  * when the settings panel is opened, not when the app starts.
+ *
+ * Callers run this *before* the first renderBank(), so entries carry their AI
+ * triggers from the first paint rather than costing a second full render of
+ * the whole bank to grow them.
  */
 async function initAi() {
   aiSettings = await loadAiSettings(platform);
   renderAiSettings();
-  // The bank may already be on screen from boot; with a key present its
-  // entries now grow their AI triggers.
-  if (aiReady()) await renderBank();
 }
 
 /**
@@ -1549,11 +1586,7 @@ async function forgetSessionSealedAiKey() {
   } catch (err) {
     console.error(err); // best-effort; the reload follows either way
   }
-  aiSettings = { key: "", model: "" };
-  aiModels = null;
-  aiKeyInfo = null;
-  aiWordCache.clear();
-  aiOpenDrawers.clear();
+  forgetAiKeyInSession();
 }
 
 /* ---- AI word tools (bank + lookup) ---- */
@@ -1582,7 +1615,8 @@ function wordCache(word) {
 }
 
 /**
- * Exactly the draft excerpt aiExampleSentences() sends as context.
+ * Exactly the draft excerpt aiExampleSentences() sends as context — the rule
+ * itself lives in ai.js, so the cache can never key on a stale copy of it.
  *
  * Similar words and nuance depend only on the headword, so those answers stay
  * true for as long as the session lasts. Example sentences are seeded from the
@@ -1591,7 +1625,7 @@ function wordCache(word) {
  * paragraph the student has since deleted.
  */
 function exampleSeed() {
-  return essayText.value.replace(/\s+/g, " ").trim().slice(0, 2400);
+  return exampleContext(essayText.value);
 }
 
 // A NUL separator, because a headword may contain a space: “big cat” with
@@ -1657,10 +1691,20 @@ function toolDrawer({ word, tool, label, heading, note, cached, load }) {
     else aiOpenDrawers.delete(key);
   };
 
+  /**
+   * A failed load leaves its error line sitting in the body, which would
+   * otherwise read as "already answered" — closing and reopening the drawer
+   * would show the same stale error, and a network hiccup would wedge the tool
+   * until something unrelated redrew the bank. An in-flight "thinking…" line
+   * carries no `.error`, so this still can't fire twice over one request.
+   */
+  const needsLoad = () =>
+    !body.childElementCount || Boolean(body.querySelector(".error"));
+
   trigger.addEventListener("click", () => {
     const opening = wrap.hidden;
     setOpen(opening);
-    if (opening && !body.childElementCount) load(body);
+    if (opening && needsLoad()) load(body);
   });
 
   // Restoring is a read, so it uses applyOpen: a redraw that lands while the
@@ -1724,8 +1768,12 @@ function similarWordsNode(word) {
     body.append(againButton("ask again", () => load(body, true)));
   };
 
-  const load = (body, force = false) =>
-    runWordTool(
+  const load = (body, force = false) => {
+    // A new list can't be read beside a comparison of a word it may no longer
+    // contain, and an in-flight one must not land in the space just cleared.
+    nuanceSeq++;
+    detail.replaceChildren();
+    return runWordTool(
       body,
       async () => {
         if (!force && cache.similar) return cache.similar;
@@ -1735,6 +1783,7 @@ function similarWordsNode(word) {
       },
       (result) => renderList(body, result)
     );
+  };
 
   const drawer = toolDrawer({
     word,
@@ -1959,8 +2008,8 @@ async function startWeb(key, config) {
   await startSync(key, config);
   essayText.value = loadEssayDraft();
   updateEssayCount();
+  await initAi(); // after the session key exists, before the bank is painted
   await renderBank();
-  await initAi(); // after the session key exists; never blocks the UI
   addInput.focus();
   requestPersistence(); // upgrade local durability now that we have a gesture
   await sync.now(); // pull whatever the desktop app left behind
@@ -1993,8 +2042,8 @@ async function startDesktop() {
   await app.init();
   essayText.value = loadEssayDraft();
   updateEssayCount();
+  await initAi(); // the device key comes from Rust; before the bank is painted
   await renderBank();
-  await initAi(); // the device key comes from Rust; never blocks the UI
   addInput.focus();
 
   // Sync is opt-in on desktop; the app works fully without it.

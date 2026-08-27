@@ -115,9 +115,7 @@ function describeError(status, text) {
   try {
     const body = JSON.parse(text ?? "");
     detail =
-      body?.error?.message ??
-      (typeof body?.error === "string" ? body.error : "") ??
-      "";
+      body?.error?.message ?? (typeof body?.error === "string" ? body.error : "");
   } catch {
     /* HTML error pages and empty bodies happen */
   }
@@ -180,6 +178,23 @@ export function resetAiSessionUsage() {
 /* ---- the chat completion core ---- */
 
 /**
+ * The assistant's reply as text. Most routes answer with a plain string, but
+ * some hand back an array of content parts (and a refusal hands back none at
+ * all) — shapes that must read as "nothing came back" rather than throwing a
+ * TypeError on `.trim()` in front of the student.
+ */
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part === "string" ? part : (part?.text ?? "")))
+      .join("");
+  }
+  return "";
+}
+
+/**
  * One completion. Returns the model's text, with leading/trailing whitespace
  * and empty responses handled here rather than in every caller.
  */
@@ -198,7 +213,7 @@ export async function chat(settings, { system, prompt, maxTokens = 700, temperat
     }),
   });
   recordUsage(data?.usage);
-  const text = data?.choices?.[0]?.message?.content ?? "";
+  const text = messageText(data?.choices?.[0]?.message);
   if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
   return text.trim();
 }
@@ -226,12 +241,21 @@ export async function fetchKeyInfo(apiKey) {
 export async function fetchModels(apiKey) {
   const data = await apiJSON("/models", apiKey);
   const rows = Array.isArray(data?.data) ? data.data : [];
-  return rows.map((m) => ({
-    id: m.id ?? m.canonical_slug,
-    name: m.name ?? m.id,
-    context: m.context_length ?? null,
-    pricing: m.pricing ?? null,
-  }));
+  const models = [];
+  for (const m of rows) {
+    const id = typeof m?.id === "string" && m.id ? m.id : m?.canonical_slug;
+    // A row with no usable id can only break the callers that match on one:
+    // the datalist would offer "undefined", and the save-time check would
+    // throw reading `.includes` off it.
+    if (typeof id !== "string" || !id) continue;
+    models.push({
+      id,
+      name: typeof m.name === "string" && m.name ? m.name : id,
+      context: m.context_length ?? null,
+      pricing: m.pricing ?? null,
+    });
+  }
+  return models;
 }
 
 /** Accepts bare ids and full openrouter.ai/c/<model> URLs pasted in haste.
@@ -251,6 +275,23 @@ export function normalizeModel(model) {
  * fence, a chatty preamble, or single quotes must degrade gracefully rather
  * than showing the student a stack trace.
  */
+
+/**
+ * JSON.parse, but only an object or array counts as an answer.
+ *
+ * `null`, `42` and `true` all parse cleanly and then blow up in every caller,
+ * which reads a field off the result — a bare TypeError in the student's face
+ * instead of the "try again" this module promises. Returns undefined for
+ * anything unusable so the next candidate gets its turn.
+ */
+function parseJSONObject(text) {
+  try {
+    const value = JSON.parse(text);
+    return value !== null && typeof value === "object" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Pulls the outermost JSON object or array out of whatever came back. */
 export function parseJSONLoose(text) {
@@ -273,15 +314,10 @@ export function parseJSONLoose(text) {
   candidates.push(cleaned);
 
   for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      try {
-        return JSON.parse(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
-      } catch {
-        /* try the next candidate */
-      }
-    }
+    const value =
+      parseJSONObject(candidate) ??
+      parseJSONObject(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
+    if (value !== undefined) return value;
   }
   throw new Error("The response wasn’t the shape we asked for. Try again.");
 }
@@ -432,6 +468,20 @@ export async function aiSimilarWords(settings, word) {
 const CONTEXT_CHARS = 2400;
 
 /**
+ * Exactly the draft excerpt aiExampleSentences() sends as context.
+ *
+ * Exported because the caller caches answers against the seed that shaped
+ * them: a second copy of this rule on that side would drift from this one and
+ * silently hand back sentences written about a paragraph since deleted.
+ */
+export function exampleContext(context) {
+  return String(context ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, CONTEXT_CHARS);
+}
+
+/**
  * Three sentences using the word the way an analytical essay would. When the
  * student has a draft underway, its opening rides along as context, so the
  * examples speak about *their* text rather than a generic novel.
@@ -439,7 +489,7 @@ const CONTEXT_CHARS = 2400;
 export async function aiExampleSentences(settings, { word, context = "" }) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
-  const excerpt = String(context ?? "").replace(/\s+/g, " ").trim().slice(0, CONTEXT_CHARS);
+  const excerpt = exampleContext(context);
   const parsed = parseJSONLoose(
     await chat(settings, {
       system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
@@ -464,6 +514,21 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
 }
 
 /* ---- feature: nuance comparison ---- */
+
+/**
+ * One spelling rule for both sides of the match below.
+ *
+ * The model echoes a headword back with its own punctuation and accents, and
+ * the words asked about are not always one bare ASCII token — “ad hominem”,
+ * “naïve”, “cliché” are all ordinary bank entries. Folding both sides the same
+ * way is what stops a perfectly good answer being dropped on the floor.
+ */
+function canonWord(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]/g, "");
+}
 
 /**
  * Splits near-synonyms apart: what each word claims, connotes, and costs.
@@ -493,11 +558,14 @@ export async function aiNuance(settings, words) {
   const byWord = new Map();
   const rows = Array.isArray(parsed.distinctions) ? parsed.distinctions : [];
   for (const row of rows) {
-    const word = asString(row?.word).toLowerCase().replace(/[^a-z'-]/g, "");
+    const word = canonWord(asString(row?.word));
     const nuance = asString(row?.nuance);
     if (word && nuance) byWord.set(word, nuance);
   }
-  const distinctions = unique.map((word) => ({ word, nuance: byWord.get(word) ?? "" }));
+  const distinctions = unique.map((word) => ({
+    word,
+    nuance: byWord.get(canonWord(word)) ?? "",
+  }));
   const guidance = asString(parsed.guidance);
   if (!guidance && distinctions.every((d) => !d.nuance)) {
     throw new Error("The comparison came back empty. Try again.");
