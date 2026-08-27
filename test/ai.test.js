@@ -241,13 +241,32 @@ test("a stalled body is aborted by the timeout rather than hanging forever", asy
 });
 
 test("an answer cut off at the token limit says so, not 'wrong shape'", async () => {
-  // The reply parses as nothing useful either way, but "try again" is bad
-  // advice for a limit that will cut the retry off in the same place.
+  // "Try again" is bad advice for a limit that cuts the retry off in the
+  // same place, so the limit is what the message has to name.
   globalThis.fetch = () =>
     json(200, {
       choices: [{ finish_reason: "length", message: { content: '{"summary": "The draft opens' } }],
     });
-  await assert.rejects(() => chat(SETTINGS, { prompt: "x" }), /cut off/);
+  await assert.rejects(() => aiEssayReview(SETTINGS, { essay: "a draft" }), /cut off/);
+});
+
+test("a finished answer cut off mid-sign-off is still an answer", async () => {
+  // finish_reason alone must not condemn a reply: a model that closes its
+  // JSON and is then stopped part-way through a pleasantry has answered.
+  globalThis.fetch = () =>
+    json(200, {
+      choices: [
+        {
+          finish_reason: "length",
+          message: {
+            content:
+              '{"summary": "Clear thesis.", "strengths": [], "improvements": [], "focus": []}\n\nLet me know if you want me to look at the seco',
+          },
+        },
+      ],
+    });
+  const review = await aiEssayReview(SETTINGS, { essay: "a draft" });
+  assert.equal(review.summary, "Clear thesis.");
 });
 
 test("a refusal speaks for itself rather than reading as an empty reply", async () => {

@@ -262,10 +262,10 @@ export function privacyRouting(settings) {
 }
 
 /**
- * One completion. Returns the model's text, with leading/trailing whitespace
- * and empty responses handled here rather than in every caller.
+ * One completion, plus the one fact a caller needs to read a bad answer: the
+ * model was still talking when the token limit stopped it.
  */
-export async function chat(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
+async function complete(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
   const body = {
     model: normalizeModel(settings.model),
@@ -291,16 +291,37 @@ export async function chat(settings, { system, prompt, maxTokens = 700, temperat
   if (!text.trim()) {
     throw new Error(refusalText(choice?.message) || "OpenRouter returned an empty response.");
   }
-  // Every caller here parses this as JSON, so a reply the model was cut off
-  // mid-way through is unusable — and it fails as "the wrong shape, try
-  // again", which is both wrong about the cause and useless as advice: the
-  // retry is cut off in exactly the same place. Name the real problem.
-  if (choice?.finish_reason === "length") {
+  return { text: text.trim(), truncated: choice?.finish_reason === "length" };
+}
+
+/**
+ * One completion, as text. Kept as the plain shape callers outside this
+ * module's own features expect.
+ */
+export async function chat(settings, options) {
+  return (await complete(settings, options)).text;
+}
+
+/**
+ * A completion parsed as the JSON every feature here asks for.
+ *
+ * A reply the token limit cut off mid-structure is the one failure worth
+ * naming separately. It used to surface as "the response wasn't the shape we
+ * asked for. Try again." — wrong about the cause, and useless as advice,
+ * since the retry is cut off in exactly the same place. The check runs only
+ * once parsing has actually failed, because a model that finishes its JSON
+ * and is then cut off part-way through a sign-off has still answered.
+ */
+async function chatJSON(settings, options) {
+  const { text, truncated } = await complete(settings, options);
+  try {
+    return parseJSONLoose(text);
+  } catch (err) {
+    if (!truncated) throw err;
     throw new Error(
       "The answer was cut off before it finished. Try again — and if it keeps happening, send a shorter draft."
     );
   }
-  return text.trim();
 }
 
 /* ---- key + catalogue ---- */
@@ -527,16 +548,14 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
     .filter(Boolean)
     .join("\n\n");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction(
-        '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
-      )}`,
-      prompt,
-      maxTokens: 1600,
-      temperature: 0.6,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction(
+      '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
+    )}`,
+    prompt,
+    maxTokens: 1600,
+    temperature: 0.6,
+  });
 
   const improvements = Array.isArray(parsed.improvements)
     ? parsed.improvements
@@ -567,19 +586,17 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
 export async function aiSimilarWords(settings, word) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
-      prompt: [
-        `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
-        'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
-        "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
-        "Exclude “" + w + "” itself and simple inflections of it.",
-      ].join("\n"),
-      maxTokens: 600,
-      temperature: 0.5,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
+    prompt: [
+      `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
+      'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
+      "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
+      "Exclude “" + w + "” itself and simple inflections of it.",
+    ].join("\n"),
+    maxTokens: 600,
+    temperature: 0.5,
+  });
 
   const words = Array.isArray(parsed.words) ? parsed.words : Array.isArray(parsed) ? parsed : [];
   const seen = new Set();
@@ -626,20 +643,18 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
   const excerpt = exampleContext(context);
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
-      prompt: [
-        `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
-        excerpt
-          ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
-          : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
-        "Vary sentence openings. No numbering, no explanation outside the JSON.",
-      ].join("\n"),
-      maxTokens: 400,
-      temperature: 0.7,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
+    prompt: [
+      `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
+      excerpt
+        ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
+        : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
+      "Vary sentence openings. No numbering, no explanation outside the JSON.",
+    ].join("\n"),
+    maxTokens: 400,
+    temperature: 0.7,
+  });
 
   const sentences = asStringArray(
     Array.isArray(parsed.sentences) ? parsed.sentences : Array.isArray(parsed) ? parsed : [],
@@ -678,18 +693,16 @@ export async function aiNuance(settings, words) {
   if (unique.length < 2) throw new Error("Give at least two words to compare.");
   if (unique.length > 6) throw new Error("Compare up to six words at a time.");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
-      prompt: [
-        `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
-        'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
-        '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
-      ].join("\n"),
-      maxTokens: 800,
-      temperature: 0.4,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
+    prompt: [
+      `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
+      'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
+      '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
+    ].join("\n"),
+    maxTokens: 800,
+    temperature: 0.4,
+  });
 
   const byWord = new Map();
   const rows = Array.isArray(parsed.distinctions) ? parsed.distinctions : [];
