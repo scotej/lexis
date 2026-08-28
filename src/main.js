@@ -33,6 +33,7 @@ import {
 } from "./core/ai.js";
 import {
   clearAiSettings,
+  emptyAiSettings,
   loadAiSettings,
   saveAiSettings,
 } from "./core/ai-settings.js";
@@ -1511,6 +1512,9 @@ function renderAiSettings() {
   $("ai-key").value = "";
   $("ai-key").placeholder = has ? "saved — type to replace" : "sk-or-v1-…";
   $("ai-model").value = aiSettings?.model ?? "";
+  // Absent reads as on: settings sealed before the option existed are covered
+  // by it rather than silently exempt from it.
+  $("ai-strict-privacy").checked = aiSettings?.strictPrivacy !== false;
   $("ai-facts").hidden = !has;
   $("ai-facts-actions").hidden = !has;
   if (has) renderAiFacts();
@@ -1641,7 +1645,11 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
       showAiStatus(objection, true);
       return;
     }
-    const next = await saveAiSettings(platform, { key, model });
+    const next = await saveAiSettings(platform, {
+      key,
+      model,
+      strictPrivacy: $("ai-strict-privacy").checked,
+    });
     aiSettings = next;
     aiKeyInfo = null; // a replaced key has its own balance
     // Prove the key works before celebrating it — but a verification failure
@@ -1683,7 +1691,7 @@ $("ai-refresh").addEventListener("click", async () => {
  * for requests its predecessor made.
  */
 function forgetAiKeyInSession() {
-  aiSettings = { key: "", model: "" };
+  aiSettings = emptyAiSettings();
   aiModels = null;
   aiModelsPromise = null;
   aiKeyInfo = null;
@@ -1713,7 +1721,7 @@ $("ai-remove").addEventListener("click", async () => {
   await renderBank();
 });
 
-["ai-key", "ai-model"].forEach((id) =>
+["ai-key", "ai-model", "ai-strict-privacy"].forEach((id) =>
   $(id).addEventListener("input", () => {
     const status = $("ai-status");
     status.hidden = true;

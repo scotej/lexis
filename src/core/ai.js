@@ -11,6 +11,10 @@
  * the transient failure modes (drops, stalls, 5xx, throttling) — while the
  * permanent ones (bad key, empty credits, unknown model) come back as plain,
  * specific errors the interface can show verbatim.
+ *
+ * Every completion also carries a routing constraint by default — see
+ * privacyRouting() — because OpenRouter is a router, and an essay draft is
+ * the student's own unpublished work.
  */
 
 const API_BASE = "https://openrouter.ai/api/v1";
@@ -109,15 +113,46 @@ async function apiFetch(path, apiKey, init = {}) {
   throw transientError("Couldn’t reach OpenRouter.");
 }
 
-/** Turns a non-2xx response into the most specific honest message available. */
-function describeError(status, text) {
+/**
+ * "Nothing matched your routing constraints", in the shapes OpenRouter says it
+ * — it names endpoints, providers, or the data policy depending on the route.
+ *
+ * Strict privacy can empty the pool for a narrowly-hosted model. Left
+ * unexplained that reads as "this model is broken" — it isn't, and the way
+ * out is one checkbox away, so the message says which one.
+ */
+function noEndpointsLeft(status, detail) {
+  if (status !== 404 && status !== 400) return false;
+  return (
+    /\bno (?:allowed |eligible |available )?(?:endpoints?|providers?)\b/i.test(detail) ||
+    /\bdata policy\b/i.test(detail)
+  );
+}
+
+/**
+ * Turns a non-2xx response into the most specific honest message available.
+ *
+ * `strict` says whether this request actually carried the privacy constraint.
+ * Without it an unrelated 404 would be blamed on a setting the student had
+ * already turned off — sending them to uncheck a box that is not checked.
+ */
+function describeError(status, text, { strict = false } = {}) {
   let detail = "";
   try {
     const body = JSON.parse(text ?? "");
-    detail =
-      body?.error?.message ?? (typeof body?.error === "string" ? body.error : "");
+    const raw = body?.error?.message ?? (typeof body?.error === "string" ? body.error : "");
+    // An `error.message` is not always a string — some gateways nest an object
+    // there, and interpolating one prints "[object Object]" at the student.
+    detail = typeof raw === "string" ? raw : "";
   } catch {
     /* HTML error pages and empty bodies happen */
+  }
+
+  if (strict && noEndpointsLeft(status, detail)) {
+    return (
+      "No provider for this model meets the privacy setting (no training on your " +
+      "text, nothing retained). Pick another model, or turn off strict privacy in AI assist."
+    );
   }
 
   switch (status) {
@@ -134,9 +169,9 @@ function describeError(status, text) {
   }
 }
 
-async function apiJSON(path, apiKey, init = {}) {
+async function apiJSON(path, apiKey, init = {}, opts = {}) {
   const { ok, status, text } = await apiFetch(path, apiKey, init);
-  if (!ok) throw new Error(describeError(status, text));
+  if (!ok) throw new Error(describeError(status, text, opts));
   try {
     return JSON.parse(text);
   } catch {
@@ -195,27 +230,98 @@ function messageText(message) {
 }
 
 /**
- * One completion. Returns the model's text, with leading/trailing whitespace
- * and empty responses handled here rather than in every caller.
+ * A model's own words for why it declined, when it gives any.
+ *
+ * A refusal arrives as an empty `content` beside a populated `refusal`.
+ * Reporting it as "empty response" tells the student their key or the network
+ * misbehaved, which sends them to fix something that isn't broken.
  */
-export async function chat(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
+function refusalText(message) {
+  const refusal = message?.refusal;
+  if (typeof refusal !== "string") return "";
+  // Model-written text, so it has no length OpenRouter's own errors are held
+  // to; a paragraph of it in the status line would push the form off screen.
+  const trimmed = refusal.trim();
+  return trimmed.length > 240 ? `${trimmed.slice(0, 239)}…` : trimmed;
+}
+
+/**
+ * Where the request is allowed to be routed.
+ *
+ * The person using this is a student sending unpublished school work to a
+ * router that picks a provider per request, and some providers keep — and
+ * train on — what they are sent. So the default is to exclude them, and
+ * turning that off is a deliberate choice made in settings rather than a
+ * default nobody was told about. Absent the flag entirely (settings saved
+ * before the option existed) still counts as on.
+ */
+export function privacyRouting(settings) {
+  return settings?.strictPrivacy === false
+    ? null
+    : { data_collection: "deny", zdr: true };
+}
+
+/**
+ * One completion, plus the one fact a caller needs to read a bad answer: the
+ * model was still talking when the token limit stopped it.
+ */
+async function complete(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
-  const data = await apiJSON("/chat/completions", settings.key, {
-    method: "POST",
-    body: JSON.stringify({
-      model: normalizeModel(settings.model),
-      max_tokens: maxTokens,
-      temperature,
-      messages: [
-        ...(system ? [{ role: "system", content: system }] : []),
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  const body = {
+    model: normalizeModel(settings.model),
+    max_tokens: maxTokens,
+    temperature,
+    messages: [
+      ...(system ? [{ role: "system", content: system }] : []),
+      { role: "user", content: prompt },
+    ],
+  };
+  const provider = privacyRouting(settings);
+  if (provider) body.provider = provider;
+
+  const data = await apiJSON(
+    "/chat/completions",
+    settings.key,
+    { method: "POST", body: JSON.stringify(body) },
+    { strict: Boolean(provider) }
+  );
   recordUsage(data?.usage);
-  const text = messageText(data?.choices?.[0]?.message);
-  if (!text.trim()) throw new Error("OpenRouter returned an empty response.");
-  return text.trim();
+  const choice = data?.choices?.[0];
+  const text = messageText(choice?.message);
+  if (!text.trim()) {
+    throw new Error(refusalText(choice?.message) || "OpenRouter returned an empty response.");
+  }
+  return { text: text.trim(), truncated: choice?.finish_reason === "length" };
+}
+
+/**
+ * One completion, as text. Kept as the plain shape callers outside this
+ * module's own features expect.
+ */
+export async function chat(settings, options) {
+  return (await complete(settings, options)).text;
+}
+
+/**
+ * A completion parsed as the JSON every feature here asks for.
+ *
+ * A reply the token limit cut off mid-structure is the one failure worth
+ * naming separately. It used to surface as "the response wasn't the shape we
+ * asked for. Try again." — wrong about the cause, and useless as advice,
+ * since the retry is cut off in exactly the same place. The check runs only
+ * once parsing has actually failed, because a model that finishes its JSON
+ * and is then cut off part-way through a sign-off has still answered.
+ */
+async function chatJSON(settings, options) {
+  const { text, truncated } = await complete(settings, options);
+  try {
+    return parseJSONLoose(text);
+  } catch (err) {
+    if (!truncated) throw err;
+    throw new Error(
+      "The answer was cut off before it finished. Try again — and if it keeps happening, send a shorter draft."
+    );
+  }
 }
 
 /* ---- key + catalogue ---- */
@@ -293,32 +399,83 @@ function parseJSONObject(text) {
   }
 }
 
+/**
+ * A line that is nothing but a markdown fence, opening or closing.
+ *
+ * Stripping fences by line rather than by substring is what keeps a draft
+ * that happens to discuss code intact: `{"detail": "wrap it in ``` marks"}`
+ * is a perfectly good answer, and a global replace of every ``` in the text
+ * quietly ate the student's own words out of the middle of it. JSON forbids a
+ * raw newline inside a string, so a fence that occupies a whole line is never
+ * part of a value — which makes this the one safe place to cut.
+ */
+const FENCE_LINE = /^[ \t]*```[A-Za-z0-9_+-]*[ \t]*$/;
+
+function stripFenceLines(text) {
+  if (!text.includes("```")) return text;
+  const lines = text.split(/\r?\n/);
+  return lines.some((line) => FENCE_LINE.test(line))
+    ? lines.filter((line) => !FENCE_LINE.test(line)).join("\n")
+    : text;
+}
+
+/**
+ * The balanced JSON value that starts at `from`, or "" if it never closes.
+ *
+ * Counting depth — and knowing when it is inside a string — is the whole
+ * point. Reaching for the *last* closing brace in the text instead is what
+ * broke on the commonest chatty reply there is: a clean object followed by
+ * “Tell me if you want more on {structure}.” takes the brace out of the
+ * sign-off, and the JSON in front of it is thrown away with it.
+ */
+function balancedSlice(text, from) {
+  const opener = text[from];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === opener) depth++;
+    else if (ch === closer && --depth === 0) return text.slice(from, i + 1);
+  }
+  return ""; // ran off the end: the answer was cut short mid-structure
+}
+
+/** How many openers are worth trying before calling the reply unreadable. */
+const MAX_JSON_CANDIDATES = 20;
+
 /** Pulls the outermost JSON object or array out of whatever came back. */
 export function parseJSONLoose(text) {
-  const cleaned = String(text ?? "")
-    .replace(/^\uFEFF/, "")
-    .replace(/```(?:json)?\s*/gi, "")
-    .replace(/```/g, "")
-    .trim();
+  const cleaned = stripFenceLines(String(text ?? "").replace(/^\uFEFF/, "")).trim();
 
-  const candidates = [];
-  const firstBrace = cleaned.indexOf("{");
-  const firstBracket = cleaned.indexOf("[");
-  const start = firstBrace === -1 ? firstBracket : firstBracket === -1 ? firstBrace : Math.min(firstBrace, firstBracket);
-  if (start !== -1) {
-    const opener = cleaned[start];
-    const closer = opener === "{" ? "}" : "]";
-    const last = cleaned.lastIndexOf(closer);
-    if (last > start) candidates.push(cleaned.slice(start, last + 1));
-  }
-  candidates.push(cleaned);
+  const attempt = (candidate) =>
+    parseJSONObject(candidate) ??
+    parseJSONObject(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
 
-  for (const candidate of candidates) {
-    const value =
-      parseJSONObject(candidate) ??
-      parseJSONObject(candidate.replace(/,\s*([}\]])/g, "$1")); // trailing commas
+  // Each opening brace or bracket in turn, outermost first: a preamble may
+  // contain one of its own (“Sure {here}: {…}”), so the first candidate
+  // is not always the answer.
+  let tried = 0;
+  for (let i = 0; i < cleaned.length && tried < MAX_JSON_CANDIDATES; i++) {
+    const ch = cleaned[i];
+    if (ch !== "{" && ch !== "[") continue;
+    tried++;
+    const slice = balancedSlice(cleaned, i);
+    if (!slice) continue;
+    const value = attempt(slice);
     if (value !== undefined) return value;
   }
+
+  const whole = attempt(cleaned);
+  if (whole !== undefined) return whole;
   throw new Error("The response wasn’t the shape we asked for. Try again.");
 }
 
@@ -391,16 +548,14 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
     .filter(Boolean)
     .join("\n\n");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction(
-        '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
-      )}`,
-      prompt,
-      maxTokens: 1600,
-      temperature: 0.6,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction(
+      '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
+    )}`,
+    prompt,
+    maxTokens: 1600,
+    temperature: 0.6,
+  });
 
   const improvements = Array.isArray(parsed.improvements)
     ? parsed.improvements
@@ -431,19 +586,17 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
 export async function aiSimilarWords(settings, word) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
-      prompt: [
-        `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
-        'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
-        "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
-        "Exclude “" + w + "” itself and simple inflections of it.",
-      ].join("\n"),
-      maxTokens: 600,
-      temperature: 0.5,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{words: [{"word": string, "note": string}]}')}`,
+    prompt: [
+      `Give six to eight words close in meaning to “${w}” that would suit formal analytical writing.`,
+      'For each, "note" explains the difference in tone, intensity, or typical use in one short clause — what a thesaurus never tells you.',
+      "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
+      "Exclude “" + w + "” itself and simple inflections of it.",
+    ].join("\n"),
+    maxTokens: 600,
+    temperature: 0.5,
+  });
 
   const words = Array.isArray(parsed.words) ? parsed.words : Array.isArray(parsed) ? parsed : [];
   const seen = new Set();
@@ -490,20 +643,18 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
   const w = String(word ?? "").trim();
   if (!w) throw new Error("Name a word first.");
   const excerpt = exampleContext(context);
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
-      prompt: [
-        `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
-        excerpt
-          ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
-          : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
-        "Vary sentence openings. No numbering, no explanation outside the JSON.",
-      ].join("\n"),
-      maxTokens: 400,
-      temperature: 0.7,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{sentences: string[]}')}`,
+    prompt: [
+      `Write three original sentences that use “${w}” the way a strong analytical essay would.`,
+      excerpt
+        ? `They should suit this piece the student is writing:\n"""${excerpt}"""`
+        : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
+      "Vary sentence openings. No numbering, no explanation outside the JSON.",
+    ].join("\n"),
+    maxTokens: 400,
+    temperature: 0.7,
+  });
 
   const sentences = asStringArray(
     Array.isArray(parsed.sentences) ? parsed.sentences : Array.isArray(parsed) ? parsed : [],
@@ -542,18 +693,16 @@ export async function aiNuance(settings, words) {
   if (unique.length < 2) throw new Error("Give at least two words to compare.");
   if (unique.length > 6) throw new Error("Compare up to six words at a time.");
 
-  const parsed = parseJSONLoose(
-    await chat(settings, {
-      system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
-      prompt: [
-        `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
-        'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
-        '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
-      ].join("\n"),
-      maxTokens: 800,
-      temperature: 0.4,
-    })
-  );
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{distinctions: [{"word": string, "nuance": string}], "guidance": string}')}`,
+    prompt: [
+      `A student is choosing between these near-interchangeable words: ${unique.join(", ")}.`,
+      'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
+      '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
+    ].join("\n"),
+    maxTokens: 800,
+    temperature: 0.4,
+  });
 
   const byWord = new Map();
   const rows = Array.isArray(parsed.distinctions) ? parsed.distinctions : [];

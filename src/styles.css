@@ -1084,6 +1084,30 @@ main {
   line-height: 1.65;
 }
 
+/* A checkbox reads as a control, not a caption, so it keeps the ink colour
+   the field labels give up — and sits on the baseline of its own word rather
+   than floating above it. */
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.check-line input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--pen);
+  cursor: pointer;
+}
+
+.check-line span {
+  font-size: 12.5px;
+  text-transform: lowercase;
+  color: var(--ink);
+}
+
 /* The AI affordances are quiet by design — a pen-coloured outline rather
    than the solid ink of a primary button, so the non-AI path stays the
    default and the AI reads as an optional layer. */

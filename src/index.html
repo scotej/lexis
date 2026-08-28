@@ -376,10 +376,9 @@
                 word plus the opening of whatever draft is in the essay view;
                 <em>similar words</em> and <em>vs</em> send the words alone.
                 OpenRouter forwards that text to whichever provider serves the model,
-                and whether either keeps it is governed by your account's privacy
-                settings at <em>openrouter.ai/settings/privacy</em> — free models
-                generally require allowing prompt logging. Read them before sending
-                work that is being assessed.
+                which is why <em>strict privacy</em> below is on by default. Your
+                account's own settings at <em>openrouter.ai/settings/privacy</em>
+                still apply on top.
               </small>
             </label>
             <label class="field">
@@ -398,6 +397,18 @@
                 <em>openrouter/auto</em>, which picks a good one per request.
               </small>
             </label>
+            <div class="field">
+              <label class="check-line">
+                <input id="ai-strict-privacy" type="checkbox" checked />
+                <span>strict privacy</span>
+              </label>
+              <small>
+                Send only to providers that neither train on your text nor keep it.
+                Your draft is your own unpublished work, so this is on by default.
+                Some models — free ones especially — have no provider that
+                qualifies; those say so rather than sending it anyway.
+              </small>
+            </div>
             <div class="form-actions">
               <button class="button-primary" type="submit" id="ai-save">save</button>
               <button class="link-quiet" type="button" id="ai-remove" hidden>remove key</button>
