@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Cached source downloads for the quote harvesters
+.quote-cache
