@@ -20,6 +20,13 @@ import {
 } from "./core/conflict.js";
 import { installStatsView, renderStatsView } from "./stats-view.js";
 import {
+  initTypingView,
+  installTypingView,
+  notifyTypingBankChanged,
+  renderTypingView,
+  suspendTypingView,
+} from "./typing-view.js";
+import {
   aiEssayReview,
   aiExampleSentences,
   aiNuance,
@@ -85,6 +92,7 @@ async function mutate(action) {
 /* ---- navigation ---- */
 
 installStatsView();
+installTypingView();
 
 const railLinks = document.querySelectorAll(".rail-link[data-view]");
 railLinks.forEach((btn, i) => {
@@ -100,6 +108,10 @@ function switchView(name) {
   // The gate overlays the rail but doesn't inert it, so a keyboard user can
   // still reach these buttons before the app exists.
   if (!app) return;
+  // The typing test holds the keyboard while it is on screen. Leaving must
+  // hand it back, or “/” and the digit shortcuts stay swallowed by a field
+  // nobody can see.
+  if (name !== "typing") suspendTypingView();
   railLinks.forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("active", v.id === `view-${name}`);
@@ -108,6 +120,7 @@ function switchView(name) {
   if (name === "today") renderToday();
   if (name === "review") startReview();
   if (name === "stats") renderStatsView(app.getBank());
+  if (name === "typing") renderTypingView();
   if (name === "essay") updateEssayCount();
   if (name === "sync") renderSync();
   if (name === "settings") {
@@ -119,15 +132,17 @@ function switchView(name) {
   }
 }
 
-// 1–7 jump straight to a view, top to bottom, matching the rail. Bare digits
+// 1–8 jump straight to a view, top to bottom, matching the rail. Bare digits
 // rather than modifier chords — browsers keep ⌘/Ctrl+digit for their own
-// tabs, and bare Space already works this way during review.
+// tabs, and bare Space already works this way during review. While the typing
+// test has the keyboard these stand aside on their own: isEditingTarget() is
+// true of its input, exactly as it is of the essay box.
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (aboutDialog.open) return;
   if (isEditingTarget()) return;
   if (!$("lookup").hidden) return;
-  const digit = /^Digit([1-7])$/.exec(e.code);
+  const digit = /^Digit([1-8])$/.exec(e.code);
   if (!digit) return;
   switchView(railLinks[Number(digit[1]) - 1].dataset.view);
 });
@@ -2159,7 +2174,13 @@ $("gate-setup").addEventListener("submit", async (e) => {
 /* ---- boot ---- */
 
 function wireApp() {
-  app = createApp(platform.storage, () => sync?.schedule());
+  app = createApp(platform.storage, () => {
+    sync?.schedule();
+    // The typing test filters passages by what is in the bank, so a word added
+    // or removed changes what it can serve.
+    notifyTypingBankChanged();
+  });
+  initTypingView({ app, getAiSettings: () => aiSettings, aiReady });
   sync = createSyncController({
     app,
     onStatus: applySyncStatus,
@@ -2179,6 +2200,7 @@ function wireApp() {
       if (active === "bank") renderBank();
       else if (active === "today") renderToday();
       else if (active === "stats") renderStatsView(app.getBank());
+      else if (active === "typing") notifyTypingBankChanged();
       else if (active === "settings") renderSettings();
       else refreshCounts();
     },

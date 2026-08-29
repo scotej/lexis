@@ -46,6 +46,34 @@ draft adds every matched occurrence — including bank words outside today's
 list — to that word's separate essay-use total. Matches from today's list are
 also marked as practised and scheduled to return.
 
+**Type.** A typing test, in the shape typists already know — but built out of
+quotes worth typing. Sixteen thousand of them, from about 4,700 sources: film
+and television dialogue, novels and plays, philosophy and science, oratory and
+proverbs. Every one is attributed, so you always know who said it and where.
+Sorted by length (*short*, *medium*, *long*, *thicc*), and filterable by
+shelf — films, television, books, speeches, people, proverbs — alongside timed
+and word-count runs and a blank page for zen. Everything monkeytype puts in
+its settings is here: difficulty, stop-on-error, confidence and freedom modes,
+strict space, lazy mode, caret styles, tape mode, blind mode, minimum-speed
+floors, live wpm.
+
+What it adds is the filter only a word bank can offer: **only quotes using a
+word from my bank** — or from today's list, or from what is due for review.
+Meeting *demise* in a line of Dickens, at speed, is a different kind of
+practice from turning over a card with *demise* on it, and it is the kind that
+survives into an essay. The result screen names which of your words you just
+typed, and how many tests you have now met each of them in. In the timed and
+word-count modes your bank can *be* the word list.
+
+The corpus is chosen to make that filter work. Eight hundred thousand words,
+weighted towards the uncommon-but-real vocabulary a student actually banks: a
+representative VCE word list turns up in 94% of cases, at a median of nine
+quotes per word. Where the shelf still runs out, AI carries on (below).
+
+Speeds, personal bests and preferences stay on the device — they are facts
+about a keyboard as much as about a typist — so they are never synced,
+uploaded, or sent to a model.
+
 **Stats.** A dedicated view charts your activity — words added and reviews
 done per day — alongside running totals for bank size, reviews, streak, and
 essay uses. Recorded activity stays in these statistics even after a word is
@@ -53,7 +81,9 @@ later removed.
 
 **Quick lookup.** Press `/` (or `⌘K`) anywhere for a definition without
 commitment: type a word, read its senses, `esc` to close — or add it to the
-bank after all. The seven views answer to the keys `1`–`7`.
+bank after all. The eight views answer to the keys `1`–`8` — except while the
+typing test has the keyboard, which it needs in order to be a typing test;
+`esc` hands it back.
 
 ## AI assist (optional, via OpenRouter)
 
@@ -78,6 +108,13 @@ routing). That unlocks three things:
   word the way an analytical essay would — drawing on your open draft when
   there is one, so the examples speak about your text rather than a generic
   novel.
+- **Passages to type.** In **type**, set *written by* to **ai** (or **both**)
+  and the model writes passages built around your bank words, at whichever
+  length you asked for. They are written *ahead* of being wanted — three sit
+  ready at all times, and taking one starts the next — so a test still begins
+  the moment you press a key. There is one wait, when the queue first fills,
+  and the view says so while it happens. If the key is missing or the model
+  fails, the library carries on and the bar says which.
 
 The key is a credential like the sync token: stored only as ciphertext on the
 device that holds it, never synced to GitHub or the backup folder, never
@@ -86,10 +123,12 @@ straight from the app to OpenRouter — there is no lexis server in between.
 What you send is what the feature needs, and no more: essay feedback sends the
 draft along with your bank's headwords; example sentences send the word and the
 opening of whatever draft is in the essay view, so they can speak about your
-text; similar words and **vs** send the words alone.
+text; passages to type send your bank's headwords and a length; similar words
+and **vs** send the words alone. Nothing you type *into* the typing test is
+sent anywhere — the scoring is arithmetic, done here.
 
 **Know what leaves the device.** Everything else in lexis is analysed here;
-these three features are not, and cannot be. Your draft goes to OpenRouter,
+these four features are not, and cannot be. Your draft goes to OpenRouter,
 which forwards it to whichever provider serves the model you chose — and some
 providers keep what they are sent, or train on it.
 
@@ -242,11 +281,15 @@ machine in a single JSON file in the app data directory.
 GitHub repository you nominate. It is encrypted on your device first, with a
 key derived from your password (PBKDF2-SHA256, then AES-256-GCM). GitHub
 stores ciphertext and never holds the key. Essays are never synced or
-uploaded; they are analysed locally and never leave the device.
+uploaded; they are analysed locally and never leave the device. Neither are
+typing speeds, personal bests, or typing preferences: those stay on the
+device that made them.
 
 **With an AI key saved**, your work leaves for OpenRouter only when you ask
 for essay feedback or the vocabulary tools, and only with what that feature
-needs (see *AI assist* above). Because that includes your draft, it is held to
+needs (see *AI assist* above). The typing test asks on its own account, but
+only once you have set *quotes from* to **ai**, and only ever for passages
+built from your bank's headwords — never for anything you have typed. Because that includes your draft, it is held to
 the same standard as everything else here: strict privacy is on by default,
 and every request tells OpenRouter to route only to providers that neither
 collect nor retain what they are sent. The one other request the app makes on its own account
@@ -298,12 +341,39 @@ Prerequisites: [Rust](https://rustup.rs) and Node. Then:
 
 ```sh
 npm install
-npm test             # the shared core (logic, merge, crypto, sync)
+npm test             # the shared core (logic, merge, crypto, sync, typing)
 npm run web          # serve the web build at localhost:5173
 npm run tauri dev    # run the desktop app
 npm run tauri build  # build installers
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+The quote corpus in `src/data/` is generated and committed, so nothing about a
+normal build touches the network:
+
+```sh
+node tools/harvest/wikiquote.mjs    # fetch the shelves into .quote-cache/
+node tools/harvest/wikisource.mjs   # speeches and essays, for the long lengths
+node tools/build-quotes.mjs         # assemble them into src/data/quotes.js
+```
+
+Harvesting and choosing are deliberately separate. The harvesters know one
+source each and its quirks; `build-quotes.mjs` applies one set of standards to
+everything they return, so a line from a film and a line from a philosopher are
+held to the same bar.
+
+What to fetch lives in `tools/harvest/shelves.mjs`, and it is a curated list
+rather than a crawl — that is the single biggest lever on quality. Wikiquote
+will hand over eight hundred thousand television lines, and the large majority
+are scene filler from shows nobody has heard of; naming ~700 works instead
+yields 170,000 candidates worth choosing between. Adding a title to that file
+is how the corpus grows.
+
+The selection stage then balances three things that will not balance
+themselves — length, kind, and source — because supply is wildly uneven (there
+are 95,000 short quotes available and 6,000 long ones), rejects anything that
+is not typeable, not English, not a whole sentence, or not fit for a school
+screen, and caps how much any one work may contribute.
 
 The frontend is plain HTML/CSS/JS — no framework, no bundler, so "building"
 the web app is copying `src/`. The Rust backend (Tauri 2) is now a thin shell:

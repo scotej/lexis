@@ -664,6 +664,105 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
   return { sentences };
 }
 
+/* ---- feature: passages to type ---- */
+
+/** Character bounds for the four length classes the typing test offers. */
+const PASSAGE_BOUNDS = {
+  short: [45, 100],
+  medium: [110, 300],
+  long: [320, 600],
+  thicc: [620, 1100],
+};
+
+/**
+ * Only what a keyboard has keys for.
+ *
+ * The corpus is built ASCII-clean; a model is not, and it reaches for typographic
+ * quotes and em dashes unprompted. A curly apostrophe in a typing test is an
+ * error the typist cannot correct, so it is flattened here rather than being
+ * left for the engine's lazy mode to maybe catch.
+ */
+function typeable(text) {
+  return String(text ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[‘’‚‛′´`]/g, "'")
+    .replace(/[“”„‟″«»]/g, '"')
+    .replace(/…/g, "...")
+    .replace(/[—―]/g, " - ")
+    .replace(/[–‐‑−]/g, "-")
+    .replace(/[^\x20-\x7e]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Passages written to be typed, using words the student is trying to learn.
+ *
+ * This is the one AI feature here that is asked for *ahead* of being wanted —
+ * the caller keeps a few in hand so the next test starts instantly (see
+ * prefetch.js). That shapes the request: several at once, because one round
+ * trip for four passages costs a fraction of four round trips, and a batch is
+ * what a cache wants anyway.
+ *
+ * What leaves the device is the requested length and the bank words to build
+ * around — the same headwords essay review already sends, and no draft.
+ */
+export async function aiQuotes(settings, { bankWords = [], length = "medium", count = 3, avoid = [] } = {}) {
+  const bounds = PASSAGE_BOUNDS[length] ?? PASSAGE_BOUNDS.medium;
+  const wanted = Math.min(6, Math.max(1, Math.round(count)));
+  const words = bankWords
+    .map((word) => String(word ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 40);
+
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{passages: [{"text": string, "words": string[]}]}')}`,
+    prompt: [
+      `Write ${wanted} original passages for a typing practice test.`,
+      `Each must be between ${bounds[0]} and ${bounds[1]} characters long — count them.`,
+      words.length
+        ? `Build them around these words from the student's vocabulary bank, using two or three per passage, inflected naturally: ${words.join(", ")}. "words" lists the bank words that passage actually uses.`
+        : 'Write on any subject that suits analytical prose. "words" may be empty.',
+      "Each passage is continuous prose in complete sentences — no lists, no headings, no dialogue attribution, no line breaks.",
+      "Use only characters found on a standard keyboard: straight quotes and apostrophes, no em dashes, no accents.",
+      "They should read as considered writing worth typing, not as filler.",
+      avoid.length ? `Do not repeat the openings you have used before: ${avoid.slice(0, 8).join(" / ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    maxTokens: 350 + wanted * Math.ceil(bounds[1] / 2),
+    temperature: 0.95, // variety is the point; four near-identical passages are one passage
+  });
+
+  const rows = Array.isArray(parsed.passages)
+    ? parsed.passages
+    : Array.isArray(parsed)
+      ? parsed
+      : [];
+
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const text = typeable(stripEmphasis(typeof row === "string" ? row : row?.text));
+    if (!text) continue;
+    // A model asked for 300 characters will sometimes send 700. Length is the
+    // whole basis of the length setting, so a passage that misses its class is
+    // dropped rather than quietly filed under the wrong one.
+    if (text.length < bounds[0] * 0.8 || text.length > bounds[1] * 1.25) continue;
+    const key = text.toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      text,
+      words: asStringArray(typeof row === "string" ? [] : row?.words, 10).map((w) => w.toLowerCase()),
+    });
+  }
+
+  if (!out.length) throw new Error("No usable passages came back. Try again.");
+  return { passages: out };
+}
+
 /* ---- feature: nuance comparison ---- */
 
 /**

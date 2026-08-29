@@ -1,0 +1,569 @@
+/* The typing test.
+   Kept out of the main stylesheet the way statistics is, so the feature stays
+   one self-contained view.
+
+   It borrows nothing from the usual typing-test look: the passages are
+   nineteenth-century prose, so they are set in the same Charter serif the bank
+   sets its headwords in, on the same paper, with the same one red pen for
+   everything that is wrong. Untyped text is the faint grey lexis uses for
+   things not yet done; typed-and-correct text is full ink. Reading the line
+   ahead and seeing how far you have come are then the same gesture. */
+
+#view-typing {
+  /* Wider than the reading views: a passage broken every six words is a test
+     of scrolling rather than of typing. */
+  max-width: 900px;
+  --tt-font-size: 1.3rem;
+  --tt-line-width: 65ch;
+  --tt-caret-speed: 120ms;
+  --tt-scroll-speed: 180ms;
+}
+
+/* The field that owns the keyboard. Off screen rather than display:none,
+   because a hidden input cannot be focused and a phone would never show its
+   keyboard. */
+.tt-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  left: -9999px;
+  top: 0;
+}
+
+/* ---- the bar of chips ---- */
+
+.tt-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 14px;
+}
+
+.tt-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tt-chips-label,
+.tt-metric-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-right: 4px;
+}
+
+.tt-chip {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--faint);
+  border: 1px solid transparent;
+  transition: color 120ms ease, background 120ms ease;
+  white-space: nowrap;
+}
+
+.tt-chip:hover {
+  color: var(--ink);
+  background: var(--wash);
+}
+
+.tt-chip-on {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.tt-chip-on:hover {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.tt-chip-wide {
+  border-color: var(--hairline);
+}
+
+.tt-bar-tools {
+  margin-left: auto;
+}
+
+.tt-notice {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 18px;
+  min-height: 1.2em;
+}
+
+.tt-notice-warn {
+  color: var(--pen);
+}
+
+/* ---- the meter above the passage ---- */
+
+.tt-meter {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  margin-bottom: 14px;
+  min-height: 26px;
+}
+
+.tt-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--serif);
+  font-size: 21px;
+  color: var(--pen);
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-progress {
+  flex: 1;
+  height: 2px;
+  background: var(--hairline);
+  align-self: center;
+}
+
+.tt-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--pen);
+  transition: width 120ms linear;
+}
+
+/* ---- the passage ---- */
+
+.tt-scroller {
+  position: relative;
+  overflow: hidden;
+  /* Three lines of it, so the eye has somewhere to go without the page
+     jumping under the caret. */
+  height: calc(var(--tt-font-size) * 1.65 * 3);
+  max-width: var(--tt-line-width);
+  cursor: text;
+}
+
+.tt-words {
+  font-family: var(--serif);
+  font-size: var(--tt-font-size);
+  line-height: 1.65;
+  color: var(--faint);
+  transition: transform var(--tt-scroll-speed) ease;
+  user-select: none;
+}
+
+.tt-word {
+  display: inline-block;
+  white-space: nowrap;
+  margin-right: 0.32em;
+  position: relative;
+}
+
+/* An underline that says "this is one of yours" without shouting it. */
+.tt-word-bank {
+  box-shadow: inset 0 -1px 0 0 var(--hairline);
+}
+
+.tt-c {
+  white-space: pre;
+}
+
+.tt-correct {
+  color: var(--ink);
+}
+
+.tt-incorrect {
+  color: var(--pen);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.tt-missed {
+  color: var(--pen);
+  opacity: 0.55;
+}
+
+.tt-extra {
+  color: var(--pen);
+  opacity: 0.7;
+  text-decoration: line-through;
+}
+
+/* Highlight modes: letter follows the caret, word lifts the whole word. */
+[data-highlight="word"] .tt-word-active,
+[data-highlight="letter"] .tt-word-active {
+  color: var(--ink);
+}
+
+[data-highlight="word"] .tt-word:not(.tt-word-active) .tt-c:not(.tt-correct):not(.tt-incorrect) {
+  opacity: 0.65;
+}
+
+/* A word left behind with something wrong in it. Marked at the word level as
+   well as the character level, because at speed you scroll past the letter
+   and only notice the word. */
+.tt-word-error {
+  box-shadow: inset 0 -1px 0 0 var(--pen);
+}
+
+/* Indicate typos "below": the letters actually typed, small, under the word. */
+.tt-word-typo::after {
+  content: attr(data-typed);
+  position: absolute;
+  left: 0;
+  top: 100%;
+  font-size: 0.5em;
+  line-height: 1;
+  color: var(--pen);
+  opacity: 0.8;
+  letter-spacing: 0.02em;
+}
+
+/* Blind mode means blind: nothing on this screen says how it is going. */
+.tt-blind .tt-correct,
+.tt-blind .tt-incorrect,
+.tt-blind .tt-missed,
+.tt-blind .tt-extra {
+  color: var(--faint);
+  text-decoration: none;
+  opacity: 1;
+}
+
+/* ---- the caret ---- */
+
+.tt-caret {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  transform: translate(var(--tt-caret-x, 0), var(--tt-caret-y, 0));
+  transition: transform var(--tt-caret-speed) ease;
+  height: var(--tt-caret-h, 1.6em);
+  width: var(--tt-caret-w, 2px);
+}
+
+[data-caret="line"] .tt-caret {
+  width: 2px;
+  background: var(--pen);
+}
+
+[data-caret="block"] .tt-caret {
+  background: var(--pen);
+  opacity: 0.28;
+}
+
+[data-caret="outline"] .tt-caret {
+  border: 1px solid var(--pen);
+}
+
+[data-caret="underline"] .tt-caret {
+  top: auto;
+  height: 2px;
+  background: var(--pen);
+  transform: translate(var(--tt-caret-x, 0), calc(var(--tt-caret-y, 0) + var(--tt-caret-h, 1.6em) - 2px));
+}
+
+[data-caret="off"] .tt-caret {
+  display: none;
+}
+
+/* It blinks only where a blink means something: with the keyboard in hand,
+   saying "you are here". Behind the blur it would just be movement. */
+.tt-engaged .tt-caret {
+  animation: tt-blink 1.1s step-end infinite;
+}
+
+@keyframes tt-blink {
+  50% {
+    opacity: 0.15;
+  }
+}
+
+/* Until the field has focus, the passage steps back and says so. */
+#view-typing:not(.tt-engaged) .tt-words {
+  filter: blur(1.6px);
+  opacity: 0.7;
+}
+
+#view-typing:not(.tt-engaged) .tt-scroller::after {
+  content: "click, or press a key, to type";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--sans);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* ---- tape mode ---- */
+
+[data-tape="word"] .tt-scroller,
+[data-tape="letter"] .tt-scroller {
+  height: calc(var(--tt-font-size) * 1.65);
+  max-width: 100%;
+}
+
+[data-tape="word"] .tt-words,
+[data-tape="letter"] .tt-words {
+  white-space: nowrap;
+  transition: transform var(--tt-scroll-speed) ease;
+}
+
+/* ---- caps lock ---- */
+
+.tt-caps .tt-scroller::before {
+  content: "caps lock";
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--paper);
+  background: var(--pen);
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+/* ---- attribution and hints ---- */
+
+.tt-source {
+  margin-top: 18px;
+  font-size: 12px;
+  color: var(--faint);
+  max-width: var(--tt-line-width);
+}
+
+.tt-source-ai {
+  color: var(--pen);
+}
+
+.tt-source-bank {
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+}
+
+.tt-hint {
+  margin-top: 22px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  opacity: 0.75;
+}
+
+.tt-foot {
+  margin-top: 8px;
+}
+
+/* ---- the result ---- */
+
+.tt-result-head {
+  display: flex;
+  gap: 44px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.tt-big-value {
+  display: block;
+  font-family: var(--serif);
+  font-size: 56px;
+  font-weight: 400;
+  line-height: 1;
+  color: var(--pen);
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-big-label {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tt-best {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--pen);
+  margin: 12px 0 0;
+}
+
+.tt-failed {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--pen);
+  margin: 12px 0 0;
+}
+
+.tt-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  margin: 22px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+
+.tt-facts dt {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.tt-facts dd {
+  font-family: var(--serif);
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.tt-chart-wrap {
+  margin: 26px 0 0;
+}
+
+.tt-chart {
+  width: 100%;
+  height: 120px;
+  overflow: visible;
+}
+
+.tt-chart-line {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+
+.tt-chart-error {
+  fill: var(--pen);
+}
+
+.tt-result-bank {
+  margin-top: 22px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.tt-result-bank-label {
+  font-variant: small-caps;
+  letter-spacing: 0.05em;
+}
+
+.tt-bank-chip {
+  font-family: var(--serif);
+  font-size: 15px;
+  color: var(--ink);
+  border-bottom: 1px solid var(--pen);
+  cursor: help;
+}
+
+.tt-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 30px;
+}
+
+/* ---- the settings panel ---- */
+
+.tt-settings {
+  margin-top: 34px;
+  padding-top: 22px;
+  border-top: 1px solid var(--hairline);
+}
+
+.tt-settings-block {
+  margin-bottom: 30px;
+}
+
+.tt-settings-title {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 400;
+  margin-bottom: 4px;
+}
+
+.tt-settings-blurb {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 14px;
+  max-width: 52ch;
+}
+
+.tt-setting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px 20px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.tt-setting-label {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.tt-setting-label small {
+  display: block;
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 2px;
+  max-width: 48ch;
+}
+
+.tt-setting-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.tt-number {
+  width: 84px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  color-scheme: light dark;
+  text-align: right;
+  user-select: text;
+}
+
+/* ---- narrow windows ---- */
+
+@media (max-width: 760px) {
+  #view-typing {
+    --tt-line-width: 100%;
+  }
+
+  .tt-result-head {
+    gap: 28px;
+  }
+
+  .tt-big-value {
+    font-size: 40px;
+  }
+}
