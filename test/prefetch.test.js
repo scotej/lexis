@@ -82,6 +82,34 @@ test("taking one tops the queue back up", async () => {
   assert.equal(queue.state().ready, 3, "refilled behind the typist");
 });
 
+test("a batch is only ever asked for the room that is left", async () => {
+  // What lets the caller size its request to `want` and stop there. Asking
+  // for more than this was never cheaper — a top-up runs once per passage
+  // taken either way — and the surplus was dropped by the cap below, which on
+  // a key rationed by the day is a request's worth of nothing.
+  const clock = fakeClock();
+  const asked = [];
+  const queue = createPrefetcher({
+    produce: (want) => {
+      asked.push(want);
+      return Array.from({ length: want }, (_, i) => `p${asked.length}-${i}`);
+    },
+    size: 3,
+    lowWater: 2,
+    ...clock,
+  });
+
+  queue.prime();
+  await settle();
+  queue.take();
+  await settle();
+  queue.take();
+  await settle();
+
+  assert.deepEqual(asked, [3, 1, 1], "three to fill it, then one for each taken");
+  assert.equal(queue.state().ready, 3, "and never more than it can hold");
+});
+
 test("a passage is never handed out twice", async () => {
   const clock = fakeClock();
   let made = 0;

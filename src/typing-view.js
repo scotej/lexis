@@ -363,6 +363,17 @@ function rebuildPool() {
 /* ---- the AI queue ---- */
 
 /**
+ * How many AI passages are held ready at once.
+ *
+ * Three is enough that the next test always starts instantly and few enough
+ * that a bank word changed, or a length unticked, throws away almost nothing:
+ * the queue is emptied whenever the settings behind it move, and everything
+ * in it was paid for. It is also the ceiling on how many can exist — batches
+ * are sized to the room left, so nothing is written that the queue cannot keep.
+ */
+const AI_QUEUE_SIZE = 3;
+
+/**
  * One string describing everything a queued passage was built for.
  *
  * When it changes the queue is thrown away, because a passage written around
@@ -403,8 +414,8 @@ function refreshAiQueue() {
   aiQueueKey = key;
   aiQueue = createPrefetcher({
     produce: produceAiPassages,
-    size: 3,
-    lowWater: 2,
+    size: AI_QUEUE_SIZE,
+    lowWater: AI_QUEUE_SIZE - 1,
     onChange: (state) => {
       const wasEmpty = aiState.ready === 0;
       aiState = state;
@@ -432,9 +443,11 @@ async function produceAiPassages(want) {
     // overshoots medium has still written a long passage, and the typist who
     // ticked both asked for exactly that.
     accept: lengths,
-    // Two at a time at least: a round trip for one passage costs the same as a
-    // round trip for three, and the queue would rather be full than thrifty.
-    count: Math.min(4, Math.max(2, want)),
+    // Exactly the room there is, and no more. Asking for two when the queue
+    // could hold one was meant to save round trips and saved none — a top-up
+    // runs once per passage taken either way — so the surplus was written,
+    // paid for, and dropped on the floor by the queue's own cap.
+    count: want,
     avoid: recentAiOpenings,
   });
 
