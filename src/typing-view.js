@@ -428,6 +428,10 @@ async function produceAiPassages(want) {
   const { passages } = await aiQuotes(ai, {
     bankWords: targetWords(),
     length,
+    // Written for one class, but kept if it lands in any of them. A model that
+    // overshoots medium has still written a long passage, and the typist who
+    // ticked both asked for exactly that.
+    accept: lengths,
     // Two at a time at least: a round trip for one passage costs the same as a
     // round trip for three, and the queue would rather be full than thrifty.
     count: Math.min(4, Math.max(2, want)),
@@ -594,9 +598,36 @@ function typeChar(char) {
   run?.type(char);
 }
 
+/**
+ * The key that always means "a different passage".
+ *
+ * Shift+tab was meant to be that, and on the desktop build it never arrives.
+ * Plain tab reaches this handler and shift+tab does not, and nothing in lexis
+ * looks at either — so something upstream of the page is taking it, the
+ * webview or the window manager claiming it for backwards focus navigation.
+ * Whatever holds it, the page cannot have it back, and the one shortcut for
+ * skipping a passage you did not want was unreachable.
+ *
+ * A backtick has no such owner, and — unlike every other key on
+ * the board — it is never something the typist is being asked to type: there
+ * is not one in the whole corpus, and `typeable()` folds the model's into
+ * apostrophes before a passage ever reaches the test.
+ *
+ * Zen is left out. There is no passage to skip there, and its whole promise is
+ * that the page takes whatever you type.
+ */
+const SKIP_KEY = "`";
+
 function onKeyDown(e) {
   if (!run) return;
   const quick = settings.quickRestart;
+
+  if (e.key === SKIP_KEY && settings.mode !== "zen" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    repeatOf = null;
+    nextTest();
+    return;
+  }
 
   if (e.key === "Tab") {
     if (quick === "tab") {
@@ -1530,7 +1561,8 @@ function hintLine() {
   if (settings.mode === "zen") {
     bits.push(settings.quickRestart === "enter" ? "shift+enter to finish" : "enter to finish");
   }
-  if (key) bits.push(`${key} to restart`, `shift+${key} for a new one`);
+  if (key) bits.push(`${key} to restart`);
+  if (settings.mode !== "zen") bits.push("` for a new one");
   if (settings.quickRestart !== "esc") bits.push("esc to leave the keyboard");
   bits.push("just start typing");
   hint.textContent = bits.join(" · ");

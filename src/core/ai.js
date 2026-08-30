@@ -262,6 +262,27 @@ export function privacyRouting(settings) {
 }
 
 /**
+ * Room for a model that thinks before it writes.
+ *
+ * `max_tokens` is a ceiling over reasoning *and* answer together, and the
+ * reasoning goes first. Every budget in this module was worked out from the
+ * size of the answer alone, which is how a request for three short passages
+ * came to allow 500 tokens, meet a model that spent 523 of them deliberating,
+ * and come back with the field empty — reported as "OpenRouter returned an
+ * empty response", which sent the student off to check a key that was fine.
+ *
+ * Headroom rather than `reasoning: {enabled: false}`, which looks like the
+ * tidier answer and is not: several endpoints reject it outright with "reasoning
+ * is mandatory for this endpoint and cannot be disabled", turning a batch that
+ * merely came back short into a hard 400.
+ *
+ * The ceiling is raised for every feature rather than tuned per caller,
+ * because it is a limit and not a bill: a model that does not reason never
+ * reaches it, and nobody is charged for tokens no model generated.
+ */
+const REASONING_HEADROOM = 1500;
+
+/**
  * One completion, plus the one fact a caller needs to read a bad answer: the
  * model was still talking when the token limit stopped it.
  */
@@ -269,7 +290,7 @@ async function complete(settings, { system, prompt, maxTokens = 700, temperature
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
   const body = {
     model: normalizeModel(settings.model),
-    max_tokens: maxTokens,
+    max_tokens: maxTokens + REASONING_HEADROOM,
     temperature,
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
@@ -452,6 +473,19 @@ function balancedSlice(text, from) {
 /** How many openers are worth trying before calling the reply unreadable. */
 const MAX_JSON_CANDIDATES = 20;
 
+/**
+ * An object or array with nothing in it: parseable, but never the answer.
+ *
+ * Kept apart because a model that thinks out loud writes its own schema
+ * first — “…each having "text": string and "words": string[]” — and that bare
+ * `string[]` ends in a perfectly valid empty array. Reached before the real
+ * JSON further down the reply, it wins, and every caller then reads an empty
+ * list off it and reports that nothing came back.
+ */
+function isEmptyValue(value) {
+  return Array.isArray(value) ? value.length === 0 : Object.keys(value).length === 0;
+}
+
 /** Pulls the outermost JSON object or array out of whatever came back. */
 export function parseJSONLoose(text) {
   const cleaned = stripFenceLines(String(text ?? "").replace(/^\uFEFF/, "")).trim();
@@ -463,18 +497,32 @@ export function parseJSONLoose(text) {
   // Each opening brace or bracket in turn, outermost first: a preamble may
   // contain one of its own (“Sure {here}: {…}”), so the first candidate
   // is not always the answer.
+  //
+  // An empty one is held back rather than returned, because it is only the
+  // answer if nothing else parses. It costs nothing to skip, either: an empty
+  // value is at most an opener, whitespace and its closer, so it can never be
+  // the expensive candidate MAX_JSON_CANDIDATES exists to bound — and counting it
+  // would let a paragraph of reasoning exhaust the search before the search
+  // ever reached the JSON underneath it.
+  let fallback;
   let tried = 0;
   for (let i = 0; i < cleaned.length && tried < MAX_JSON_CANDIDATES; i++) {
     const ch = cleaned[i];
     if (ch !== "{" && ch !== "[") continue;
-    tried++;
     const slice = balancedSlice(cleaned, i);
     if (!slice) continue;
     const value = attempt(slice);
-    if (value !== undefined) return value;
+    if (value === undefined) {
+      tried++;
+      continue;
+    }
+    if (!isEmptyValue(value)) return value;
+    fallback ??= value;
   }
 
   const whole = attempt(cleaned);
+  if (whole !== undefined && !isEmptyValue(whole)) return whole;
+  if (fallback !== undefined) return fallback;
   if (whole !== undefined) return whole;
   throw new Error("The response wasn’t the shape we asked for. Try again.");
 }
@@ -675,6 +723,68 @@ const PASSAGE_BOUNDS = {
 };
 
 /**
+ * The voice a typing passage is written in, which is deliberately not the
+ * tutor's.
+ *
+ * Everywhere else in this module the model is speaking *to* a student about
+ * their own writing, and REGISTER holds it there: analytical, careful, quoting
+ * the draft back. A passage is addressed to nobody. It is something to type,
+ * and it sits beside a corpus of film dialogue, novels, speeches and proverbs
+ * chosen because they are worth typing. Held to the tutor's register it wrote
+ * the same batch every time — three paragraphs on criticism and machination,
+ * whatever the bank words were — which is a dull thing to meet at speed.
+ */
+const PASSAGE_REGISTER = [
+  "You write short passages for a typing test: clear, well-made prose that is a pleasure to type.",
+  "Range widely — narrative, description, argument, reportage, reflection, an aside with some wit in it.",
+  "Vary the subject and the voice from one passage to the next; three turns around one theme is one passage.",
+].join(" ");
+
+/**
+ * Characters per word, the space after it included.
+ *
+ * A length class is measured in characters, but it cannot be *asked for* in
+ * characters: a model never sees them, only tokens, so “between 110 and 300
+ * characters — count them” asks for a number it can only guess at. It guesses
+ * high. Passages of 420–440 characters came back for a class that stops at
+ * 300, and every one was discarded — a whole batch thrown away, which is the
+ * failure this constant exists to prevent. Worse, the instruction to count
+ * sends a model that reasons aloud into doing exactly that, at length, instead
+ * of writing.
+ *
+ * Words it can hold to, because words are what it emits. Analytical prose runs
+ * a little over five letters a word; six with the space is close enough for a
+ * budget whose only job is to land inside a range nearly three times as wide
+ * as it is tall.
+ */
+const CHARS_PER_WORD = 6;
+
+function wordBudget([lo, hi]) {
+  // Eight words is the floor: below it the arithmetic starts asking for
+  // sentences too short to be prose at all.
+  return { lo: Math.max(8, Math.round(lo / CHARS_PER_WORD)), hi: Math.round(hi / CHARS_PER_WORD) };
+}
+
+/**
+ * The character windows a passage may land in to be worth keeping.
+ *
+ * Plural, because the typist picks a *set* of lengths and a batch is written
+ * for one of them. A passage aimed at medium that comes out long is still
+ * exactly what was asked for if long is ticked too — judging it against only
+ * the class it was aimed at threw that away, and when a batch overshot
+ * together, as batches do, it threw away every passage in it. Someone who has
+ * ticked every length should never see an empty batch, and now doesn't: the
+ * four windows meet, so they cover 36 characters to 1375 without a gap.
+ */
+function acceptedWindows(classes) {
+  const windows = classes
+    .map((name) => PASSAGE_BOUNDS[name])
+    .filter(Boolean)
+    .map(([lo, hi]) => [lo * 0.8, hi * 1.25]);
+  return windows.length ? windows : [[PASSAGE_BOUNDS.medium[0] * 0.8, PASSAGE_BOUNDS.medium[1] * 1.25]];
+}
+
+/**
  * Only what a keyboard has keys for.
  *
  * The corpus is built ASCII-clean; a model is not, and it reaches for typographic
@@ -708,8 +818,15 @@ function typeable(text) {
  * What leaves the device is the requested length and the bank words to build
  * around — the same headwords essay review already sends, and no draft.
  */
-export async function aiQuotes(settings, { bankWords = [], length = "medium", count = 3, avoid = [] } = {}) {
+export async function aiQuotes(
+  settings,
+  { bankWords = [], length = "medium", count = 3, avoid = [], accept = [] } = {}
+) {
   const bounds = PASSAGE_BOUNDS[length] ?? PASSAGE_BOUNDS.medium;
+  const budget = wordBudget(bounds);
+  // What the batch is written for, and what it may come back as.
+  const classes = accept.length ? accept : [length];
+  const windows = acceptedWindows(classes);
   const wanted = Math.min(6, Math.max(1, Math.round(count)));
   const words = bankWords
     .map((word) => String(word ?? "").trim())
@@ -717,16 +834,19 @@ export async function aiQuotes(settings, { bankWords = [], length = "medium", co
     .slice(0, 40);
 
   const parsed = await chatJSON(settings, {
-    system: `${REGISTER} ${jsonOnlyInstruction('{passages: [{"text": string, "words": string[]}]}')}`,
+    system: `${PASSAGE_REGISTER} ${jsonOnlyInstruction('{passages: [{"text": string, "words": string[]}]}')}`,
     prompt: [
       `Write ${wanted} original passages for a typing practice test.`,
-      `Each must be between ${bounds[0]} and ${bounds[1]} characters long — count them.`,
+      `Each passage must be ${budget.lo} to ${budget.hi} words long — aim for about ${Math.round((budget.lo + budget.hi) / 2)}.`,
+      "Stop at the budget even if there is more to say: a passage that runs over is discarded, so err short.",
       words.length
-        ? `Build them around these words from the student's vocabulary bank, using two or three per passage, inflected naturally: ${words.join(", ")}. "words" lists the bank words that passage actually uses.`
-        : 'Write on any subject that suits analytical prose. "words" may be empty.',
-      "Each passage is continuous prose in complete sentences — no lists, no headings, no dialogue attribution, no line breaks.",
+        ? `Work two or three of these words from the typist's vocabulary bank into each passage, inflected naturally and without straining for them: ${words.join(", ")}. "words" lists the ones that passage actually uses.`
+        : 'Write on whatever subjects you like. "words" may be empty.',
+      // The only two rules the typing test itself imposes: one line, and keys
+      // a keyboard has. Everything else is left to the model, because a page
+      // of prose that all sounds alike is the failure mode that matters here.
+      "Keep each passage on one line — no line breaks, no lists, no headings.",
       "Use only characters found on a standard keyboard: straight quotes and apostrophes, no em dashes, no accents.",
-      "They should read as considered writing worth typing, not as filler.",
       avoid.length ? `Do not repeat the openings you have used before: ${avoid.slice(0, 8).join(" / ")}` : "",
     ]
       .filter(Boolean)
@@ -743,13 +863,19 @@ export async function aiQuotes(settings, { bankWords = [], length = "medium", co
 
   const seen = new Set();
   const out = [];
+  let missized = 0;
   for (const row of rows) {
     const text = typeable(stripEmphasis(typeof row === "string" ? row : row?.text));
     if (!text) continue;
-    // A model asked for 300 characters will sometimes send 700. Length is the
-    // whole basis of the length setting, so a passage that misses its class is
-    // dropped rather than quietly filed under the wrong one.
-    if (text.length < bounds[0] * 0.8 || text.length > bounds[1] * 1.25) continue;
+    // A word budget lands far closer than a character count did, but "close"
+    // is not "inside": a model asked for fifty words still sometimes sends
+    // ninety. Length is the whole basis of the length setting, so a passage
+    // outside every length the typist asked for is dropped rather than filed
+    // under one they didn't.
+    if (!windows.some(([lo, hi]) => text.length >= lo && text.length <= hi)) {
+      missized++;
+      continue;
+    }
     const key = text.toLowerCase().replace(/[^a-z0-9 ]/g, "");
     if (seen.has(key)) continue;
     seen.add(key);
@@ -759,7 +885,19 @@ export async function aiQuotes(settings, { bankWords = [], length = "medium", co
     });
   }
 
-  if (!out.length) throw new Error("No usable passages came back. Try again.");
+  if (!out.length) {
+    // "Try again" is the wrong advice when the batch was good prose that
+    // simply came out the wrong size — the same model, at this temperature,
+    // will do it again, and the typist presses the button all afternoon. Only
+    // one of these two failures is worth a second press, so they say so.
+    const where = classes.length === 1 ? `at the ${classes[0]} length` : "at any length you have picked";
+    throw new Error(
+      missized
+        ? `The model wrote ${missized === 1 ? "a passage" : `${missized} passages`}, but nothing ${where}. ` +
+          "Try another length, or a model that holds to a budget."
+        : "No usable passages came back. Try again."
+    );
+  }
   return { passages: out };
 }
 
