@@ -262,36 +262,29 @@ export function privacyRouting(settings) {
 }
 
 /**
- * Room for a model that thinks before it writes.
- *
- * `max_tokens` is a ceiling over reasoning *and* answer together, and the
- * reasoning goes first. Every budget in this module was worked out from the
- * size of the answer alone, which is how a request for three short passages
- * came to allow 500 tokens, meet a model that spent 523 of them deliberating,
- * and come back with the field empty — reported as "OpenRouter returned an
- * empty response", which sent the student off to check a key that was fine.
- *
- * Headroom rather than `reasoning: {enabled: false}`, which looks like the
- * tidier answer and is not: several endpoints reject it outright with "reasoning
- * is mandatory for this endpoint and cannot be disabled", turning a batch that
- * merely came back short into a hard 400.
- *
- * The ceiling is raised for every feature rather than tuned per caller,
- * because it is a limit and not a bill: a model that does not reason never
- * reaches it, and nobody is charged for tokens no model generated.
- */
-const REASONING_HEADROOM = 1500;
-
-/**
  * One completion, plus the one fact a caller needs to read a bad answer: the
  * model was still talking when the token limit stopped it.
+ *
+ * There is no `max_tokens`. There used to be one per feature, worked out from
+ * how long the answer ought to be — a reasonable-looking sum and a wrong one,
+ * because the ceiling covers reasoning *and* answer together and the reasoning
+ * goes first. A request for three short passages allowed 500 tokens, met a
+ * model that spent 523 of them thinking, and came back with the field empty.
+ * Rationing the part that has to happen before the answer only ever buys an
+ * empty answer, so nothing here is rationed: the provider's own limit is the
+ * limit.
+ *
+ * And reasoning is asked for rather than suppressed. None of this is a race,
+ * the answers are better for the thinking, and it arrives in its own field —
+ * `messageText()` reads `content`, so a model's deliberation never reaches
+ * the parser.
  */
-async function complete(settings, { system, prompt, maxTokens = 700, temperature = 0.4 }) {
+async function complete(settings, { system, prompt, temperature = 0.4 }) {
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
   const body = {
     model: normalizeModel(settings.model),
-    max_tokens: maxTokens + REASONING_HEADROOM,
     temperature,
+    reasoning: { enabled: true },
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
       { role: "user", content: prompt },
@@ -300,12 +293,27 @@ async function complete(settings, { system, prompt, maxTokens = 700, temperature
   const provider = privacyRouting(settings);
   if (provider) body.provider = provider;
 
-  const data = await apiJSON(
-    "/chat/completions",
-    settings.key,
-    { method: "POST", body: JSON.stringify(body) },
-    { strict: Boolean(provider) }
-  );
+  const ask = (payload) =>
+    apiJSON(
+      "/chat/completions",
+      settings.key,
+      { method: "POST", body: JSON.stringify(payload) },
+      { strict: Boolean(provider) }
+    );
+
+  let data;
+  try {
+    data = await ask(body);
+  } catch (err) {
+    // Some endpoints refuse to be told about reasoning at all, exactly as
+    // others refuse to have it turned off ("reasoning is mandatory for this
+    // endpoint and cannot be disabled" is a real 400 from this pool). Neither
+    // opinion is worth failing a student's request over, so the field comes
+    // off and the ask goes again without it.
+    if (!/reasoning/i.test(String(err?.message ?? ""))) throw err;
+    const { reasoning, ...plain } = body;
+    data = await ask(plain);
+  }
   recordUsage(data?.usage);
   const choice = data?.choices?.[0];
   const text = messageText(choice?.message);
@@ -558,8 +566,25 @@ const REGISTER = [
   "Never invent quotations that are not in the material you are given.",
 ].join(" ");
 
+/**
+ * What the answer has to look like, said plainly enough to survive thinking.
+ *
+ * "Respond with JSON only" was written for a model that answers the instant
+ * it is asked. Models here are now invited to think first, and a rule that
+ * reads as "do not write anything but JSON" is in tension with that — so the
+ * two are separated: think as long as you like, and then let the *reply* be
+ * the object. Naming the fields as required, with a stated empty value, is
+ * what stops the other half of the trouble: a shape that arrives a key short
+ * and reads downstream as a blank answer.
+ */
 function jsonOnlyInstruction(schemaHint) {
-  return `Respond with JSON only — no preamble, no markdown fences. Shape: ${schemaHint}`;
+  return [
+    "Think it through for as long as you need to.",
+    "Your reply itself must then be one JSON object and nothing else:",
+    "no words before it, no markdown fences around it, no commentary after it.",
+    `Shape: ${schemaHint}.`,
+    "Include every field named there — where you have nothing for one, give an empty string or an empty list rather than dropping it.",
+  ].join(" ");
 }
 
 /* ---- feature: essay review ---- */
@@ -601,7 +626,6 @@ export async function aiEssayReview(settings, { essay, bankWords = [], topicNote
       '{summary, strengths: string[], improvements: [{title, detail}], focus: string[]}'
     )}`,
     prompt,
-    maxTokens: 1600,
     temperature: 0.6,
   });
 
@@ -642,7 +666,6 @@ export async function aiSimilarWords(settings, word) {
       "Prefer precise upgrades over obscure ones; include one plainer option where useful.",
       "Exclude “" + w + "” itself and simple inflections of it.",
     ].join("\n"),
-    maxTokens: 600,
     temperature: 0.5,
   });
 
@@ -700,7 +723,6 @@ export async function aiExampleSentences(settings, { word, context = "" }) {
         : "Keep them generic enough to fit literary-analysis writing, but never mention that they are generic.",
       "Vary sentence openings. No numbering, no explanation outside the JSON.",
     ].join("\n"),
-    maxTokens: 400,
     temperature: 0.7,
   });
 
@@ -837,21 +859,23 @@ export async function aiQuotes(
     system: `${PASSAGE_REGISTER} ${jsonOnlyInstruction('{passages: [{"text": string, "words": string[]}]}')}`,
     prompt: [
       `Write ${wanted} original passages for a typing practice test.`,
-      `Each passage must be ${budget.lo} to ${budget.hi} words long — aim for about ${Math.round((budget.lo + budget.hi) / 2)}.`,
-      "Stop at the budget even if there is more to say: a passage that runs over is discarded, so err short.",
+      // Length is a target, not a gate. It reads as a gate to a model — "must
+      // be between" produced passages counted out to the letter and stiff with
+      // it — and the one that matters is applied here anyway, on what comes
+      // back. So this asks the way you would ask a person: roughly this long.
+      `Aim for around ${Math.round((budget.lo + budget.hi) / 2)} words each — anywhere from about ${budget.lo} to ${budget.hi} sits comfortably, and a little either side of that is no disaster. Where you are torn, the shorter one is the safer guess.`,
       words.length
-        ? `Work two or three of these words from the typist's vocabulary bank into each passage, inflected naturally and without straining for them: ${words.join(", ")}. "words" lists the ones that passage actually uses.`
+        ? `These are the words the typist is learning: ${words.join(", ")}. Two or three a passage is about right, inflected however the sentence wants them — but only where one genuinely belongs. A passage carrying one word well beats a passage straining to carry three. "words" lists the ones it actually used.`
         : 'Write on whatever subjects you like. "words" may be empty.',
-      // The only two rules the typing test itself imposes: one line, and keys
-      // a keyboard has. Everything else is left to the model, because a page
-      // of prose that all sounds alike is the failure mode that matters here.
-      "Keep each passage on one line — no line breaks, no lists, no headings.",
-      "Use only characters found on a standard keyboard: straight quotes and apostrophes, no em dashes, no accents.",
+      // The two rules the typing test itself imposes, and the reason they are
+      // the only firm ones here: a line break or a curly quote is a keystroke
+      // the typist cannot make, which is an error they cannot correct.
+      "Keep each passage on a single line, as continuous prose — no line breaks, no lists, no headings.",
+      "Stay inside what a standard keyboard can type: straight quotes and apostrophes, no em dashes, no accented letters.",
       avoid.length ? `Do not repeat the openings you have used before: ${avoid.slice(0, 8).join(" / ")}` : "",
     ]
       .filter(Boolean)
       .join("\n"),
-    maxTokens: 350 + wanted * Math.ceil(bounds[1] / 2),
     temperature: 0.95, // variety is the point; four near-identical passages are one passage
   });
 
@@ -937,7 +961,6 @@ export async function aiNuance(settings, words) {
       'For each, "nuance" states in one or two sentences what it specifically implies and where it would feel wrong.',
       '"guidance" then says in one or two sentences which to prefer for analytical essay writing, and why.',
     ].join("\n"),
-    maxTokens: 800,
     temperature: 0.4,
   });
 

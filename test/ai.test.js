@@ -123,6 +123,46 @@ test("chat sends the bearer key, the model, and both roles", async () => {
   assert.equal(sent.messages.at(-1).role, "user");
 });
 
+test("no token ceiling is imposed, and the model is invited to think", async () => {
+  // The ceiling covered reasoning and answer together, and reasoning goes
+  // first — so a budget sized for the answer bought an empty one.
+  await chat(SETTINGS, { prompt: "hello" });
+  const sent = calls[0].body;
+  assert.equal(sent.max_tokens, undefined, "the provider's own limit is the limit");
+  assert.deepEqual(sent.reasoning, { enabled: true });
+});
+
+test("an endpoint with an opinion about reasoning is asked again without it", async () => {
+  // The mirror of "reasoning is mandatory for this endpoint and cannot be
+  // disabled", which this pool really does answer with. Either way the
+  // student's request is worth more than the field.
+  let first = true;
+  globalThis.fetch = (url, init) => {
+    if (first && String(url).endsWith("/chat/completions")) {
+      first = false;
+      calls.push({ path: "/api/v1/chat/completions", body: JSON.parse(init.body) });
+      return json(400, { error: { message: "Reasoning is not supported for this endpoint" } });
+    }
+    return baseFetch(url, init);
+  };
+  const text = await chat(SETTINGS, { prompt: "hello" });
+  assert.match(text, /echo:hello/, "the answer still arrives");
+  assert.deepEqual(calls[0].body.reasoning, { enabled: true }, "asked for once");
+  assert.equal(calls.at(-1).body.reasoning, undefined, "and not asked for twice");
+});
+
+test("a 400 that has nothing to do with reasoning is not retried", async () => {
+  globalThis.fetch = (url, init) => {
+    if (String(url).endsWith("/chat/completions")) {
+      calls.push({ path: "/api/v1/chat/completions", body: JSON.parse(init.body) });
+      return json(400, { error: { message: "context length exceeded" } });
+    }
+    return baseFetch(url, init);
+  };
+  await assert.rejects(() => chat(SETTINGS, { prompt: "hello" }), /context length exceeded/);
+  assert.equal(calls.length, 1, "one attempt, not two");
+});
+
 test("a missing key refuses before any request", async () => {
   await assert.rejects(
     () => chat({ key: "", model: "" }, { prompt: "x" }),

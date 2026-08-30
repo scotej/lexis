@@ -159,8 +159,12 @@ test("the request carries the bank words, the length, and nothing else of the st
   assert.match(prompt, /demise, candour/);
   // Asked in words, because a model cannot count the characters it never sees:
   // medium is 110-300 characters, which is 18-50 words at CHARS_PER_WORD.
-  assert.match(prompt, /18 to 50 words/);
-  assert.doesNotMatch(prompt, /characters long/, "counting characters is not a job a model can do");
+  assert.match(prompt, /around 34 words each/);
+  assert.match(prompt, /about 18 to 50/);
+  assert.doesNotMatch(prompt, /characters/, "counting characters is not a job a model can do");
+  // And asked as a target rather than a gate — the gate is applied to what
+  // comes back, where it can be applied honestly.
+  assert.doesNotMatch(prompt, /\bmust be\b/, "length is a target, not a rule to be counted out");
   assert.equal(sent[0].provider.data_collection, "deny", "strict privacy rides along by default");
 });
 
