@@ -428,6 +428,10 @@ async function produceAiPassages(want) {
   const { passages } = await aiQuotes(ai, {
     bankWords: targetWords(),
     length,
+    // Written for one class, but kept if it lands in any of them. A model that
+    // overshoots medium has still written a long passage, and the typist who
+    // ticked both asked for exactly that.
+    accept: lengths,
     // Two at a time at least: a round trip for one passage costs the same as a
     // round trip for three, and the queue would rather be full than thrifty.
     count: Math.min(4, Math.max(2, want)),

@@ -431,6 +431,27 @@ test("a brace in the preamble doesn't win over the real object", () => {
   assert.deepEqual(parseJSONLoose('Sure {here}: {"a": 1}'), { a: 1 });
 });
 
+test("an empty array in the model's own schema doesn't win over the real answer", () => {
+  // A model that reasons aloud restates the schema before it writes, and
+  // “string[]” ends in a valid empty array. Reached first, it was returned as
+  // the answer — and every caller then read an empty list off it and reported
+  // that nothing had come back.
+  const reply = [
+    'We need a JSON object with key "passages": array of objects each having',
+    '"text": string and "words": string[]. Must be 3 passages.',
+    "",
+    '{"passages": [{"text": "The real one.", "words": ["demise"]}]}',
+  ].join("\n");
+  assert.deepEqual(parseJSONLoose(reply), {
+    passages: [{ text: "The real one.", words: ["demise"] }],
+  });
+});
+
+test("an empty answer still counts when it is the only one on offer", () => {
+  assert.deepEqual(parseJSONLoose("[]"), []);
+  assert.deepEqual(parseJSONLoose("Nothing to report: {}"), {});
+});
+
 test("a fence inside a string value is the student's own text, not a wrapper", () => {
   // Stripping every ``` in the reply ate words out of the middle of a quote
   // of the draft. Only a fence on a line of its own is a wrapper.
