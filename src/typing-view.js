@@ -258,7 +258,7 @@ export function initTypingView(ctx) {
 
   $("tt-scroller").addEventListener("mousedown", (e) => {
     e.preventDefault();
-    focusInput();
+    focusInput({ force: true });
   });
 
   watchForRewraps();
@@ -869,10 +869,15 @@ function syncWordNodes() {
  * chips being pressed were behind a running test. `update()` already declined
  * to focus while the panel was open; the new test it started did not, which is
  * the whole of the bug.
+ *
+ * `force` is the one exception, and it has exactly one caller: a click on the
+ * passage itself. Every other call here is the view helping itself to the
+ * keyboard; that one is a person asking for it, and the panel standing open
+ * behind them is no reason to refuse.
  */
-function focusInput() {
+function focusInput({ force = false } = {}) {
   if (!active) return;
-  if ($("tt-settings")?.hidden === false) return;
+  if (!force && $("tt-settings")?.hidden === false) return;
   const input = $("tt-input");
   if (input && document.activeElement !== input) input.focus({ preventScroll: true });
 }
@@ -1109,12 +1114,14 @@ function remeasure() {
   lineHeightCache = { key: "", value: 0 };
   if (!run) return;
   // The passage has rewrapped, so the line the caret was on is not the line it
-  // is on now. Reset the scroll and let moveCaret find the line again.
+  // is on now. Reset the scroll and let moveCaret find the line again — both
+  // inside the same held transition, or the passage flashes back to line one
+  // and slides down to where it already was.
   lineOffset = 0;
   withoutScrollAnimation(() => {
     $("tt-words").style.transform = "translateY(0)";
+    moveCaret();
   });
-  moveCaret();
 }
 
 /**
