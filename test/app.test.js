@@ -458,10 +458,14 @@ test("a failed lookup leaves a multi-word submission completely unapplied", asyn
 
   await assert.rejects(() => app.addWord("deontic modality"), /couldn’t add “modality”: lookup failed/);
 
+  // A word's definition and its synonyms go out together, so the failing word
+  // still costs both requests. One wasted call on the word that broke the
+  // batch buys every other word its two round trips in parallel.
   assert.deepEqual(lookups, [
     "definition:deontic",
     "synonyms:deontic",
     "definition:modality",
+    "synonyms:modality",
   ]);
   assert.deepEqual(app.listWords(), []);
   assert.equal(storage.saves, 0);
@@ -520,7 +524,11 @@ test("overlapping add requests preserve request order without blocking unrelated
   const secondRejected = assert.rejects(second, /already in your bank/);
   await Promise.resolve();
 
-  assert.deepEqual(lookups, ["definition:deontic"], "the later add must not start its lookup early");
+  assert.deepEqual(
+    lookups,
+    ["definition:deontic", "synonyms:deontic"],
+    "the later add must not start its lookup early"
+  );
 
   await app.deleteWord("alpha");
   assert.equal(bankModel.find(app.getBank(), "alpha"), null, "unrelated mutations must not wait on the lookup");

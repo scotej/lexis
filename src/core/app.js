@@ -26,6 +26,15 @@ import { mergeBanks } from "./merge.js";
 import { todayISO } from "./srs.js";
 import { isGrade } from "./srs.js";
 
+/**
+ * How many words of one batch are looked up at the same time.
+ *
+ * Three: enough that pasting a list of words no longer costs one round trip
+ * per word laid end to end, and few enough to stay a well-mannered guest on
+ * three free public APIs that ask for nothing in return.
+ */
+const LOOKUP_CONCURRENCY = 3;
+
 function migrateBank(raw) {
   const migrated = bankModel.migrate(raw);
   migrated.activity_archive = normalizeActivityArchive(raw?.activity_archive);
@@ -195,10 +204,19 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     /**
      * Adds one or more whitespace-separated words as one transaction.
      *
-     * Addition requests are serialized in request order, and each batch's
-     * lookups stay sequential to avoid bursting the public dictionary APIs. The
-     * bank is not touched until every requested new word has been resolved, so
-     * a bad lookup or failed save cannot leave a half-added batch behind.
+     * Addition *requests* are still serialized in request order — a later add
+     * cannot overtake an earlier one — but the lookups inside one batch are
+     * not. A word's definition and its synonyms come from different hosts and
+     * have nothing to say to each other, so they go out together; and a few
+     * words are looked up at a time rather than one, because five words used
+     * to mean five round trips end to end while every host sat idle for four
+     * of them. LOOKUP_CONCURRENCY is what keeps that a few requests rather
+     * than a burst.
+     *
+     * The bank is not touched until every requested new word has been
+     * resolved, so a bad lookup or failed save cannot leave a half-added batch
+     * behind — and the failure reported is the earliest one in the order the
+     * words were typed, exactly as when they were fetched in that order.
      */
     async addWord(input) {
       const requested = normalizeWordInput(input);
@@ -213,19 +231,48 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         const staleBeforeLookup = supersededAddition(pending, deleteState);
         if (staleBeforeLookup) throw additionSupersededError(staleBeforeLookup);
 
-        const prepared = [];
-        for (const word of pending) {
-          const stale = supersededAddition(pending, deleteState);
-          if (stale) throw additionSupersededError(stale);
-          try {
-            const dict = await lookupDefinition(word);
-            const synonyms = await lookupSynonyms(word);
-            prepared.push({ word, dict, synonyms });
-          } catch (err) {
-            if (requested.length === 1) throw err;
-            throw new Error(`couldn’t add “${word}”: ${String(err.message ?? err)}`);
+        const prepared = new Array(pending.length);
+        // The earliest-indexed thing that went wrong, so a batch reports the
+        // same failure whichever word's request happened to land first.
+        let failed = null;
+        const fail = (at, error) => {
+          if (!failed || at < failed.at) failed = { at, error };
+        };
+
+        let cursor = 0;
+        const worker = async () => {
+          // A recorded failure stops new words being started, the way the old
+          // sequential loop stopped at the first one. Words already in flight
+          // finish; only their results are dropped.
+          while (cursor < pending.length && !failed) {
+            const at = cursor++;
+            const word = pending[at];
+            const stale = supersededAddition(pending, deleteState);
+            if (stale) {
+              fail(at, additionSupersededError(stale));
+              return;
+            }
+            try {
+              const [dict, synonyms] = await Promise.all([
+                lookupDefinition(word),
+                lookupSynonyms(word),
+              ]);
+              prepared[at] = { word, dict, synonyms };
+            } catch (err) {
+              fail(
+                at,
+                requested.length === 1
+                  ? err
+                  : new Error(`couldn’t add “${word}”: ${String(err.message ?? err)}`)
+              );
+            }
           }
-        }
+        };
+
+        await Promise.all(
+          Array.from({ length: Math.min(LOOKUP_CONCURRENCY, pending.length) }, worker)
+        );
+        if (failed) throw failed.error;
 
         return enqueueMutation(async () => {
           // A local delete requested after this add must win even if a sync made

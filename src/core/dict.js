@@ -8,6 +8,21 @@
 
 const TIMEOUT_MS = 12000;
 
+/**
+ * How long the primary dictionary gets on its own before the fallback is
+ * started alongside it.
+ *
+ * dictionaryapi.dev is a free community service and answers in a couple of
+ * hundred milliseconds when it is well — and in eight seconds, or not at all,
+ * when it is not. Waiting out its full timeout before so much as asking
+ * Wiktionary is what made a bad afternoon on one host into a bad afternoon in
+ * lexis. So the fallback is *hedged* rather than sequential: after this long
+ * the second request goes out in parallel and the first usable answer wins.
+ * Short enough that a slow day is barely felt; long enough that a healthy
+ * dictionaryapi.dev is never double-asked.
+ */
+const HEDGE_AFTER_MS = 900;
+
 async function getJSON(url) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
@@ -18,6 +33,64 @@ async function getJSON(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* ---- a small, bounded, time-limited memo ----
+ *
+ * Shared by the three lookups below. A definition is not volatile — Wiktionary
+ * does not rewrite an entry between one keystroke and the next — and the app
+ * asks for the same one twice as a matter of course: the quick-lookup panel
+ * fetches a word, and "add it to the bank after all" fetched it again from
+ * scratch, a whole round trip to learn what was already on screen.
+ *
+ * Failures are never cached, so a lookup that failed because the tab was
+ * briefly offline can succeed a second later.
+ */
+function createRequestCache({ limit, ttlMs }) {
+  const entries = new Map();
+
+  return {
+    /** The cached promise for `key`, or `make()`'s, remembered. */
+    run(key, make) {
+      const now = Date.now();
+      const hit = entries.get(key);
+      if (hit && hit.expires > now) return hit.promise;
+      if (hit) entries.delete(key);
+
+      if (entries.size >= limit) entries.delete(entries.keys().next().value);
+      const promise = Promise.resolve()
+        .then(make)
+        .catch((err) => {
+          // Never let one bad minute poison the word for the session.
+          if (entries.get(key)?.promise === promise) entries.delete(key);
+          throw err;
+        });
+      entries.set(key, { expires: now + ttlMs, promise });
+      return promise;
+    },
+
+    clear() {
+      entries.clear();
+    },
+  };
+}
+
+const DEFINITION_CACHE_LIMIT = 64;
+const DEFINITION_CACHE_TTL_MS = 30 * 60 * 1000;
+const definitionCache = createRequestCache({
+  limit: DEFINITION_CACHE_LIMIT,
+  ttlMs: DEFINITION_CACHE_TTL_MS,
+});
+const synonymCache = createRequestCache({
+  limit: DEFINITION_CACHE_LIMIT,
+  ttlMs: DEFINITION_CACHE_TTL_MS,
+});
+
+/** Everything remembered from this session's lookups. Exported for tests. */
+export function clearLookupCaches() {
+  definitionCache.clear();
+  synonymCache.clear();
+  datamuseCache.clear();
 }
 
 // ---- Primary source: dictionaryapi.dev (definitions written by Wiktionary editors) ----
@@ -107,17 +180,53 @@ async function fetchWiktionary(word) {
   };
 }
 
+/**
+ * The definition, from whichever source answers usably first.
+ *
+ * dictionaryapi.dev still leads — its entries carry pronunciation and worked
+ * examples that the REST fallback does not — so a healthy one is never raced.
+ * It is only joined, after HEDGE_AFTER_MS, by a Wiktionary request that was
+ * going to be made anyway the moment the first one failed. Whichever lands
+ * first with a real entry is the answer; the loser is left to settle
+ * unobserved rather than cancelled, so its result still warms nothing and
+ * costs nothing.
+ *
+ * The failure message keeps both causes, because "the primary 404ed and the
+ * fallback had no English section" and "both hosts are unreachable" are
+ * different problems wearing the same sentence.
+ */
 async function fetchRawDefinition(word) {
+  const primary = fetchDictionaryApi(word);
+  let hedgeTimer = null;
+  let fallback = null;
+
+  const startFallback = () => (fallback ??= fetchWiktionary(word));
+  const hedge = new Promise((resolve) => {
+    hedgeTimer = setTimeout(resolve, HEDGE_AFTER_MS);
+  });
+
   try {
-    return await fetchDictionaryApi(word);
-  } catch (first) {
-    try {
-      return await fetchWiktionary(word);
-    } catch (second) {
-      throw new Error(
-        `no dictionary entry found for "${word}" (${first.message}; ${second.message})`
-      );
-    }
+    const first = await Promise.race([
+      primary.then((entry) => ({ entry })),
+      hedge.then(() => null),
+    ]);
+    if (first?.entry) return first.entry;
+  } catch {
+    /* the primary failed; the fallback below is exactly the old behaviour */
+  } finally {
+    clearTimeout(hedgeTimer);
+  }
+
+  // Either the primary is slow (both now run) or it has already failed. The
+  // first *usable* answer wins — waiting for the loser as well would hand the
+  // stalled host back the veto this whole arrangement exists to take from it.
+  try {
+    return await Promise.any([primary, startFallback()]);
+  } catch (err) {
+    const [why1, why2] = (err?.errors ?? [err]).map((reason) =>
+      String(reason?.message ?? reason)
+    );
+    throw new Error(`no dictionary entry found for "${word}" (${why1}; ${why2})`);
   }
 }
 
@@ -265,9 +374,24 @@ export async function expandDerivativeDefinitions(
   };
 }
 
+/**
+ * A word's entry, looked up once per word per half hour.
+ *
+ * The repeat is not hypothetical: reading a word in the quick-lookup panel and
+ * then pressing "add it to the bank" asked both APIs the same question twice
+ * over, and the second answer was always the first one. Memoized, the add is
+ * instant and the panel is what paid for it.
+ */
 export async function fetchDefinition(word) {
-  const dictionary = await fetchRawDefinition(word);
-  return await clarifyDerivativeDefinitions(word, dictionary);
+  const key = String(word ?? "").trim().toLowerCase();
+  const entry = await definitionCache.run(key, async () => {
+    const dictionary = await fetchRawDefinition(word);
+    return await clarifyDerivativeDefinitions(word, dictionary);
+  });
+  // A copy, because the caller stores what it is given straight into the bank
+  // and a cache that hands the same array to two callers has stopped being a
+  // cache and started being shared mutable state.
+  return { ...entry, senses: entry.senses.map((sense) => ({ ...sense })) };
 }
 
 /** Apply the live lexical cross-check to an already-stored dictionary entry. */
@@ -362,11 +486,28 @@ async function datamuse(query) {
 }
 
 export async function fetchSynonyms(word) {
-  let candidates = await datamuse(`rel_syn=${encodeURIComponent(word)}`);
-  // Strict synonym lists run thin for many words; pad with Datamuse's
-  // means-like results, which stay corpus-driven rather than generative.
+  const key = String(word ?? "").trim().toLowerCase();
+  const ranked = await synonymCache.run(key, () => rankSynonyms(word));
+  return ranked.map((row) => ({ ...row })); // see fetchDefinition: never share the stored copy
+}
+
+async function rankSynonyms(word) {
+  // Both questions at once. Strict synonym lists run thin for most words, so
+  // the means-like padding below is needed more often than not — and asking
+  // for it only after the first answer came back made every one of those
+  // words cost two round trips in a row. Datamuse answers the same request
+  // once per session either way (see the cache above), and the adverb
+  // clarification asks this very question for `ml`, so the second request is
+  // usually one already paid for.
+  const [strict, related] = await Promise.all([
+    datamuse(`rel_syn=${encodeURIComponent(word)}`),
+    datamuse(`ml=${encodeURIComponent(word)}`),
+  ]);
+
+  // The padding rule itself is unchanged: a generous strict list stands on its
+  // own, and only a thin one is topped up.
+  let candidates = strict;
   if (candidates.length < 6) {
-    const related = await datamuse(`ml=${encodeURIComponent(word)}`);
     candidates = candidates.concat(
       related.filter((r) => !candidates.some((c) => c.word === r.word))
     );

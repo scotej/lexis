@@ -9,6 +9,13 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='25' x='2' font-size='24' font-family='Georgia,serif' font-style='italic'%3El%3C/text%3E%3Ccircle cx='20' cy='24' r='3' fill='%23b42318'/%3E%3C/svg%3E"
     />
+    <!-- The three hosts a lookup talks to. Opening the connection before a
+         word is typed takes the DNS lookup and the TLS handshake — a few
+         hundred milliseconds on a school network — off the first lookup of
+         the session, which is the one that feels slowest. -->
+    <link rel="preconnect" href="https://api.dictionaryapi.dev" crossorigin />
+    <link rel="preconnect" href="https://api.datamuse.com" crossorigin />
+    <link rel="dns-prefetch" href="https://en.wiktionary.org" />
     <link rel="stylesheet" href="styles.css" />
     <script type="module" src="main.js" defer></script>
   </head>

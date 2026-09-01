@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   adjectiveFormsForAdverb,
   adverbClarification,
+  clearLookupCaches,
   expandDerivativeDefinitions,
   fetchDefinition,
   fetchSynonyms,
@@ -342,12 +343,145 @@ test("the bounded cache is shared safely with essay-synonym lookup", async () =>
     await fetchDefinition("cacheably");
     await fetchDefinition("cacheably");
     const synonyms = await fetchSynonyms("cacheably");
-    assert.equal(dictionaryRequests, 2);
+    // One request, not two: the second ask for the same word is the first
+    // answer. This is the quick-lookup panel handing its result to "add it to
+    // the bank after all" instead of paying for it twice.
+    assert.equal(dictionaryRequests, 1);
     assert.equal(queries.get("ml=cacheably"), 1);
     assert.equal(queries.get("rel_syn=cacheable"), 1);
     assert.equal(queries.get("rel_syn=cacheably"), 1);
     assert.ok(synonyms.length > 0);
     assert.ok(synonyms.every((item) => Number.isFinite(item.score)));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+/* ---- how fast an answer arrives, and how often it is asked for ---- */
+
+/** A plain dictionaryapi.dev entry, for the tests that only care about timing. */
+function apiEntry(word, definition) {
+  return [
+    {
+      word,
+      phonetic: `/${word}/`,
+      meanings: [{ partOfSpeech: "noun", definitions: [{ definition }] }],
+    },
+  ];
+}
+
+/** A Wiktionary REST reply for the same word. */
+function restEntry(definition) {
+  return { en: [{ partOfSpeech: "Noun", definitions: [{ definition }] }] };
+}
+
+test("a healthy primary dictionary is never double-asked", async () => {
+  const previousFetch = globalThis.fetch;
+  clearLookupCaches();
+  const hosts = [];
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    hosts.push(parsed.host);
+    if (parsed.host === "api.dictionaryapi.dev") {
+      return { ok: true, async json() { return apiEntry("prompt", "Done without delay."); } };
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    const result = await fetchDefinition("prompt");
+    assert.equal(result.senses[0].def, "Done without delay.");
+    assert.deepEqual(hosts, ["api.dictionaryapi.dev"], "no hedge against a host that answered");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("a stalled primary dictionary is overtaken by the fallback rather than waited out", async () => {
+  const previousFetch = globalThis.fetch;
+  clearLookupCaches();
+  let releasePrimary;
+  const primaryGate = new Promise((resolve) => {
+    releasePrimary = resolve;
+  });
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.host === "api.dictionaryapi.dev") {
+      await primaryGate;
+      return { ok: true, async json() { return apiEntry("dilatory", "Slow to act."); } };
+    }
+    if (parsed.host === "en.wiktionary.org") {
+      return { ok: true, async json() { return restEntry("Tending to delay."); } };
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    // The primary never answers within the hedge window, so the fallback —
+    // which the old code would not have sent for another eleven seconds —
+    // carries the lookup.
+    const result = await fetchDefinition("dilatory");
+    assert.equal(result.senses[0].def, "Tending to delay.");
+    assert.equal(result.source, "Wiktionary");
+  } finally {
+    releasePrimary();
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("a failed lookup is not remembered as the answer", async () => {
+  const previousFetch = globalThis.fetch;
+  clearLookupCaches();
+  let attempt = 0;
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    attempt += 1;
+    if (attempt <= 2) return { ok: false, status: 503 }; // both sources, first try
+    if (parsed.host === "api.dictionaryapi.dev") {
+      return { ok: true, async json() { return apiEntry("ephemeral", "Lasting a short time."); } };
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  try {
+    await assert.rejects(() => fetchDefinition("ephemeral"), /no dictionary entry found/);
+    const result = await fetchDefinition("ephemeral");
+    assert.equal(result.senses[0].def, "Lasting a short time.", "a bad minute is not cached");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("synonyms ask both Datamuse relations at once rather than one after the other", async () => {
+  const previousFetch = globalThis.fetch;
+  clearLookupCaches();
+  let openRequests = 0;
+  let concurrent = 0;
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.host, "api.datamuse.com");
+    openRequests += 1;
+    concurrent = Math.max(concurrent, openRequests);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    openRequests -= 1;
+    const response = parsed.searchParams.has("rel_syn")
+      ? [candidate("laconic", "adj", 0.4)]
+      : [candidate("terse", "adj", 1.1), candidate("succinct", "adj", 0.9)];
+    return { ok: true, async json() { return response; } };
+  };
+
+  try {
+    const ranked = await fetchSynonyms("concise");
+    assert.equal(concurrent, 2, "the thin strict list must not cost a second round trip in series");
+    assert.deepEqual(
+      ranked.map((row) => row.word).sort(),
+      ["laconic", "succinct", "terse"],
+      "and the padding rule itself is unchanged"
+    );
   } finally {
     globalThis.fetch = previousFetch;
   }
