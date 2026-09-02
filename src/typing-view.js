@@ -12,7 +12,7 @@
  * to the test while a test is running and to the rest of lexis when it isn't.
  */
 
-import { aiQuotes } from "./core/ai.js";
+import { aiQuotes, normalizeModel } from "./core/ai.js";
 import { createPrefetcher } from "./core/prefetch.js";
 import {
   QUOTE_LENGTHS,
@@ -56,7 +56,25 @@ function el(tag, className, text) {
   return node;
 }
 
-const $ = (id) => document.getElementById(id);
+/**
+ * getElementById, remembered.
+ *
+ * The chrome below is built once and then lives for the life of the page, but
+ * the hot paths ask for it by name — the caret, the words, the scroller, four
+ * or five lookups per keystroke. Holding the node costs one liveness check
+ * instead of a document-wide search, and the check is what keeps this honest
+ * if the view is ever rebuilt.
+ */
+const nodes = new Map();
+
+function $(id) {
+  const held = nodes.get(id);
+  if (held?.isConnected) return held;
+  const found = document.getElementById(id);
+  if (found) nodes.set(id, found);
+  else nodes.delete(id);
+  return found;
+}
 
 const SETTINGS_KEY = "lexis-typing-settings";
 const RECORDS_KEY = "lexis-typing-records";
@@ -225,7 +243,12 @@ export function initTypingView(ctx) {
     if (text) afterInput();
   });
   input.addEventListener("blur", () => {
-    document.getElementById("view-typing")?.classList.remove("tt-engaged");
+    const view = $("view-typing");
+    view?.classList.remove("tt-engaged");
+    // The badge is only ever cleared by the next keystroke, and there is no
+    // next keystroke once the field has been left — it sat over the passage
+    // long after the key was pressed again elsewhere.
+    view?.classList.remove("tt-caps");
     stopTicker();
   });
   input.addEventListener("focus", () => {
@@ -235,16 +258,47 @@ export function initTypingView(ctx) {
 
   $("tt-scroller").addEventListener("mousedown", (e) => {
     e.preventDefault();
-    focusInput();
+    focusInput({ force: true });
   });
 
+  watchForRewraps();
   renderBar();
   renderSettingsPanel();
+}
+
+/**
+ * The two things that move a passage without anybody typing.
+ *
+ * A narrower window rewraps the lines; a serif that finishes loading after the
+ * first paint reflows them. Both leave the caret sitting where a character
+ * used to be — visibly wrong until the next keystroke, which on the result
+ * screen or a paused test may be a long time coming. Neither is worth a
+ * measurement per frame, so both are events.
+ */
+function watchForRewraps() {
+  const scroller = $("tt-scroller");
+  if (globalThis.ResizeObserver && scroller) {
+    new ResizeObserver(() => {
+      if (active) remeasure();
+    }).observe(scroller);
+  } else {
+    globalThis.addEventListener?.("resize", () => {
+      if (active) remeasure();
+    });
+  }
+  // Charter is a system font where it exists and a fallback where it doesn't;
+  // either way the swap lands after this module runs.
+  document.fonts?.ready?.then(() => {
+    if (active) remeasure();
+  });
 }
 
 /** The view came on screen. */
 export function renderTypingView() {
   active = true;
+  // Nothing has to have changed for the answer to have: a word becomes due
+  // because a day passed, which no mutation announces.
+  forgetBankWords();
   applyAppearance();
   Promise.all([ensureCorpus(), ensureWords()]).then(() => {
     if (!current) nextTest();
@@ -259,6 +313,8 @@ export function renderTypingView() {
 export function suspendTypingView() {
   active = false;
   stopTicker();
+  stopCountdown();
+  cancelCaret();
   $("tt-input")?.blur();
 }
 
@@ -272,6 +328,7 @@ export function suspendTypingView() {
  */
 export function notifyTypingBankChanged() {
   if (!installed || !context) return;
+  forgetBankWords();
   // Called after *every* bank mutation, including a tick on today's list, so
   // it earns its keep by noticing when nothing the filters care about actually
   // moved. Re-tokenizing four thousand passages because a review was graded
@@ -280,6 +337,21 @@ export function notifyTypingBankChanged() {
   if (signature === bankSignature) return;
   bankSignature = signature;
   rebuildPool();
+  refreshAiQueue();
+  if (active) renderBar();
+}
+
+/**
+ * The OpenRouter key or model changed — saved, replaced, or removed.
+ *
+ * Without this the queue only noticed on the next visit to this view, which is
+ * exactly the visit a student does not make: they paste a key *because* they
+ * want AI passages, come back, and find the queue still reporting that there
+ * is no key. Removing one was worse — the queue kept asking, failing, and
+ * backing off against a key that no longer existed.
+ */
+export function notifyTypingAiChanged() {
+  if (!installed || !context) return;
   refreshAiQueue();
   if (active) renderBar();
 }
@@ -294,38 +366,63 @@ async function ensureCorpus() {
     rebuildPool();
   } catch (err) {
     corpusError = err;
-    showNotice(`The quote library didn’t load — ${String(err.message ?? err)}`, true);
+    showNotice(`The quote library didn’t load — ${String(err.message ?? err)}`, { warn: true });
   }
   return corpus;
 }
 
 /** The bank words the "my words" filter is currently about. */
 function filterWords() {
+  if (filterWordsCache?.filter === settings.bankFilter) return filterWordsCache.words;
   const app = context?.app;
-  if (!app) return [];
+  let words = [];
   try {
     switch (settings.bankFilter) {
       case "bank":
-        return app.listWords().map((word) => word.word);
+        words = app ? allBankWords() : [];
+        break;
       case "today":
-        return app.getBank()?.today?.words ?? [];
+        words = app?.getBank()?.today?.words ?? [];
+        break;
       case "due":
-        return app.dueWords().map((word) => word.word);
+        words = app ? app.dueWords().map((word) => word.word) : [];
+        break;
       default:
-        return [];
+        words = [];
     }
   } catch {
-    return [];
+    words = [];
   }
+  filterWordsCache = { filter: settings.bankFilter, words };
+  return words;
 }
 
 /** Every bank word, for marking matches even when the filter is off. */
 function allBankWords() {
+  if (bankWordsCache) return bankWordsCache;
   try {
-    return context?.app?.listWords().map((word) => word.word) ?? [];
+    bankWordsCache = context?.app?.listWords().map((word) => word.word) ?? [];
   } catch {
-    return [];
+    bankWordsCache = [];
   }
+  return bankWordsCache;
+}
+
+/**
+ * The bank, asked for once per change rather than once per question.
+ *
+ * Painting the bar asks what is in the bank half a dozen times over — the
+ * fingerprint, the filter, the pool, the status line, the word pool — and each
+ * ask sorted and copied every word in it. None of those answers can differ
+ * from each other, because nothing between them can change the bank; the only
+ * thing that can is a mutation, and a mutation already tells this view.
+ */
+let bankWordsCache = null;
+let filterWordsCache = null;
+
+function forgetBankWords() {
+  bankWordsCache = null;
+  filterWordsCache = null;
 }
 
 /**
@@ -388,8 +485,21 @@ function prefetchKey() {
     settings.bankFilter,
     [...targetWords()].sort().join(","),
     ai?.model ?? "",
-    ai?.key ? "keyed" : "none",
+    // The *identity* of the key, not merely whether there is one. Swapping one
+    // account's key for another's left the queue holding passages the new key
+    // never paid for — and, worse, left it convinced nothing had changed.
+    keyFingerprint(ai?.key),
   ].join("|");
+}
+
+/**
+ * A short, stable stand-in for a key. Never the key: this string is only ever
+ * compared with itself, so the last few characters — which OpenRouter itself
+ * shows in its dashboard — are identity enough.
+ */
+function keyFingerprint(key) {
+  const value = String(key ?? "");
+  return value ? `key:${value.length}:${value.slice(-6)}` : "none";
 }
 
 function wantsAi() {
@@ -470,7 +580,10 @@ async function produceAiPassages(want) {
 }
 
 function modelName(model) {
-  const id = String(model ?? "").trim();
+  // Through the same normalizer the request itself uses, so a model pasted as
+  // an openrouter.ai URL is credited under the name it was actually called by
+  // rather than as a link.
+  const id = normalizeModel(model);
   if (!id || id === "openrouter/auto") return "openrouter, automatic routing";
   return id;
 }
@@ -574,6 +687,7 @@ function nextTest() {
     return;
   }
   lineOffset = 0;
+  resetMeter();
   renderPassage();
   renderMeter();
   $("tt-foot").replaceChildren(hintLine());
@@ -718,7 +832,7 @@ function afterInput() {
   paintWord(i + 1);
   topUpTimedWords();
   syncWordNodes();
-  moveCaret();
+  scheduleCaret();
   playSound();
   startTicker();
   if (run.status === "done" || run.status === "failed") finishTest();
@@ -746,8 +860,24 @@ function syncWordNodes() {
   for (let i = wordNodes.length; i < run.words.length; i++) addWordNode(i);
 }
 
-function focusInput() {
+/**
+ * Hands the keyboard to the test — unless the settings panel has it.
+ *
+ * The panel is a form the student is clicking through, and half the settings
+ * in it start a new test, which used to call this and take the keyboard back
+ * on every click. The passage un-blurred, the caret began blinking, and the
+ * chips being pressed were behind a running test. `update()` already declined
+ * to focus while the panel was open; the new test it started did not, which is
+ * the whole of the bug.
+ *
+ * `force` is the one exception, and it has exactly one caller: a click on the
+ * passage itself. Every other call here is the view helping itself to the
+ * keyboard; that one is a person asking for it, and the panel standing open
+ * behind them is no reason to refuse.
+ */
+function focusInput({ force = false } = {}) {
   if (!active) return;
+  if (!force && $("tt-settings")?.hidden === false) return;
   const input = $("tt-input");
   if (input && document.activeElement !== input) input.focus({ preventScroll: true });
 }
@@ -762,17 +892,26 @@ function renderPassage() {
   // Before the first paint, not after it: paintWord reads this set, and a
   // passage painted against the previous one's words underlines the wrong ones.
   refreshBankWordSet();
-  for (let i = 0; i < run.words.length; i++) addWordNode(i);
-  container.style.transform = "translateY(0)";
+  $("view-typing")?.classList.remove("tt-nothing");
+  // One insertion rather than one per word. A thicc passage is two hundred of
+  // them, and appending each on its own asks the browser to reckon with a
+  // growing document two hundred times to arrive at the same paragraph.
+  const batch = document.createDocumentFragment();
+  for (let i = 0; i < run.words.length; i++) addWordNode(i, batch);
+  container.append(batch);
   lineOffset = 0;
+  // Not animated: this is a different passage, not a later line of this one.
+  withoutScrollAnimation(() => {
+    container.style.transform = "translateY(0)";
+  });
   renderSource();
-  requestAnimationFrame(moveCaret);
+  scheduleCaret();
 }
 
-function addWordNode(i) {
+function addWordNode(i, into = $("tt-words")) {
   const node = el("span", "tt-word");
   wordNodes[i] = node;
-  $("tt-words").append(node);
+  into.append(node);
   paintWord(i);
   return node;
 }
@@ -843,6 +982,31 @@ function refreshBankWordSet() {
 }
 
 /**
+ * The caret, at most once a frame.
+ *
+ * Measuring it reads the layout; painting the words wrote to it. Doing both in
+ * the same keystroke makes the browser lay the passage out again before the
+ * frame it was going to lay it out in anyway — once per key, and a fast typist
+ * presses a lot of keys. Deferred to the frame, the reads happen after every
+ * write, which is the one order that costs nothing; a burst of pasted or
+ * IME-composed characters collapses into a single measurement as well.
+ */
+let caretFrame = 0;
+
+function scheduleCaret() {
+  if (caretFrame) return;
+  caretFrame = requestAnimationFrame(() => {
+    caretFrame = 0;
+    moveCaret();
+  });
+}
+
+function cancelCaret() {
+  if (caretFrame) cancelAnimationFrame(caretFrame);
+  caretFrame = 0;
+}
+
+/**
  * The caret, and the line the passage is scrolled to.
  *
  * Both are measured from the DOM rather than computed, because the answer
@@ -890,14 +1054,92 @@ function moveCaret() {
   }
 
   // Otherwise keep the active line as the second of the three on screen.
-  const lineHeight = box.height || 24;
-  const line = Math.round(y / lineHeight);
+  const lineHeight = lineHeightOf(container);
+  const line = lineOf(y, box.height, lineHeight);
   const wanted = -Math.max(0, line - 1) * lineHeight;
   if (wanted !== lineOffset) {
     lineOffset = wanted;
     container.style.transform = `translateY(${lineOffset}px)`;
     caret.style.setProperty("--tt-caret-y", `${y + lineOffset}px`);
   }
+}
+
+/**
+ * Which line of the passage a character sits on.
+ *
+ * Measured from the middle of the character rather than its top, and against
+ * the line's height rather than the character's own. A character box is the
+ * height of the *glyph* — roughly three quarters of the line it sits in — so
+ * dividing its top by its own height counted the second line as the third and
+ * the third as the fourth, and then scrolled the passage by three quarters of
+ * a line to correct for it: the caret drifted off its own text, a line at a
+ * time, the further into a passage you typed. The middle of a glyph is always
+ * inside its own line box; neither its top nor its own height is.
+ *
+ * @param top        the character's top edge, relative to the passage
+ * @param height     the character's own height, which may be unmeasurable (0)
+ * @param lineHeight the passage's resolved line-height
+ */
+export function lineOf(top, height, lineHeight) {
+  if (!(lineHeight > 0)) return 0;
+  const middle = top + (height > 0 ? height : lineHeight) / 2;
+  return Math.max(0, Math.floor(middle / lineHeight));
+}
+
+/**
+ * The height of one line of the passage, in pixels.
+ *
+ * Read from the browser rather than computed from the font-size setting,
+ * because the passage's line-height is a stylesheet decision and this is the
+ * only place that has to agree with it exactly. Cached against the two things
+ * that can change it — a font-size setting and a window that got narrower —
+ * so it is one style read per resize rather than one per keystroke.
+ */
+let lineHeightCache = { key: "", value: 0 };
+
+function lineHeightOf(container) {
+  const key = `${settings.fontSize}|${container.clientWidth}`;
+  if (lineHeightCache.key === key && lineHeightCache.value > 0) return lineHeightCache.value;
+  const resolved = Number.parseFloat(getComputedStyle(container).lineHeight);
+  // "normal" resolves to the string, not a number, on a container with no
+  // explicit line-height. The stylesheet sets one, but a stylesheet that
+  // failed to load should still leave a caret roughly where it belongs.
+  const value = Number.isFinite(resolved) && resolved > 0 ? resolved : settings.fontSize * 16 * 1.65;
+  lineHeightCache = { key, value };
+  return value;
+}
+
+/** The measurements above are stale — the window, the font, or the size moved. */
+function remeasure() {
+  lineHeightCache = { key: "", value: 0 };
+  if (!run) return;
+  // The passage has rewrapped, so the line the caret was on is not the line it
+  // is on now. Reset the scroll and let moveCaret find the line again — both
+  // inside the same held transition, or the passage flashes back to line one
+  // and slides down to where it already was.
+  lineOffset = 0;
+  withoutScrollAnimation(() => {
+    $("tt-words").style.transform = "translateY(0)";
+    moveCaret();
+  });
+}
+
+/**
+ * Moves the passage without animating the move.
+ *
+ * A new passage, or a rewrap, starts at line one — but `.tt-words` carries a
+ * transition, so writing the reset straight in made every new test slide up
+ * from wherever the last one finished. The transition is for following a
+ * typist down a passage; it has no business animating a passage that is not
+ * the same passage.
+ */
+function withoutScrollAnimation(write) {
+  const container = $("tt-words");
+  const previous = container.style.transition;
+  container.style.transition = "none";
+  write();
+  void container.offsetHeight; // flush, so the write cannot be coalesced with the restore
+  container.style.transition = previous;
 }
 
 /**
@@ -962,38 +1204,92 @@ function fmt(value, decimals = settings.showDecimals ? 2 : 0) {
   return Number(value).toFixed(decimals);
 }
 
-function renderMeter() {
-  const meter = $("tt-meter");
-  if (!run) return;
-  const parts = [];
-  const snapshot = run.status === "idle" ? null : run.live();
+/**
+ * The live readouts, ten times a second.
+ *
+ * Which readouts are shown is a settings question and changes rarely; what
+ * they say changes constantly. So the row is *built* when the settings behind
+ * it move and only *written to* on the tick — a handful of text assignments
+ * against four nodes, rather than four fresh elements and a fresh progress bar
+ * discarded and rebuilt six hundred times a minute, every one of them a node
+ * for the collector to clear up while somebody is trying to type.
+ */
+let meterFields = null; // { signature, values: Map<key, node>, fill }
 
-  if (settings.timerStyle !== "off") {
-    if (settings.mode === "time") {
-      const left = Math.ceil(run.remaining() ?? settings.time);
-      if (settings.timerStyle !== "bar") parts.push(metricNode("", String(left)));
-    } else if (settings.timerStyle !== "bar") {
-      parts.push(metricNode("", `${Math.min(run.index + 1, run.words.length)}/${run.words.length}`));
-    }
-  }
-  if (settings.liveWpm && snapshot) parts.push(metricNode("wpm", fmt(snapshot.wpm)));
-  if (settings.liveAccuracy && snapshot && !settings.blindMode) {
-    parts.push(metricNode("acc", `${fmt(snapshot.accuracy)}%`));
-  }
-  if (settings.liveBurst && snapshot) parts.push(metricNode("burst", fmt(snapshot.burst)));
-
-  const bar = el("div", "tt-progress");
-  if (settings.timerStyle === "bar" || settings.timerStyle === "mini") {
-    const fill = el("span", "tt-progress-fill");
-    fill.style.width = `${(run.progress() * 100).toFixed(1)}%`;
-    bar.append(fill);
-  }
-
-  meter.replaceChildren(...parts, bar);
-  meter.classList.toggle("tt-meter-quiet", !parts.length);
+function meterSignature() {
+  return [
+    settings.timerStyle,
+    settings.mode,
+    settings.liveWpm,
+    settings.liveAccuracy && !settings.blindMode,
+    settings.liveBurst,
+    settings.showDecimals,
+  ].join("|");
 }
 
-function metricNode(label, value) {
+function buildMeter(meter) {
+  const values = new Map();
+  const parts = [];
+  const add = (key, label) => {
+    const node = metricNode(label);
+    values.set(key, node.firstChild);
+    parts.push(node);
+  };
+
+  if (settings.timerStyle !== "off" && settings.timerStyle !== "bar") {
+    add(settings.mode === "time" ? "clock" : "words", "");
+  }
+  if (settings.liveWpm) add("wpm", "wpm");
+  if (settings.liveAccuracy && !settings.blindMode) add("acc", "acc");
+  if (settings.liveBurst) add("burst", "burst");
+
+  // The track only exists where something runs along it. With the timer set
+  // to "text" or "off" the bar was still drawn — an empty two-pixel hairline
+  // ruled across the page above the passage, measuring nothing.
+  let fill = null;
+  if (settings.timerStyle === "bar" || settings.timerStyle === "mini") {
+    const bar = el("div", "tt-progress");
+    fill = el("span", "tt-progress-fill");
+    bar.append(fill);
+    parts.push(bar);
+  }
+
+  meter.replaceChildren(...parts);
+  meter.classList.toggle("tt-meter-quiet", !parts.length);
+  meterFields = { signature: meterSignature(), values, fill };
+}
+
+function renderMeter() {
+  const meter = $("tt-meter");
+  if (!meter || !run) return;
+  if (!meterFields || meterFields.signature !== meterSignature()) buildMeter(meter);
+
+  const { values, fill } = meterFields;
+  const snapshot = run.status === "idle" ? null : run.live();
+  const write = (key, text) => {
+    const node = values.get(key);
+    if (node && node.textContent !== text) node.textContent = text;
+  };
+
+  if (values.has("clock")) write("clock", String(Math.ceil(run.remaining() ?? settings.time)));
+  if (values.has("words")) {
+    write("words", `${Math.min(run.index + 1, run.words.length)}/${run.words.length}`);
+  }
+  // Before the first keystroke there is no speed to report — and a nought is
+  // not "no speed", it is a bad one. The row keeps its shape either way, so
+  // starting to type no longer shuffles the passage sideways.
+  if (values.has("wpm")) write("wpm", snapshot ? fmt(snapshot.wpm) : "—");
+  if (values.has("acc")) write("acc", snapshot ? `${fmt(snapshot.accuracy)}%` : "—");
+  if (values.has("burst")) write("burst", snapshot ? fmt(snapshot.burst) : "—");
+  if (fill) fill.style.width = `${(run.progress() * 100).toFixed(1)}%`;
+}
+
+/** Forces the next renderMeter to rebuild — the run, not the settings, changed. */
+function resetMeter() {
+  meterFields = null;
+}
+
+function metricNode(label, value = "") {
   const node = el("span", "tt-metric");
   node.append(el("strong", null, value));
   if (label) node.append(el("span", "tt-metric-label", label));
@@ -1222,12 +1518,27 @@ function renderBar() {
   const tools = el("div", "tt-bar-tools");
   const settingsButton = el("button", "tt-chip tt-chip-wide", "all settings");
   settingsButton.type = "button";
+  const panelOpen = $("tt-settings")?.hidden === false;
+  // Read from the panel, not remembered from the click. The bar is rebuilt
+  // whenever any setting changes — which is to say, on every click made in the
+  // panel — and a freshly built chip that had not seen the click showed the
+  // panel as closed while it stood open underneath it.
+  settingsButton.classList.toggle("tt-chip-on", panelOpen);
+  settingsButton.setAttribute("aria-expanded", String(panelOpen));
+  settingsButton.setAttribute("aria-controls", "tt-settings");
   settingsButton.addEventListener("click", () => {
     const panel = $("tt-settings");
     panel.hidden = !panel.hidden;
     settingsButton.classList.toggle("tt-chip-on", !panel.hidden);
-    if (!panel.hidden) renderSettingsPanel();
-    else focusInput();
+    settingsButton.setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden) {
+      renderSettingsPanel();
+      // It opens below the test, which on a short window is below the fold —
+      // pressing the button and seeing nothing happen is not a settings panel.
+      panel.scrollIntoView({ block: "start", behavior: "smooth" });
+    } else {
+      focusInput();
+    }
   });
   tools.append(settingsButton);
   bar.append(tools);
@@ -1237,7 +1548,9 @@ function renderBar() {
 
 /** The one line under the bar that says what the test will be made of. */
 function renderStatusLine() {
+  stopCountdown();
   const notes = [];
+  let action = null;
   if (settings.mode === "quote") {
     if (settings.bankFilter !== "off") {
       const words = filterWords();
@@ -1266,7 +1579,10 @@ function renderStatusLine() {
       if (!context?.aiReady?.()) {
         notes.push("AI passages need an OpenRouter key in settings → ai assist.");
       } else if (aiState.error) {
-        notes.push(`AI passages paused — ${String(aiState.error.message ?? aiState.error)}`);
+        notes.push(
+          `AI passages paused — ${String(aiState.error.message ?? aiState.error)}${retryNote()}`
+        );
+        action = retryButton();
       } else if (aiState.ready > 0) {
         notes.push(`${aiState.ready} AI ${aiState.ready === 1 ? "passage" : "passages"} ready.`);
       } else if (aiState.filling) {
@@ -1278,15 +1594,61 @@ function renderStatusLine() {
     notes.push("Your bank is empty, so common words are used instead.");
   }
 
-  showNotice(notes.join(" "), Boolean(aiState.error) || matchCount === 0);
+  showNotice(notes.join(" "), {
+    warn: Boolean(aiState.error) || matchCount === 0,
+    action,
+  });
 }
 
-function showNotice(text, isError = false) {
+/**
+ * How long the queue intends to wait before trying again on its own.
+ *
+ * The prefetcher has always known this — it backs off up to two minutes — and
+ * never said so, which left an error sitting on screen looking permanent while
+ * a retry was already scheduled. Saying it turns "it broke" into "it is
+ * waiting", which are different things to read.
+ *
+ * It counts down rather than being written once: a number that stops at "in
+ * 90s" and stays there for a minute and a half is a worse lie than no number.
+ */
+let countdown = null;
+
+function retryNote() {
+  const seconds = Math.round((aiState.retryingAt - Date.now()) / 1000);
+  if (seconds <= 1) return "";
+  if (countdown == null && active) {
+    countdown = setTimeout(() => {
+      countdown = null;
+      if (active) renderStatusLine();
+    }, 1000);
+  }
+  return ` Trying again in ${seconds}s.`;
+}
+
+function stopCountdown() {
+  if (countdown != null) clearTimeout(countdown);
+  countdown = null;
+}
+
+/** Skips the backoff. The queue has always offered this; nothing asked for it. */
+function retryButton() {
+  const button = el("button", "link-quiet tt-retry", "try again now");
+  button.type = "button";
+  button.addEventListener("click", () => {
+    aiQueue?.retry();
+    renderStatusLine();
+    focusInput();
+  });
+  return button;
+}
+
+function showNotice(text, { warn = false, action = null } = {}) {
   const notice = $("tt-notice");
   if (!notice) return;
-  notice.textContent = text;
-  notice.hidden = !text;
-  notice.classList.toggle("tt-notice-warn", Boolean(isError));
+  notice.replaceChildren(...(text ? [document.createTextNode(text)] : []));
+  if (action) notice.append(document.createTextNode(" "), action);
+  notice.hidden = !text && !action;
+  notice.classList.toggle("tt-notice-warn", Boolean(warn));
 }
 
 function hideNotice() {
@@ -1503,7 +1865,7 @@ function update(patch, { keepPanel = false } = {}) {
     // Appearance only: repaint what is already on screen, keep the run.
     if (run) {
       renderPassage();
-      requestAnimationFrame(moveCaret);
+      scheduleCaret();
     }
     renderMeter();
   }
@@ -1524,6 +1886,8 @@ function applyAppearance() {
     { off: "0ms", slow: "220ms", medium: "120ms", fast: "60ms" }[settings.smoothCaret] ?? "120ms"
   );
   view.style.setProperty("--tt-scroll-speed", settings.smoothLineScroll ? "180ms" : "0ms");
+  // Turning the warning off must take down a badge that is already showing.
+  if (!settings.capsLockWarning) view.classList.remove("tt-caps");
   view.dataset.caret = settings.caretStyle;
   view.dataset.highlight = settings.highlightMode;
   view.dataset.tape = settings.tapeMode;
@@ -1537,8 +1901,27 @@ function renderEmptyPool() {
   words.replaceChildren();
   $("tt-caret").hidden = true;
   $("tt-source").hidden = true;
+  // "click, or press a key, to type" over a blank window is an instruction
+  // that cannot be followed; the reason it is blank goes below instead.
+  $("view-typing")?.classList.add("tt-nothing");
+  resetMeter();
+  $("tt-meter")?.replaceChildren();
+
   const foot = $("tt-foot");
-  foot.replaceChildren(el("p", "empty", emptyPoolReason()), hintLine());
+  const parts = [el("p", "empty", emptyPoolReason())];
+  // A blank screen whose only escape is a backoff nobody can see is worse
+  // than an error: the way out belongs on the screen that has the problem.
+  if (aiState.error && wantsAi() && context?.aiReady?.()) {
+    const actions = el("div", "tt-actions");
+    actions.append(
+      actionButton("try again", () => {
+        aiQueue?.retry();
+        renderStatusLine();
+      }, true)
+    );
+    parts.push(actions);
+  }
+  foot.replaceChildren(...parts, hintLine());
 }
 
 /**

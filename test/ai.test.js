@@ -92,7 +92,7 @@ const { deriveKey, encryptJSON, decryptJSON, randomSalt } =
   await import("../src/core/crypto.js");
 
 // Shrink every delay so retry paths run in milliseconds.
-setAiNetworkOptions({ timeoutMs: 80, retries: 2, backoffMs: 1, maxBackoffMs: 5 });
+setAiNetworkOptions({ timeoutMs: 80, completionTimeoutMs: 80, retries: 2, backoffMs: 1, maxBackoffMs: 5 });
 
 const SETTINGS = { key: "sk-or-v1-test", model: "" };
 
@@ -386,6 +386,48 @@ test("the session ledger totals requests, tokens, and cost", async () => {
   assert.equal(usage.requests, 2);
   assert.equal(usage.totalTokens, 300);
   assert.ok(Math.abs(usage.cost - 0.0042) < 1e-9, "cost accumulates");
+});
+
+test("every completion asks OpenRouter to price it", async () => {
+  // Without this flag OpenRouter answers with token counts and no `cost`, and
+  // the panel's session ledger sat permanently at nothing. It rides back on
+  // the completion itself, so the honesty costs no extra request.
+  await chat(SETTINGS, { prompt: "what did that cost" });
+  assert.deepEqual(calls.at(-1).body.usage, { include: true });
+});
+
+test("attribution headers name the app and nothing about its user", async () => {
+  const seen = [];
+  globalThis.fetch = (url, init) => {
+    seen.push(init.headers);
+    return baseFetch(url, init);
+  };
+  await chat(SETTINGS, { prompt: "hello" });
+  assert.equal(seen.at(-1)["X-Title"], "lexis");
+  assert.match(seen.at(-1)["HTTP-Referer"], /^https:\/\/scotej\.github\.io\/lexis\/$/);
+});
+
+test("a completion is given longer to answer than a catalogue lookup", async () => {
+  // A model that thinks first is not a stalled connection, and forty-five
+  // seconds of it used to read as one. The two are timed apart now.
+  const waits = [];
+  const previous = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    waits.push(ms);
+    return previous(fn, ms, ...rest);
+  };
+  setAiNetworkOptions({ completionTimeoutMs: 4000 });
+  try {
+    await fetchModels(SETTINGS.key);
+    const lookupWait = waits.at(-1);
+    waits.length = 0;
+    await chat(SETTINGS, { prompt: "think about it" });
+    assert.equal(lookupWait, 80, "a catalogue answers straight away or not at all");
+    assert.equal(waits.at(-1), 4000, "a composition is given room");
+  } finally {
+    globalThis.setTimeout = previous;
+    setAiNetworkOptions({ completionTimeoutMs: 80 });
+  }
 });
 
 test("a request that never succeeded is not counted as spend", async () => {

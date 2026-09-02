@@ -19,13 +19,29 @@
 
 const API_BASE = "https://openrouter.ai/api/v1";
 
-/** Network-resilience knobs; tests shrink them with setAiNetworkOptions(). */
+/**
+ * Network-resilience knobs; tests shrink them with setAiNetworkOptions().
+ *
+ * Two timeouts, because there are two kinds of request here and one number
+ * cannot serve both. `/key` and `/models` are lookups: a database read and a
+ * catalogue, and forty-five seconds of waiting for either means the endpoint
+ * is gone. A completion is a model *writing*, and since the token ceiling came
+ * off and reasoning was invited in, that is routinely a minute or more of
+ * honest work — timed out at forty-five seconds it read as "OpenRouter didn't
+ * respond in time", which sent students to check a network that was fine.
+ */
 const net = {
-  timeoutMs: 45000, // generation is slower than sync; give it room
+  timeoutMs: 30000, // /key and /models: a lookup, not a composition
+  completionTimeoutMs: 210000, // a model thinking, then writing; the slow ones take minutes
   retries: 2, // total attempts per request for *transient* failures
   backoffMs: 600,
   maxBackoffMs: 4000,
 };
+
+/** Which of the two timeouts a path is entitled to. */
+function timeoutFor(path) {
+  return path === "/chat/completions" ? net.completionTimeoutMs : net.timeoutMs;
+}
 
 export function setAiNetworkOptions(partial) {
   Object.assign(net, partial);
@@ -70,15 +86,20 @@ async function apiFetch(path, apiKey, init = {}) {
   const url = `${API_BASE}${path}`;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
+    // The pair OpenRouter attributes an app by. X-Title alone leaves lexis
+    // unlinked on their side; both together are what the docs ask for, and
+    // neither carries anything about the person using it.
+    "HTTP-Referer": "https://scotej.github.io/lexis/",
     "X-Title": "lexis",
     ...(init.body ? { "Content-Type": "application/json" } : {}),
     ...(init.headers ?? {}),
   };
+  const timeoutMs = timeoutFor(path);
 
   for (let attempt = 1; attempt <= net.retries; attempt++) {
     const last = attempt >= net.retries;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), net.timeoutMs);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let resp;
     let text;
     try {
@@ -88,7 +109,7 @@ async function apiFetch(path, apiKey, init = {}) {
       if (last) {
         throw transientError(
           err?.name === "AbortError"
-            ? "OpenRouter didn’t respond in time."
+            ? `OpenRouter didn’t respond within ${Math.round(timeoutMs / 1000)}s — the model may be slower than lexis waits. Try a faster one.`
             : "Couldn’t reach OpenRouter (network problem).",
           err
         );
@@ -162,6 +183,18 @@ function describeError(status, text, { strict = false } = {}) {
       return "This OpenRouter key has run out of credits. Add credits at openrouter.ai/credits.";
     case 403:
       return detail || "The request was refused (moderation or key restrictions).";
+    case 408:
+    case 504:
+      // The gateway gave up waiting on the provider. Naming it as a timeout
+      // beats "OpenRouter returned 504": the fix is a different model, not a
+      // different key.
+      return detail || "The model took too long to answer. Try again, or pick a faster model.";
+    case 429:
+      // A bare "429" reads as a fault. It is a queue, and the two ways out —
+      // wait, or stop sharing a free model with the world — are worth saying.
+      return detail
+        ? `Rate-limited by OpenRouter — ${detail}`
+        : "Rate-limited by OpenRouter. Wait a moment, or pick a model with more capacity.";
     default:
       return detail
         ? `OpenRouter returned ${status} — ${detail}`
@@ -193,8 +226,9 @@ function recordUsage(usage) {
   session.requests += 1;
   session.promptTokens += Number(usage?.prompt_tokens ?? 0) || 0;
   session.completionTokens += Number(usage?.completion_tokens ?? 0) || 0;
-  // OpenRouter reports `cost` on many routes but not all; absent is not zero,
-  // so an unpriced request simply adds nothing rather than pretending.
+  // `cost` arrives because the request asked for usage accounting — but an
+  // absent one is still not a zero, so an unpriced reply adds nothing rather
+  // than pretending the asking was free.
   session.cost += Number(usage?.cost ?? 0) || 0;
 }
 
@@ -285,6 +319,12 @@ async function complete(settings, { system, prompt, temperature = 0.4 }) {
     model: normalizeModel(settings.model),
     temperature,
     reasoning: { enabled: true },
+    // Usage accounting, which OpenRouter only does when asked. Without this
+    // flag a reply carries token counts but no `cost`, so the session ledger
+    // added nothing up and the panel's "what this has cost you" line was
+    // permanently, wrongly, silent. It costs no extra request — the figure
+    // rides back on the completion itself.
+    usage: { include: true },
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
       { role: "user", content: prompt },

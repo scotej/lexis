@@ -22,6 +22,7 @@ import { installStatsView, renderStatsView } from "./stats-view.js";
 import {
   initTypingView,
   installTypingView,
+  notifyTypingAiChanged,
   notifyTypingBankChanged,
   renderTypingView,
   suspendTypingView,
@@ -104,6 +105,8 @@ railLinks.forEach((btn, i) => {
 const aboutDialog = $("about-dialog");
 $("rail-about").addEventListener("click", () => aboutDialog.showModal());
 
+const mainColumn = document.querySelector("main");
+
 function switchView(name) {
   // The gate overlays the rail but doesn't inert it, so a keyboard user can
   // still reach these buttons before the app exists.
@@ -116,6 +119,11 @@ function switchView(name) {
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("active", v.id === `view-${name}`);
   });
+  // Every view shares one scrolling column, so arriving at a short view from
+  // halfway down a long one used to land below everything it contains — most
+  // visibly on the typing test, whose whole screen is one window high and
+  // which was simply not there when you pressed “type”.
+  mainColumn.scrollTop = 0;
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
@@ -1675,11 +1683,15 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
     } catch (verifyErr) {
       console.error(verifyErr);
       renderAiSettings();
+      notifyTypingAiChanged(); // the key saved even though the balance did not answer
       showAiStatus("Saved. Couldn’t reach OpenRouter to check the balance just now.");
       return;
     }
     aiKeyInfo = verified;
     renderAiSettings();
+    // The typing test's AI queue reads these settings; tell it now rather than
+    // leaving it to notice on the next visit to that view.
+    notifyTypingAiChanged();
     showAiStatus(`Saved and working — ${describeKeyInfo(verified)}.`);
   } catch (err) {
     showAiStatus(String(err.message ?? err), true);
@@ -1713,6 +1725,8 @@ function forgetAiKeyInSession() {
   aiWordCache.clear();
   aiOpenDrawers.clear();
   resetAiSessionUsage();
+  // Stop the typing test's queue asking a key that no longer exists.
+  notifyTypingAiChanged();
 }
 
 $("ai-remove").addEventListener("click", async () => {

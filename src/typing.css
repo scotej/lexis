@@ -45,8 +45,14 @@
   margin-bottom: 14px;
 }
 
+/* Wrapping, because one group can be seven chips wide. The bar wrapped
+   between groups but never inside one, so on a narrow window "quotes from"
+   ran off the right-hand edge and took the page's horizontal scrollbar with
+   it — chips nobody could reach without scrolling a page that is not meant to
+   scroll sideways. */
 .tt-chips {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
 }
@@ -104,12 +110,20 @@
   color: var(--pen);
 }
 
+/* Sits inside the notice sentence, so it lines up with it rather than
+   dropping onto a line of its own. */
+.tt-retry {
+  margin-left: 2px;
+  vertical-align: baseline;
+}
+
 /* ---- the meter above the passage ---- */
 
 .tt-meter {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 20px;
+  gap: 6px 20px;
   margin-bottom: 14px;
   min-height: 26px;
 }
@@ -124,8 +138,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Nothing to report at all: give the space back rather than ruling a blank
+   band across the page above the passage. */
+.tt-meter-quiet {
+  min-height: 0;
+  margin-bottom: 6px;
+}
+
+.tt-metric strong {
+  /* Enough room for three digits, so the row does not shuffle sideways as the
+     speed climbs from 9 to 10 to 100. */
+  min-width: 2.4ch;
+  display: inline-block;
+  text-align: right;
+}
+
 .tt-progress {
-  flex: 1;
+  flex: 1 1 120px;
   height: 2px;
   background: var(--hairline);
   align-self: center;
@@ -143,9 +172,14 @@
 .tt-scroller {
   position: relative;
   overflow: hidden;
+  /* One line of the passage. Named, because three separate rules need the same
+     number and the JS that scrolls the passage reads the resolved line-height
+     off the words themselves — a height built from a different arithmetic is
+     how the passage and its scroll step drift apart. */
+  --tt-line: calc(var(--tt-font-size) * 1.65);
   /* Three lines of it, so the eye has somewhere to go without the page
      jumping under the caret. */
-  height: calc(var(--tt-font-size) * 1.65 * 3);
+  height: calc(var(--tt-line) * 3);
   max-width: var(--tt-line-width);
   cursor: text;
 }
@@ -293,6 +327,12 @@
   opacity: 0.7;
 }
 
+/* Written with the id so it out-specifies the prompt below rather than
+   shouting over it. */
+#view-typing.tt-nothing .tt-scroller::after {
+  content: none;
+}
+
 #view-typing:not(.tt-engaged) .tt-scroller::after {
   content: "click, or press a key, to type";
   position: absolute;
@@ -311,7 +351,7 @@
 
 [data-tape="word"] .tt-scroller,
 [data-tape="letter"] .tt-scroller {
-  height: calc(var(--tt-font-size) * 1.65);
+  height: var(--tt-line);
   max-width: 100%;
 }
 
@@ -489,6 +529,9 @@
   margin-top: 34px;
   padding-top: 22px;
   border-top: 1px solid var(--hairline);
+  /* Scrolled to when it opens; without this its heading sits flush against the
+     top edge of the column with the rule cropped off. */
+  scroll-margin-top: 24px;
 }
 
 .tt-settings-block {
@@ -559,11 +602,32 @@
     --tt-line-width: 100%;
   }
 
+  .tt-bar {
+    gap: 6px 12px;
+  }
+
+  /* The tools chip claims the right-hand end of the bar. Once the bar wraps it
+     is alone on the last line, and pushing it to the far right of an otherwise
+     empty row reads as a stray. */
+  .tt-bar-tools {
+    margin-left: 0;
+  }
+
+  /* A setting's chips wrap under their own label rather than being pushed to a
+     right-hand edge that the label has already taken. */
+  .tt-setting-control {
+    justify-content: flex-start;
+  }
+
   .tt-result-head {
     gap: 28px;
   }
 
   .tt-big-value {
     font-size: 40px;
+  }
+
+  .tt-facts {
+    gap: 8px 20px;
   }
 }

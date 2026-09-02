@@ -16,9 +16,11 @@ language model. When an entry only restates an adverb as “in a … manner”,
 lexis clarifies it with common same-part-of-speech results from Datamuse
 instead of guessing which of the adjective's senses applies. Entries render
 like a print dictionary: headword, IPA, part of speech, numbered senses. Add
-several words in one go by separating them with spaces; lexis looks each up
-in turn. As the bank grows, sort it by date added, alphabetically, by due
-date, or by how much you've practised or used a word in essays.
+several words in one go by separating them with spaces; lexis looks them up a
+few at a time and adds them — or, if one of them cannot be found, none of
+them — as a single change to the bank. As the bank grows, sort it by date
+added, alphabetically, by due date, or by how much you've practised or used a
+word in essays.
 
 **Synonyms for essays.** Each word also gets a short run of synonyms drawn
 from [Datamuse](https://www.datamuse.com/api/) (corpus statistics, not AI) and
