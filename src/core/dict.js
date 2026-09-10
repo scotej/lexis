@@ -326,7 +326,12 @@ const RELATION_KEYS = new Set([
 ]);
 
 const MAX_RELATION_WORDS = 8;
-const LEADING_LABEL = /^\s*\([^)]*\)\s*/;
+// Every leading label, not just the first. Wiktionary stacks them freely —
+// "(British) (informal) Alternative spelling of colour." — and stripping one
+// leaves a gloss starting with "(", which no relation phrase can match. The
+// whole detector reads through this, so a miss here is a signpost banked as
+// though it were a definition.
+const LEADING_LABEL = /^\s*(?:\([^)]*\)\s*)+/;
 // The relation phrase may carry commas: Wiktionary writes "British, Canadian,
 // Commonwealth, and Ireland standard spelling of honor." for half the words an
 // Australian student types.
@@ -646,12 +651,19 @@ export async function expandDerivativeDefinitions(
  * then pressing "add it to the bank" asked both APIs the same question twice
  * over, and the second answer was always the first one. Memoized, the add is
  * instant and the panel is what paid for it.
+ *
+ * `clarify: false` is for a caller that only wants to *read* the entry — the
+ * root lookup behind a rewrite pastes its senses into a prompt and stores
+ * none of them. The cross-check costs two Datamuse requests per referenced
+ * adjective and its result would be discarded, so that caller asks for the
+ * entry as the dictionary wrote it. Cached apart, because the two answers are
+ * different answers to the same question.
  */
-export async function fetchDefinition(word) {
-  const key = String(word ?? "").trim().toLowerCase();
+export async function fetchDefinition(word, { clarify = true } = {}) {
+  const key = `${String(word ?? "").trim().toLowerCase()}${clarify ? "" : " raw"}`;
   const entry = await definitionCache.run(key, async () => {
     const dictionary = await fetchRawDefinition(word);
-    return await clarifyDerivativeDefinitions(word, dictionary);
+    return clarify ? await clarifyDerivativeDefinitions(word, dictionary) : dictionary;
   });
   // A copy, because the caller stores what it is given straight into the bank
   // and a cache that hands the same array to two callers has stopped being a

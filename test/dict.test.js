@@ -511,6 +511,13 @@ test("a gloss template is recognised, and an ordinary definition is not", () => 
   assert.equal(pointer("Synonym of death.").root, "death");
   assert.equal(pointer("Misspelling of receive.").kind, "misspelling");
   assert.equal(pointer("(informal) Abbreviation of laboratory.").root, "laboratory");
+  // Wiktionary stacks its labels, and stripping only the first left a gloss
+  // beginning with "(" that no relation phrase could ever match.
+  assert.equal(pointer("(British) (informal) Alternative spelling of colour.").root, "colour");
+  assert.equal(
+    pointer("(US) (dated) (rare) Obsolete form of gaol.").root,
+    "gaol"
+  );
 
   // Prose that happens to contain "of" is a definition, not a signpost — this
   // is the whole reason the relation vocabulary is a closed list.

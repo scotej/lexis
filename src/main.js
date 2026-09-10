@@ -1384,9 +1384,15 @@ $("backup-import").addEventListener("change", (e) =>
 let conflictLog = [];
 
 async function recordConflicts(fresh) {
+  // Detection is stateless: every poll re-derives the same conflicts from the
+  // channels until the other end converges, so `fresh` being non-empty says
+  // nothing about anything having changed. Hiding on that erased the summary
+  // of a resolve pass within one poll — and with the list emptied, the panel
+  // went with it. Only a conflict that was not already on the list makes the
+  // summary out of date.
+  const known = new Set(openConflicts().map((c) => c.id));
   conflictLog = foldConflicts(conflictLog, fresh);
-  // Whatever the last resolve pass said, it was about the list as it stood.
-  if (fresh.length) hideConflictStatus();
+  if (openConflicts().some((c) => !known.has(c.id))) hideConflictStatus();
   try {
     if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
   } catch (err) {
@@ -1520,6 +1526,27 @@ function hideConflictStatus() {
   status.hidden = true;
   status.textContent = "";
   status.classList.remove("error");
+}
+
+/**
+ * Writes the model's reason onto the card it is about.
+ *
+ * The pass is paced so each verdict can be read as it lands, which is only
+ * worth doing if the verdict is actually shown. `resolving` retires the card's
+ * own buttons at the same moment: the pass has decided this one, and a click
+ * on "use the other copy" now would be answering a question already answered.
+ */
+function paintVerdict(card, step) {
+  if (!card) return;
+  card.classList.add("resolving");
+  const line = el(
+    "p",
+    step.choice === "other" ? "conflict-verdict restored" : "conflict-verdict",
+    step.reason || (step.choice === "other" ? "restoring the other copy" : "keeping this copy")
+  );
+  const actions = card.querySelector(".conflict-actions");
+  if (actions) actions.before(line);
+  else card.append(line);
 }
 
 async function resolveConflictsWithAi() {

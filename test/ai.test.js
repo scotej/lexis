@@ -808,6 +808,25 @@ test("aiSpellFix returns a correction only when it is one", async () => {
   assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
 });
 
+test("aiSpellFix wants confidence stated, not merely undenied", async () => {
+  // The field simply left out. The instruction the model is given tells it to
+  // send an empty value for anything it has nothing for, so this is an
+  // ordinary reply rather than a malformed one — and it was reading as sure.
+  globalThis.fetch = replies({ correction: "receive" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+
+  // JSON booleans arrive as strings about as often as as booleans, and
+  // "false" is a perfectly ordinary truthy value.
+  globalThis.fetch = replies({ correction: "receive", confident: "false" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+  globalThis.fetch = replies({ correction: "receive", confident: "no" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+
+  // Said either way, yes is yes.
+  globalThis.fetch = replies({ correction: "receive", confident: "true" });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "recieve"), { word: "receive" });
+});
+
 test("aiSpellFix sends the word and nothing else", async () => {
   const sent = [];
   globalThis.fetch = (url, init) => {
@@ -1073,6 +1092,10 @@ test("the model's own word for restoring is read as restoring", async () => {
   assert.equal(await verdictFor("Keep."), "keep");
   // And anything else is not a decision.
   assert.equal(await verdictFor("maybe"), null);
+  // "none" is how a model declines to decide, not how it endorses the merge.
+  // Read as a keep, it dismissed a conflict nobody had decided.
+  assert.equal(await verdictFor("none"), null);
+  assert.equal(await verdictFor(""), null);
 });
 
 test("one ask carries at most a dozen conflicts", async () => {

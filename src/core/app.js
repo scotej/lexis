@@ -231,12 +231,22 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       dict = definition.value;
       const meant = misspellingOf(typed, dict);
       if (meant) {
-        const real = await lookupDefinition(meant).catch(() => null);
-        if (real) {
-          word = meant;
-          dict = real;
-          corrected = { typed, word: meant, by: "dictionary" };
-        }
+        // No falling back to the entry we started from. It is a signpost, and
+        // `needsDefinitionRepair` declines misspellings by design, so banking
+        // it would leave the student's typo in the bank with "Misspelling of
+        // receive." where its definition goes and nothing able to mend it.
+        // A host that was reachable a moment ago is worth another attempt,
+        // which is what saying so lets the student do.
+        const real = await lookupDefinition(meant).catch((err) => {
+          throw new Error(
+            `“${typed}” is a misspelling of “${meant}”, which couldn’t be looked up just now: ${String(
+              err?.message ?? err
+            )}`
+          );
+        });
+        word = meant;
+        dict = real;
+        corrected = { typed, word: meant, by: "dictionary" };
       }
     } else {
       const failure = definition.reason;
@@ -270,17 +280,6 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   }
 
   /**
-   * A definition that only names another word, replaced with one that says
-   * what this word means.
-   *
-   * The model is not asked what the word means from memory — it is handed the
-   * human-written entry for the root and asked to do the grammar, which is the
-   * one step Wiktionary left out. The result has to survive the same test that
-   * sent it there: if it comes back as another signpost, the editor-written
-   * entry stays. So does it if anything at all goes wrong; this is an upgrade,
-   * never a dependency.
-   */
-  /**
    * An entry for `root` that actually says something, following one pointer if
    * the first one only points again.
    *
@@ -294,7 +293,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
    */
   async function meaningfulEntry(root) {
     for (let hop = 0; hop < 2; hop++) {
-      const entry = await lookupDefinition(root).catch(() => null);
+      // Read, not stored: the senses are pasted into a prompt and thrown away,
+      // so the live adverb cross-check would spend Datamuse requests on a
+      // clarification nobody keeps — and on a sense the filter below drops.
+      const entry = await lookupDefinition(root, { clarify: false }).catch(() => null);
       if (!entry?.senses?.length) return null;
       if (saysSomething(entry)) return { root, entry };
       const onwards = derivedFrom(entry);
@@ -316,6 +318,17 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     return (dict.senses ?? []).some((original) => plain(original.def) === plain(sense.def));
   }
 
+  /**
+   * A definition that only names another word, replaced with one that says
+   * what this word means.
+   *
+   * The model is not asked what the word means from memory — it is handed the
+   * human-written entry for the root and asked to do the grammar, which is the
+   * one step Wiktionary left out. The result has to survive the same test that
+   * sent it there: if it comes back as another signpost, the editor-written
+   * entry stays. So does it if anything at all goes wrong; this is an upgrade,
+   * never a dependency.
+   */
   async function explained(word, dict, notify) {
     if (!canRescue(writeDerivedDefinition)) return { dict, written: null };
     const derived = needsDefinitionRepair(word, dict);
@@ -327,12 +340,18 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       // which is the one thing this feature promises not to do.
       const source = await meaningfulEntry(derived.root);
       if (!source) return { dict, written: null };
+      // Only the senses that say something. `meaningfulEntry` promises the
+      // entry holds at least one, not that it holds nothing else, and an
+      // entry whose signposts come first would otherwise fill the prompt on
+      // its own — the model told to stay inside meanings it was never given.
+      const rootSenses = source.entry.senses.filter((sense) => !saysNothing(sense));
+      if (!rootSenses.length) return { dict, written: null };
       const written = await writeDerivedDefinition(
         {
           word,
           root: source.root,
           gloss: derived.gloss,
-          rootSenses: source.entry.senses,
+          rootSenses,
         },
         notify
       );
@@ -436,6 +455,12 @@ export function createApp(storage, onChange = () => {}, services = {}) {
 
       return enqueueAddition(async () => {
         const pending = requested.filter((word) => !bankModel.find(bank, word));
+        // Named, not merely skipped. An all-or-nothing batch could let this
+        // pass, because `alreadyStoredError` spoke for the whole list; now
+        // that the others go in regardless, a word dropped here would be the
+        // one outcome the line under the box never mentions, and the student
+        // would read "added the rest" as "added them all".
+        const alreadyHeld = requested.filter((word) => bankModel.find(bank, word));
         if (!pending.length) throw alreadyStoredError(requested);
 
         const prepared = new Array(pending.length);
@@ -476,7 +501,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
           const added = [];
           const corrected = [];
           const written = [];
-          const failed = [];
+          const failed = alreadyHeld.map((word) => ({
+            word,
+            message: String(alreadyStoredError([word]).message),
+          }));
 
           for (let at = 0; at < pending.length; at++) {
             const typed = pending[at];
@@ -564,13 +592,28 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     /**
      * Reinstates a copy of a word the merge discarded. Committed as a normal
      * edit, so it propagates through GitHub and the Syncthing folder alike.
+     *
+     * A record and its dictionary are two conflicts with two answers, and
+     * `reinstateWord` restores a *whole* record — dictionary fields included.
+     * So restoring the record half was silently carrying the rejected
+     * definition back in with it, and bumping `definition_updated` ahead of
+     * both copies so it won every future merge too. Nothing about an edit
+     * conflict is ever about the definition: `baseLosses` weighs the schedule,
+     * the practice count and the synonyms, and a definition that differs is
+     * raised as its own conflict with its own buttons. So the dictionary the
+     * bank already holds is put back afterwards, and the restore means what it
+     * says. A word that is absent — a delete conflict — has no dictionary of
+     * its own to keep, and the record's comes in as it always did.
      */
     async restoreWord(record) {
       return enqueueMutation(async () => {
         const next = cloneBank();
+        const held = bankModel.find(next, record.word);
+        const keep = held ? dictionaryFields(held) : null;
         const entry = bankModel.reinstateWord(next, record);
+        if (keep) bankModel.updateDefinition(next, record.word, keep);
         await persistReplacement(next);
-        return entry;
+        return bankModel.find(next, record.word) ?? entry;
       });
     },
 
