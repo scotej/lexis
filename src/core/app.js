@@ -192,6 +192,46 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   }
 
   /**
+   * The word a "misspelling of" entry names, and the entry for *that* word.
+   *
+   * A signpost must never be what gets banked. `needsDefinitionRepair` declines
+   * misspellings by design, so a word left holding "Misspelling of receive."
+   * where its definition goes has nothing able to mend it — and if a model put
+   * it there, it sits under a notice claiming it was corrected.
+   *
+   * One pointer is not always enough. Wiktionary carries entries for the common
+   * typos themselves, so the word a model offers as the correction can be one
+   * too: "recive" is answered with "recieve", whose whole entry is a signpost
+   * at "receive". A second hop settles that, and `seen` stops a pair of entries
+   * that name each other from going round for ever.
+   *
+   * A host that was reachable a moment ago is worth another attempt, which is
+   * what saying so lets the student do.
+   */
+  async function followMisspelling(word, dictionary) {
+    let current = word;
+    let entry = dictionary;
+    const seen = new Set([current]);
+
+    for (let hop = 0; hop < 2; hop++) {
+      const meant = misspellingOf(current, entry);
+      if (!meant || seen.has(meant)) break;
+      const real = await lookupDefinition(meant).catch((err) => {
+        throw new Error(
+          `“${current}” is a misspelling of “${meant}”, which couldn’t be looked up just now: ${String(
+            err?.message ?? err
+          )}`
+        );
+      });
+      seen.add(meant);
+      current = meant;
+      entry = real;
+    }
+
+    return { word: current, dict: entry };
+  }
+
+  /**
    * The dictionary entry, synonyms, and — if the word needed rescuing on the
    * way — what was done about it.
    *
@@ -229,24 +269,11 @@ export function createApp(storage, onChange = () => {}, services = {}) {
 
     if (definition.status === "fulfilled") {
       dict = definition.value;
-      const meant = misspellingOf(typed, dict);
-      if (meant) {
-        // No falling back to the entry we started from. It is a signpost, and
-        // `needsDefinitionRepair` declines misspellings by design, so banking
-        // it would leave the student's typo in the bank with "Misspelling of
-        // receive." where its definition goes and nothing able to mend it.
-        // A host that was reachable a moment ago is worth another attempt,
-        // which is what saying so lets the student do.
-        const real = await lookupDefinition(meant).catch((err) => {
-          throw new Error(
-            `“${typed}” is a misspelling of “${meant}”, which couldn’t be looked up just now: ${String(
-              err?.message ?? err
-            )}`
-          );
-        });
-        word = meant;
-        dict = real;
-        corrected = { typed, word: meant, by: "dictionary" };
+      const settled = await followMisspelling(typed, dict);
+      if (settled.word !== typed) {
+        word = settled.word;
+        dict = settled.dict;
+        corrected = { typed, word: settled.word, by: "dictionary" };
       }
     } else {
       const failure = definition.reason;
@@ -261,9 +288,16 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       // thing to report is still the original failure.
       const real = await lookupDefinition(meant).catch(() => null);
       if (!real) throw failure;
-      word = meant;
-      dict = real;
-      corrected = { typed, word: meant, by: "ai" };
+      // And the model's word may itself be one the dictionary only knows as a
+      // mistake: "recieve" has a real entry, and the whole of it is
+      // "Misspelling of receive." Banking that would leave a typo in the bank
+      // under a notice saying it had been corrected, with a signpost where its
+      // definition goes — the exact thing this feature exists to prevent.
+      const settled = await followMisspelling(meant, real).catch(() => null);
+      if (!settled || settled.word === typed) throw failure;
+      word = settled.word;
+      dict = settled.dict;
+      corrected = { typed, word: settled.word, by: "ai" };
     }
 
     // The typo's synonyms belong to the typo. A corrected word asks again.

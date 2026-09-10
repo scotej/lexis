@@ -770,6 +770,54 @@ test("an unfindable word is corrected by the model and checked against the dicti
   assert.deepEqual(app.listWords()[0].synonyms, [{ word: "receive-syn", freq: 1, score: 1 }]);
 });
 
+test("a model's correction that is itself only a misspelling is followed on", async () => {
+  // The commonest typos have entries of their own, and the whole of such an
+  // entry is a signpost. Banking it would put a typo in the bank under a
+  // notice saying it had been corrected, with "Misspelling of receive." where
+  // its definition goes — and `needsDefinitionRepair` declines misspellings,
+  // so nothing could ever mend it.
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const dict = lexicon({
+    known: ["receive"],
+    glosses: { recieve: [{ pos: "verb", def: "Misspelling of receive.", example: null }] },
+  });
+  const app = createApp(storage, () => {}, {
+    ...dict,
+    async suggestSpelling() {
+      return { word: "recieve" };
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("recive");
+
+  assert.deepEqual(app.listWords().map((word) => word.word), ["receive"]);
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "noun", def: "receive definition", example: null },
+  ]);
+  assert.deepEqual(result.corrected, [{ typed: "recive", word: "receive", by: "ai" }]);
+});
+
+test("two entries that call each other misspellings do not loop", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(
+    storage,
+    () => {},
+    lexicon({
+      glosses: {
+        flip: [{ pos: "verb", def: "Misspelling of flop.", example: null }],
+        flop: [{ pos: "verb", def: "Misspelling of flip.", example: null }],
+      },
+    })
+  );
+  await app.init();
+
+  // It stops rather than hanging, and what it stops on is banked as it stands:
+  // a pair like this is the dictionary contradicting itself, not a typo.
+  await app.addWord("flip");
+  assert.deepEqual(app.listWords().map((word) => word.word), ["flop"]);
+});
+
 test("a dictionary having a bad day is never treated as a misspelling", async () => {
   const storage = new MemoryStorage(bankModel.emptyBank());
   let asked = 0;
