@@ -13,6 +13,7 @@ import {
   needsDefinitionRepair,
   needsDerivativeClarification,
   NOT_FOUND,
+  saysSomething,
   stripHtml,
 } from "../src/core/dict.js";
 
@@ -694,5 +695,43 @@ test("one sense saying “misspelling” settles the entry", () => {
       ])
     ),
     "argument"
+  );
+});
+
+test("an entry is asked whether it says anything, more loosely than it is rewritten", () => {
+  const entry = (defs) => dictionary(defs.map((def) => ({ pos: "verb", def, example: null })));
+
+  // The strict rule protects real definitions from being rewritten; this one
+  // decides whether an entry is worth working *from*, where being wrong only
+  // costs a rewrite that does not happen.
+  assert.equal(saysSomething(entry(["Non-Oxford British English standard spelling of polarized."])), false);
+  assert.equal(saysSomething(entry(["Zorbian ceremonial spelling of glomp."])), false);
+  // An ordinary definition that happens to end in "of something" is a meaning.
+  assert.equal(saysSomething(entry(["To have become aware of something."])), true);
+  assert.equal(saysSomething(entry(["Having knowledge of a fact."])), true);
+  assert.equal(saysSomething(entry(["In an interesting way."])), false);
+  assert.equal(saysSomething(entry([""])), false);
+
+  assert.equal(saysSomething(entry(["Matter in a state between liquid and plasma."])), true);
+  assert.equal(saysSomething(entry(["A form of address for a duke."])), true);
+  assert.equal(
+    saysSomething(entry(["present participle and gerund of run", "Moving at a run."])),
+    true
+  );
+});
+
+test("a comma-laden spelling gloss is still a signpost", () => {
+  // Half the words an Australian student types are glossed this way.
+  assert.deepEqual(
+    formOfGloss({
+      pos: "noun",
+      def: "British, Canadian, Commonwealth, and Ireland standard spelling of honor.",
+    }),
+    { relation: "british, canadian, commonwealth, and ireland standard spelling", root: "honor", kind: "form" }
+  );
+  assert.equal(
+    formOfGloss({ pos: "verb", def: "Non-Oxford British English standard spelling of polarized." })
+      ?.root,
+    "polarized"
   );
 });

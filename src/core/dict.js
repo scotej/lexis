@@ -390,18 +390,41 @@ export function formOfGloss(sense) {
  * other direction — "is there a meaning in here to work from?" — where a false
  * positive costs only a rewrite that does not happen, and Wiktionary's supply
  * of label vocabulary is bottomless ("Non-Oxford British standard spelling
- * of…"). Anchored at both ends, so ordinary prose that merely contains "of"
- * does not match.
+ * of…"). Anchored at both ends, and still required to be about word-form, so
+ * the many ordinary definitions that end in "of something" are not swept up.
  */
-const POINTER_SHAPED = /^[a-z][a-z', -]{0,60} of [a-z][a-z'’-]+[.,:;!?]*$/i;
+const POINTER_SHAPE = /^([a-z][a-z', -]{0,60}) of [a-z][a-z'’-]+[.,:;!?]*$/i;
+
+function pointerShaped(text) {
+  const shape = text.match(POINTER_SHAPE);
+  if (!shape) return false;
+  // Still about word-form, or it is just a definition that ends in "of
+  // something" — and most of them do. "Having knowledge of something" is a
+  // meaning; "Zorbian ceremonial spelling of glomp" is a signpost in a
+  // vocabulary nobody has enumerated.
+  return shape[1]
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .some((word) => RELATION_KEYS.has(word));
+}
+
+/**
+ * Whether one sense names another word instead of saying anything.
+ *
+ * The adverb formula is tested against the text rather than through
+ * `referencedAdjective`, which asks the part of speech first: this is also the
+ * test applied to what a model writes back, and a model's idea of a part of
+ * speech is not evidence of anything.
+ */
+export function saysNothing(sense) {
+  const text = String(sense?.def ?? "").trim().replace(LEADING_LABEL, "");
+  if (!text) return true;
+  return Boolean(formOfGloss(sense)) || OPAQUE_ADVERB.test(text) || pointerShaped(text);
+}
 
 /** Whether an entry holds any sense that is a meaning rather than a signpost. */
 export function saysSomething(dictionary) {
-  return (dictionary?.senses ?? []).some((sense) => {
-    const text = String(sense?.def ?? "").trim().replace(LEADING_LABEL, "");
-    if (!text) return false;
-    return !formOfGloss(sense) && !referencedAdjective(sense) && !POINTER_SHAPED.test(text);
-  });
+  return (dictionary?.senses ?? []).some((sense) => !saysNothing(sense));
 }
 
 /** What a sense points at, whether by form-of gloss or by opaque adverb formula. */

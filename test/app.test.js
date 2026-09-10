@@ -1049,3 +1049,93 @@ test("a thesaurus failure still fails its own word", async () => {
     { word: "modality", message: "couldn’t add “modality”: datamuse is down" },
   ]);
 });
+
+test("a root that is itself a signpost is followed to the word that answers", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const seen = [];
+  const log = [];
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      known: ["realize"],
+      log,
+      glosses: {
+        realised: [{ pos: "verb", def: "simple past and past participle of realise", example: null }],
+        realise: [
+          { pos: "verb", def: "Non-Oxford British standard spelling of realize.", example: null },
+        ],
+      },
+    }),
+    async writeDerivedDefinition(request) {
+      seen.push(request);
+      return { senses: [{ pos: "verb", def: "To have become aware of something." }] };
+    },
+  });
+  await app.init();
+
+  await app.addWord("realised");
+
+  // The material handed over is realize's entry, not realise's signpost.
+  assert.deepEqual(seen.map((request) => request.root), ["realize"]);
+  assert.deepEqual(seen[0].rootSenses, [
+    { pos: "noun", def: "realize definition", example: null },
+  ]);
+  assert.match(app.listWords()[0].source, /written out by AI from “realize”/);
+  assert.deepEqual(log, [
+    "definition:realised",
+    "synonyms:realised",
+    "definition:realise",
+    "definition:realize",
+  ]);
+});
+
+test("a root that says nothing, and points nowhere lexis recognises, is not written out", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      glosses: {
+        blorbed: [{ pos: "verb", def: "simple past and past participle of blorb", example: null }],
+        // A relation phrase from no vocabulary lexis knows: not a recognised
+        // pointer, and not a meaning either.
+        blorb: [{ pos: "verb", def: "Zorbian ceremonial spelling of glomp.", example: null }],
+      },
+    }),
+    async writeDerivedDefinition() {
+      asked += 1;
+      return { senses: [{ pos: "verb", def: "invented from nothing" }] };
+    },
+  });
+  await app.init();
+
+  await app.addWord("blorbed");
+
+  assert.equal(asked, 0, "there was nothing to write from");
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "verb", def: "simple past and past participle of blorb", example: null },
+  ]);
+});
+
+test("only the senses that answer are kept out of a mixed reply", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      known: ["gas"],
+      glosses: { gases: [{ pos: "noun", def: "plural of gas", example: null }] },
+    }),
+    async writeDerivedDefinition() {
+      return {
+        senses: [
+          { pos: "noun", def: "plural of gas" }, // the signpost, restated
+          { pos: "noun", def: "More than one gas." }, // the answer
+        ],
+      };
+    },
+  });
+  await app.init();
+
+  await app.addWord("gases");
+
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "noun", def: "More than one gas.", example: null },
+  ]);
+});

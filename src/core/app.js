@@ -25,6 +25,8 @@ import {
   needsDefinitionRepair,
   needsDerivativeClarification,
   NOT_FOUND,
+  saysNothing,
+  saysSomething,
 } from "./dict.js";
 import { mergeBanks } from "./merge.js";
 import { todayISO } from "./srs.js";
@@ -294,23 +296,24 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     for (let hop = 0; hop < 2; hop++) {
       const entry = await lookupDefinition(root).catch(() => null);
       if (!entry?.senses?.length) return null;
+      if (saysSomething(entry)) return { root, entry };
       const onwards = derivedFrom(entry);
-      if (!onwards) return { root, entry };
-      if (onwards.root === root) return null;
+      // Nothing to work from, and nowhere further to look: the editor's
+      // signpost stays, which at least points somewhere true.
+      if (!onwards || onwards.root === root) return null;
       root = onwards.root;
     }
     return null;
   }
 
-  /** Whether the model simply handed the unhelpful gloss back in its own words. */
-  function echoesGloss(dict, rewritten) {
+  /** Whether the model simply handed one of the unhelpful glosses back. */
+  function echoesGloss(dict, sense) {
     const plain = (text) =>
       String(text ?? "")
         .toLowerCase()
         .replace(/[.!]+$/, "")
         .trim();
-    const original = new Set((dict.senses ?? []).map((sense) => plain(sense.def)));
-    return rewritten.senses.some((sense) => original.has(plain(sense.def)));
+    return (dict.senses ?? []).some((original) => plain(original.def) === plain(sense.def));
   }
 
   async function explained(word, dict, notify) {
@@ -333,13 +336,16 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         },
         notify
       );
+      // Sense by sense, because a reply is not all one thing: a model that
+      // writes one real definition and one restatement of the signpost has
+      // answered once, and only the answer is worth keeping.
       const senses = (written?.senses ?? [])
         .map((sense) => ({
           pos: String(sense?.pos ?? "").trim().toLowerCase(),
           def: String(sense?.def ?? "").trim(),
           example: null,
         }))
-        .filter((sense) => sense.def);
+        .filter((sense) => sense.def && !saysNothing(sense) && !echoesGloss(dict, sense));
       if (!senses.length) return { dict, written: null };
 
       const rewritten = {
@@ -348,11 +354,6 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         source: `${dict.source} · written out by AI from “${source.root}”`,
         source_url: source.entry.source_url ?? dict.source_url,
       };
-      // A reply that is itself a signpost, or that simply hands the gloss
-      // back, has not answered — and the editor's text is better than either.
-      if (derivedFrom(rewritten) || echoesGloss(dict, rewritten)) {
-        return { dict, written: null };
-      }
       return { dict: rewritten, written: { word, root: source.root } };
     } catch {
       return { dict, written: null };
