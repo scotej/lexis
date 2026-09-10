@@ -588,6 +588,20 @@ function asString(value) {
   return s;
 }
 
+/**
+ * Whether a field a model was asked for as a boolean actually says yes.
+ *
+ * Models answer booleans in JSON with strings about as often as with booleans,
+ * and `"false"` is a perfectly ordinary truthy value. A guard written as "not
+ * literally `false`" therefore lets both the string and the missing field
+ * through, which is the wrong direction for every use here: absent evidence is
+ * not consent.
+ */
+function affirms(value) {
+  if (typeof value === "string") return /^(?:true|yes|y|1)$/i.test(value.trim());
+  return value === true || value === 1;
+}
+
 function asStringArray(value, limit) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1020,4 +1034,311 @@ export async function aiNuance(settings, words) {
     throw new Error("The comparison came back empty. Try again.");
   }
   return { distinctions, guidance };
+}
+
+/* ---- feature: spelling rescue ---- */
+
+/**
+ * How far a "correction" may travel from what was typed.
+ *
+ * A misspelling is a near miss: two or three letters wrong, occasionally four
+ * in a long word. Anything further is not a correction but a substitution,
+ * and a model asked to fix "xqzt" will happily produce one — which would put
+ * a word the student never typed into their bank, under a notice claiming it
+ * was their own. The bound is what keeps this feature honest.
+ */
+function editDistance(a, b) {
+  const rows = a.length + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i < rows; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j] + 1,
+        row[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+function correctionBudget(word) {
+  return word.length >= 12 ? 4 : word.length >= 7 ? 3 : 2;
+}
+
+const SPELLABLE = /^[a-z][a-z'-]*$/;
+
+/**
+ * The word the student meant, when no dictionary has heard of the one they
+ * typed.
+ *
+ * The whole request is one word — nothing about their bank, their draft, or
+ * what they were doing goes with it — and the answer is treated as a
+ * suggestion to be checked against a dictionary, never as a fact. A model
+ * that has nothing to offer says so, and `null` comes back rather than an
+ * invented word.
+ */
+export async function aiSpellFix(settings, word) {
+  const typed = String(word ?? "").trim().toLowerCase();
+  if (!typed) throw new Error("Name a word first.");
+
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{correction: string, confident: boolean}')}`,
+    prompt: [
+      `No English dictionary has an entry for “${typed}”.`,
+      "If it is a misspelling of one ordinary English word, give that word in \"correction\".",
+      "It must be a spelling fix — the word the writer was reaching for — not a different word that means something similar.",
+      'If it is not a misspelling, or you cannot tell which word was meant, return "" and confident false.',
+      '"correction" is one lowercase word, with no explanation around it.',
+    ].join("\n"),
+    temperature: 0.2,
+  });
+
+  const suggestion = asString(parsed?.correction).trim().toLowerCase().replace(/[.,!?]+$/, "");
+  // Confidence has to be *stated*, not merely not-denied. A reply that drops
+  // the field, or sends the string "false" — both of which the surrounding
+  // instruction to give an empty value for anything unknown invites — was
+  // reading as confident, and the correction went in under a notice claiming
+  // the student had typed it.
+  if (!suggestion || !affirms(parsed?.confident)) return null;
+  if (!SPELLABLE.test(suggestion) || suggestion === typed) return null;
+  if (editDistance(typed, suggestion) > correctionBudget(typed)) return null;
+  return { word: suggestion };
+}
+
+/* ---- feature: what a derived word actually means ---- */
+
+/** Never more than a dictionary entry's worth, however much comes back. */
+const MAX_REPAIRED_SENSES = 3;
+const MAX_ROOT_SENSES = 4;
+
+/**
+ * This is the only model-written text lexis stores, syncs, and shows as a
+ * definition, so it is held to a dictionary's shape rather than a chat
+ * reply's: a part of speech that is one, and a sense short enough to have
+ * been the one sentence that was asked for. Anything longer is not a
+ * definition that was trimmed, it is a different kind of answer.
+ */
+const MAX_DEF_CHARS = 400;
+const PARTS_OF_SPEECH = new Set([
+  "noun", "proper noun", "verb", "adjective", "adverb", "pronoun", "preposition",
+  "conjunction", "interjection", "determiner", "article", "numeral", "particle",
+  "phrase", "prefix", "suffix",
+]);
+
+/**
+ * A definition for a word whose dictionary entry only points at another word.
+ *
+ * "interestingly" is *in an interesting way*; "gases" is *plural of gas*.
+ * Both are true and neither is a meaning, and the student who typed the word
+ * is left to make the last step themselves — which is exactly the step they
+ * were asking about.
+ *
+ * The model is not asked what the word means from memory. It is handed the
+ * human-written entry for the root and asked to say what the *derived* form
+ * says, which keeps the answer anchored to Wiktionary's scholarship and
+ * leaves the model doing the one thing it is good at here: the grammar.
+ */
+export async function aiRootMeaning(settings, { word, gloss = "", root, rootSenses = [] }) {
+  const w = String(word ?? "").trim();
+  const base = String(root ?? "").trim();
+  if (!w || !base) throw new Error("Name a word and its root first.");
+
+  const material = (Array.isArray(rootSenses) ? rootSenses : [])
+    .slice(0, MAX_ROOT_SENSES)
+    .map((sense) => {
+      const pos = asString(sense?.pos);
+      const def = asString(sense?.def);
+      return def ? `${pos ? `(${pos}) ` : ""}${def}` : "";
+    })
+    .filter(Boolean);
+
+  // No root entry, no request. The whole claim this feature makes is that the
+  // meaning comes from Wiktionary's own words and the model only does the
+  // grammar; asked with nothing to work from it would answer from memory,
+  // and the answer would be banked, synced, and labelled as if it had not.
+  if (!material.length) {
+    throw new Error(`No dictionary entry for “${base}” to work from.`);
+  }
+
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{senses: [{"pos": string, "def": string}]}')}`,
+    prompt: [
+      `A dictionary defines “${w}” only as ${gloss ? `“${gloss}”` : `a form of “${base}”`},`,
+      `which tells a student nothing. Write what “${w}” itself means.`,
+      `The dictionary's own entry for “${base}” reads:\n${material.map((line) => `- ${line}`).join("\n")}`,
+      "Give one or two senses. Each is one sentence, in the register a dictionary uses — a definition, not a usage note.",
+      `"pos" is the part of speech of “${w}” itself (adverb, noun, verb, adjective), not of “${base}”.`,
+      `Never restate the pointer: a definition that says “${w}” is a form of “${base}” is the answer that failed.`,
+      "Stay inside the meanings above; do not invent a sense the root entry does not support.",
+    ].join("\n"),
+    temperature: 0.3,
+  });
+
+  const rows = Array.isArray(parsed?.senses) ? parsed.senses : [];
+  const senses = [];
+  for (const row of rows) {
+    const def = asString(typeof row === "string" ? row : row?.def).trim();
+    if (!def || def.length > MAX_DEF_CHARS) continue;
+    const pos = asString(typeof row === "string" ? "" : row?.pos).trim().toLowerCase();
+    senses.push({ pos: PARTS_OF_SPEECH.has(pos) ? pos : "", def, example: null });
+    if (senses.length >= MAX_REPAIRED_SENSES) break;
+  }
+  if (!senses.length) throw new Error("No usable definition came back. Try again.");
+  return { senses };
+}
+
+/* ---- feature: resolving sync conflicts ---- */
+
+/** How much of a losing copy is worth showing a model, and no more. */
+const BRIEF_SENSES = 3;
+const BRIEF_SYNONYMS = 6;
+const BRIEF_DEF_CHARS = 500;
+
+function briefDefinition(record) {
+  return (record.senses ?? [])
+    .slice(0, BRIEF_SENSES)
+    .map((sense) => `${sense?.pos ? `(${sense.pos}) ` : ""}${asString(sense?.def)}`.trim())
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, BRIEF_DEF_CHARS);
+}
+
+/**
+ * What is actually in dispute, which depends on which of a word's two clocks
+ * the merge had to choose on.
+ *
+ * A definition conflict is resolved through `restoreDefinition`, which by
+ * design touches the dictionary fields and nothing else — so showing a model
+ * the two copies' review counts there would be inviting it to decide the
+ * question on evidence that has no bearing on the outcome, and to restore a
+ * definition because the copy it came with had been practised more.
+ */
+function briefCopy(record, kind) {
+  if (!record) return null;
+  const definition = briefDefinition(record);
+  if (kind === "definition") return { definition, source: asString(record.source) };
+  return {
+    definition,
+    synonyms: (record.synonyms ?? [])
+      .slice(0, BRIEF_SYNONYMS)
+      .map((row) => asString(typeof row === "string" ? row : row?.word))
+      .filter(Boolean),
+    reviews: Number(record.srs?.reps ?? 0),
+    lapses: Number(record.srs?.lapses ?? 0),
+    practised: Number(record.times_used ?? 0),
+  };
+}
+
+/**
+ * Exactly what leaves the device for one conflict — built here, by naming the
+ * fields rather than by deleting the ones that must not go.
+ *
+ * A word record carries a review log, an essay-use log, and the ids of the
+ * drafts those uses came from. None of that helps anyone decide which copy to
+ * keep, and an essay-log id is a fact about the student's own writing. A
+ * whitelist is the only way to keep a field added later from quietly joining
+ * the payload.
+ */
+export function conflictBrief(entry, ref) {
+  const kind = asString(entry?.kind);
+  return {
+    // A number for this request, not the conflict's own id: that id encodes
+    // the millisecond at which a word was deleted, which decides nothing here
+    // and is nobody else's business. The caller maps the answer back.
+    ref: String(ref),
+    word: asString(entry?.word),
+    kind,
+    keptFrom: asString(entry?.keptSide),
+    lostFrom: asString(entry?.lostSide),
+    whatTheMergeDiscarded: asStringArray(entry?.reasons, 6),
+    kept: briefCopy(entry?.kept, kind),
+    discarded: briefCopy(entry?.lost, kind),
+  };
+}
+
+/** How many conflicts one request may carry. Beyond this the answer thins out. */
+const MAX_CONFLICTS_PER_ASK = 12;
+
+/**
+ * The two answers, in the words a model actually uses for them.
+ *
+ * Treating everything that is not the literal "other" as "keep" made the one
+ * word the prompt itself uses to *describe* restoring — "restore the discarded
+ * one" — mean its opposite. Anything still unreadable is no answer at all, and
+ * an unanswered conflict stays open for a person, which is the safe end of
+ * being wrong.
+ */
+const RESTORE_WORDS = new Set([
+  "other", "restore", "restored", "discarded", "take-other", "take other", "other copy",
+  "the other", "the other copy", "lost",
+]);
+// "none" is not on this list. It is how a model says it has no verdict, not
+// how it says the merge was right, and reading it as a decision dismissed a
+// conflict nobody had decided.
+const KEEP_WORDS = new Set([
+  "keep", "kept", "keep current", "current", "merge", "merged", "as-is", "as is",
+]);
+
+function readChoice(value) {
+  const text = asString(value).trim().toLowerCase().replace(/[."'\s]+$/, "");
+  if (RESTORE_WORDS.has(text)) return "other";
+  if (KEEP_WORDS.has(text)) return "keep";
+  return null;
+}
+
+/**
+ * Reads the conflict list and says, for each one, whether the copy the merge
+ * kept is the right one — with a reason a person can disagree with.
+ *
+ * The verdicts are advice, not an action: the caller applies them through the
+ * same "use the other copy" path a student would have used by hand, so
+ * nothing happens here that could not have been done, and undone, manually.
+ */
+export async function aiResolveConflicts(settings, conflicts) {
+  const list = (Array.isArray(conflicts) ? conflicts : []).slice(0, MAX_CONFLICTS_PER_ASK);
+  if (!list.length) throw new Error("There are no conflicts to resolve.");
+  const briefs = list.map((entry, at) => conflictBrief(entry, at + 1));
+
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction(
+      '{verdicts: [{"ref": string, "choice": "keep" | "other", "reason": string}]}'
+    )}`,
+    prompt: [
+      "Two of a student's devices edited the same vocabulary words while apart.",
+      "A merge already chose one copy of each; the other was discarded. Say whether it chose well.",
+      '"choice" is "keep" to let the merge\'s copy stand, or "other" to restore the discarded one.',
+      '"reason" is one short sentence a student would understand — say what the copy you chose has.',
+      "Prefer the copy with the fuller, more precise definition.",
+      'Where practice history is shown, prefer the copy that is further along; where it is not — a "definition" conflict restores the dictionary entry alone — decide on the definitions only.',
+      "A word deleted on one device after being edited on the other is usually worth putting back only if the discarded copy holds real work.",
+      "When the two are equally good, choose \"keep\" — an unnecessary restore is still a change to their bank.",
+      "Return one verdict per entry, using the \"ref\" numbers exactly as given.",
+      "",
+      JSON.stringify(briefs, null, 1),
+    ].join("\n"),
+    temperature: 0.3,
+  });
+
+  const rows = Array.isArray(parsed?.verdicts) ? parsed.verdicts : [];
+  const answers = new Map();
+  for (const row of rows) {
+    const ref = asString(row?.ref ?? row?.id).trim();
+    if (!ref || answers.has(ref)) continue;
+    const choice = readChoice(row?.choice);
+    if (!choice) continue; // unreadable: the card stays open for a person
+    answers.set(ref, { choice, reason: stripEmphasis(asString(row?.reason)).trim() });
+  }
+
+  // Back to the conflicts the caller knows about, in the order they were asked.
+  const verdicts = briefs
+    .map((brief, at) => {
+      const answer = answers.get(brief.ref);
+      return answer ? { id: asString(list[at]?.id), ...answer } : null;
+    })
+    .filter((verdict) => verdict && verdict.id);
+  if (!verdicts.length) throw new Error("No usable verdicts came back. Try again.");
+  return { verdicts, asked: briefs.length };
 }

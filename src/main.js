@@ -15,6 +15,8 @@ import { createMirror, newDeviceId, peerFileName, sealMirror } from "./core/mirr
 import {
   foldConflicts,
   loadConflictLog,
+  planResolution,
+  resolvableConflicts,
   saveConflictLog,
   clearConflictLog,
 } from "./core/conflict.js";
@@ -31,8 +33,11 @@ import {
   aiEssayReview,
   aiExampleSentences,
   aiNuance,
+  aiResolveConflicts,
+  aiRootMeaning,
   aiSessionUsage,
   aiSimilarWords,
+  aiSpellFix,
   exampleContext,
   fetchKeyInfo,
   fetchModels,
@@ -313,6 +318,31 @@ addInput.addEventListener("input", () => {
   addStatus.classList.remove("error");
 });
 
+/**
+ * Everything that happened, in the order it happened to the words as typed:
+ * what went in, what was corrected on the way, what a model had to write out,
+ * and what could not be found at all. A batch is no longer all-or-nothing, so
+ * "added ‘x’" on its own would be a half-truth whenever anything else
+ * occurred.
+ */
+function describeAddition(result) {
+  const added = result.added ?? result.batch ?? [result];
+  const notes = [];
+  if (added.length) notes.push(`added “${added.map((entry) => entry.word).join(" · ")}”`);
+  for (const fix of result.corrected ?? []) {
+    notes.push(
+      fix.by === "ai"
+        ? `ai corrected “${fix.typed}” to “${fix.word}”`
+        : `“${fix.typed}” is a misspelling of “${fix.word}”`
+    );
+  }
+  for (const rewrite of result.written ?? []) {
+    notes.push(`ai wrote out “${rewrite.word}” from “${rewrite.root}”`);
+  }
+  for (const failure of result.failed ?? []) notes.push(failure.message);
+  return notes.join(" · ");
+}
+
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const word = addInput.value.trim();
@@ -322,12 +352,23 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
   try {
-    const result = await app.addWord(word);
-    const addedEntries = result.batch ?? [result];
+    // A rescue inside the add can have a model thinking for half a minute.
+    // Left saying "finding “recieve”…" for all of it, that reads as a hang on
+    // a lookup which has in fact already failed and is being repaired. The
+    // channel travels with the call, so a second add started elsewhere cannot
+    // narrate into this line.
+    const result = await app.addWord(word, {
+      onProgress: (text) => {
+        addStatus.textContent = text;
+      },
+    });
+    const addedEntries = result.added ?? result.batch ?? [result];
     for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
     await renderBank();
-    addStatus.textContent = `added “${addedEntries.map((entry) => entry.word).join(" · ")}”`;
+    addStatus.textContent = describeAddition(result);
+    // Something in there did not work, even though something else did.
+    addStatus.classList.toggle("error", (result.failed ?? []).length > 0);
     addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
@@ -853,10 +894,26 @@ function renderLookupResult(word, dict) {
       lookupStatus.classList.remove("error");
       lookupStatus.textContent = `adding “${word}”…`;
       try {
-        await app.addWord(word);
-        expandedWords.add(word);
+        // A misspelling is banked under the word it was a misspelling of, and
+        // a signpost definition may have been written out on the way in — so
+        // the message names what actually went in rather than what was read
+        // on screen.
+        const result = await app.addWord(word, {
+          onProgress: (text) => {
+            lookupStatus.textContent = text;
+          },
+        });
+        const stored = result.word;
+        expandedWords.add(stored);
         await renderBank();
-        lookupStatus.textContent = `“${word}” is in your bank now`;
+        lookupStatus.textContent = [
+          stored === word
+            ? `“${word}” is in your bank now`
+            : `“${word}” is a misspelling of “${stored}”, which is in your bank now`,
+          ...(result.written ?? []).map(
+            (rewrite) => `ai wrote out its definition from “${rewrite.root}”`
+          ),
+        ].join(" · ");
         add.replaceWith(el("span", null, "in your bank"));
       } catch (err) {
         lookupStatus.textContent = String(err.message ?? err);
@@ -1327,7 +1384,15 @@ $("backup-import").addEventListener("change", (e) =>
 let conflictLog = [];
 
 async function recordConflicts(fresh) {
+  // Detection is stateless: every poll re-derives the same conflicts from the
+  // channels until the other end converges, so `fresh` being non-empty says
+  // nothing about anything having changed. Hiding on that erased the summary
+  // of a resolve pass within one poll — and with the list emptied, the panel
+  // went with it. Only a conflict that was not already on the list makes the
+  // summary out of date.
+  const known = new Set(openConflicts().map((c) => c.id));
   conflictLog = foldConflicts(conflictLog, fresh);
+  if (openConflicts().some((c) => !known.has(c.id))) hideConflictStatus();
   try {
     if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
   } catch (err) {
@@ -1345,6 +1410,7 @@ async function recordConflicts(fresh) {
  */
 async function dropConflict(id) {
   conflictLog = conflictLog.map((c) => (c.id === id ? { ...c, dismissed: true } : c));
+  hideConflictStatus(); // the summary described the list as it stood
   try {
     if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
   } catch (err) {
@@ -1353,8 +1419,12 @@ async function dropConflict(id) {
   renderConflicts();
 }
 
+/** The card on screen for each open conflict, so a verdict can find its own. */
+const conflictCards = new Map();
+
 function conflictNode(entry) {
   const li = el("li", "conflict");
+  conflictCards.set(entry.id, li);
   li.append(el("p", "conflict-word", entry.word));
 
   const when = new Date(entry.at ?? 0);
@@ -1407,11 +1477,198 @@ function conflictNode(entry) {
   return li;
 }
 
-function renderConflicts() {
-  const open = conflictLog.filter((c) => !c.dismissed);
-  $("conflicts").hidden = open.length === 0;
-  $("conflict-list").replaceChildren(...open.map(conflictNode));
+function openConflicts() {
+  return conflictLog.filter((c) => !c.dismissed);
 }
+
+function renderConflicts() {
+  // A pass in progress owns the cards it is animating; a sync poll landing
+  // mid-pass would replace them and the remaining verdicts would have nowhere
+  // to land. The pass renders once when it is done.
+  if (resolvingConflicts) return;
+  const open = openConflicts();
+  conflictCards.clear();
+  // A summary of what the model just did outlives the list it emptied.
+  $("conflicts").hidden = open.length === 0 && $("conflicts-status").hidden;
+  $("conflict-list").replaceChildren(...open.map(conflictNode));
+  // The button exists only where it can work: a key, and something to resolve.
+  $("conflicts-ai").hidden = !aiReady() || open.length === 0;
+  $("conflicts-ai-note").hidden = $("conflicts-ai").hidden;
+}
+
+/* ---- resolving the list with a model ----
+ *
+ * A conflict is a genuine judgement — one copy has a fuller definition, the
+ * other a fortnight of reviews — and making it by hand means reading two
+ * versions of a word for every entry in the list. This asks a model to read
+ * them instead, and then does exactly what the buttons on each card do: it
+ * restores a discarded copy, or it lets the merge's answer stand. Nothing
+ * happens here that could not have been done, and undone, by hand.
+ */
+
+/** Long enough to read one verdict as it lands, short enough not to be a wait. */
+const VERDICT_STEP_MS = 420;
+
+/** One pass at a time, and the list is the pass's while it runs. */
+let resolvingConflicts = false;
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function showConflictStatus(text, isError = false) {
+  const status = $("conflicts-status");
+  status.textContent = text;
+  status.classList.toggle("error", isError);
+  status.hidden = false;
+}
+
+function hideConflictStatus() {
+  const status = $("conflicts-status");
+  status.hidden = true;
+  status.textContent = "";
+  status.classList.remove("error");
+}
+
+/**
+ * Writes the model's reason onto the card it is about.
+ *
+ * The pass is paced so each verdict can be read as it lands, which is only
+ * worth doing if the verdict is actually shown. `resolving` retires the card's
+ * own buttons at the same moment: the pass has decided this one, and a click
+ * on "use the other copy" now would be answering a question already answered.
+ */
+function paintVerdict(card, step) {
+  if (!card) return;
+  card.classList.add("resolving");
+  const line = el(
+    "p",
+    step.choice === "other" ? "conflict-verdict restored" : "conflict-verdict",
+    step.reason || (step.choice === "other" ? "restoring the other copy" : "keeping this copy")
+  );
+  const actions = card.querySelector(".conflict-actions");
+  if (actions) actions.before(line);
+  else card.append(line);
+}
+
+async function resolveConflictsWithAi() {
+  if (resolvingConflicts) return;
+  const open = resolvableConflicts(openConflicts());
+  if (!open.length || !aiReady()) return;
+
+  const button = $("conflicts-ai");
+  const clear = $("conflicts-clear");
+  const list = $("conflict-list");
+  resolvingConflicts = true;
+  button.disabled = true;
+  button.textContent = "reading both copies…";
+  // The whole panel belongs to the pass while it runs: a card's own buttons
+  // would otherwise restore or dismiss a conflict the pass is midway through.
+  clear.disabled = true;
+  list.classList.add("busy", "deciding");
+  showConflictStatus("asking ai to read every pair…");
+
+  try {
+    let verdicts;
+    try {
+      ({ verdicts } = await aiResolveConflicts(aiSettings, open));
+    } catch (err) {
+      console.error(err);
+      showConflictStatus(String(err.message ?? err), true);
+      return;
+    } finally {
+      list.classList.remove("deciding");
+    }
+
+    const plan = planResolution(open, verdicts);
+    let restored = 0;
+    let kept = 0;
+    let trouble = null;
+
+    await mutate(async () => {
+      try {
+        for (const step of plan.steps) {
+          const card = conflictCards.get(step.id);
+          paintVerdict(card, step);
+          await pause(VERDICT_STEP_MS);
+          if (step.action === "restore-word") {
+            // The same path the card's own button takes: an edit made now, which
+            // then propagates through GitHub and the folder by the ordinary rules.
+            await app.restoreWord(step.record);
+          } else if (step.action === "restore-definition") {
+            await app.restoreDefinition(step.record);
+          }
+          if (step.choice === "other") restored += 1;
+          else kept += 1;
+          card?.classList.add("resolved");
+          conflictLog = conflictLog.map((c) =>
+            c.id === step.id ? { ...c, dismissed: true } : c
+          );
+        }
+
+        // Only a dictionary this pass actually decided. A null record means
+        // nobody decided one, and `restoreWord` has already kept whatever the
+        // bank held — so there is nothing left to put back. Writing a snapshot
+        // taken earlier in this loop instead would be a no-op on the ordinary
+        // path and a data loss on the one that matters: a definition that
+        // arrived from sync while the loop was running would be reverted, and
+        // `updateDefinition` stamps `definition_updated` past it, so the revert
+        // would go on to win every future merge on both devices.
+        for (const { record } of plan.reassert) {
+          if (record) await app.restoreDefinition(record);
+        }
+      } catch (err) {
+        // mutate() shows the save failure itself; this is so the summary below
+        // does not go on to claim the whole list was dealt with.
+        trouble = err;
+        throw err;
+      }
+    });
+
+    // Whatever did land is written down, even when something later failed.
+    try {
+      if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+    } catch (err) {
+      console.error(err); // the list still works this session
+    }
+
+    if (trouble) {
+      showConflictStatus(
+        `applied ${restored + kept} of ${plan.steps.length} before it stopped — ${String(
+          trouble.message ?? trouble
+        )}`,
+        true
+      );
+    } else {
+      // Whatever is still open — a conflict the model skipped, or an older
+      // divergence of a word it was not asked about twice — is said plainly
+      // rather than left to be discovered in the list.
+      const leftOpen = openConflicts().length;
+      showConflictStatus(
+        [
+          restored ? `restored ${restored}` : "",
+          kept ? `kept the merge’s copy for ${kept}` : "",
+          leftOpen ? `${leftOpen} left for you` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ") || "nothing to resolve"
+      );
+    }
+    await pause(VERDICT_STEP_MS);
+  } finally {
+    // Only now: the button was live for the whole paced loop before this, and
+    // a second click would have sent a second request about conflicts the
+    // first pass was still working through.
+    resolvingConflicts = false;
+    button.disabled = false;
+    button.textContent = "resolve with ai";
+    clear.disabled = false;
+    list.classList.remove("busy");
+    // Whatever a sync poll wanted to draw while the pass owned the list.
+    renderConflicts();
+  }
+  await renderBank();
+}
+
+$("conflicts-ai").addEventListener("click", resolveConflictsWithAi);
 
 $("conflicts-clear").addEventListener("click", async () => {
   // Dismiss rather than delete. Detection re-derives from the channels every
@@ -1423,6 +1680,7 @@ $("conflicts-clear").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
   }
+  hideConflictStatus();
   renderConflicts();
 });
 
@@ -1529,6 +1787,9 @@ function showAiStatus(text, isError = false) {
 function renderAiSettings() {
   const has = aiReady();
   $("essay-ai-review").hidden = !has;
+  // The conflicts list carries its own AI button, and it appears and vanishes
+  // with the key like every other one.
+  if (conflictLog.length) renderConflicts();
   $("ai-remove").hidden = !has;
   $("ai-key-note").hidden = has;
   // The key field stays empty once saved; showing even a fragment invites copying.
@@ -2188,12 +2449,39 @@ $("gate-setup").addEventListener("submit", async (e) => {
 /* ---- boot ---- */
 
 function wireApp() {
-  app = createApp(platform.storage, () => {
-    sync?.schedule();
-    // The typing test filters passages by what is in the bank, so a word added
-    // or removed changes what it can serve.
-    notifyTypingBankChanged();
-  });
+  app = createApp(
+    platform.storage,
+    () => {
+      sync?.schedule();
+      // The typing test filters passages by what is in the bank, so a word added
+      // or removed changes what it can serve.
+      notifyTypingBankChanged();
+    },
+    {
+      /**
+       * The two rescues the core hands back to the interface, because the
+       * interface is what holds the key — and the question that decides
+       * whether asking either is worth anything.
+       *
+       * `aiReady` is separate from the two functions because these are
+       * installed at boot, before the key has been unsealed, and a keyless
+       * device must not so much as look up a root word on their behalf.
+       */
+      aiReady,
+      async suggestSpelling(word, notify) {
+        if (!aiReady()) return null;
+        notify?.(`no dictionary has “${word}” — asking ai what you meant…`);
+        return await aiSpellFix(aiSettings, word);
+      },
+      async writeDerivedDefinition(request, notify) {
+        if (!aiReady()) return null;
+        notify?.(
+          `“${request.word}” is only defined as a form of “${request.root}” — asking ai to write it out…`
+        );
+        return await aiRootMeaning(aiSettings, request);
+      },
+    }
+  );
   initTypingView({ app, getAiSettings: () => aiSettings, aiReady });
   sync = createSyncController({
     app,

@@ -83,7 +83,7 @@ function json(status, body, headers = {}) {
 
 globalThis.fetch = (url, init) => baseFetch(url, init);
 
-const { setAiNetworkOptions, chat, fetchKeyInfo, fetchModels, normalizeModel, parseJSONLoose, stripEmphasis, aiSimilarWords, aiExampleSentences, aiNuance, aiEssayReview, aiSessionUsage, resetAiSessionUsage } =
+const { setAiNetworkOptions, chat, fetchKeyInfo, fetchModels, normalizeModel, parseJSONLoose, stripEmphasis, aiSimilarWords, aiExampleSentences, aiNuance, aiEssayReview, aiSessionUsage, resetAiSessionUsage, aiSpellFix, aiRootMeaning, aiResolveConflicts, conflictBrief } =
   await import("../src/core/ai.js");
 const { loadAiSettings, saveAiSettings, clearAiSettings, emptyAiSettings } =
   await import("../src/core/ai-settings.js");
@@ -773,4 +773,367 @@ test("clear removes the envelope entirely", async () => {
   await saveAiSettings(platform, { key: "sk-or-v1-x", model: "" });
   await clearAiSettings();
   assert.equal(await storeGet("lexis-ai"), null);
+});
+
+/* ---- the word-rescue and conflict features ---- */
+
+function replies(payload) {
+  return () => json(200, { choices: [{ message: { content: JSON.stringify(payload) } }] });
+}
+
+test("aiSpellFix returns a correction only when it is one", async () => {
+  globalThis.fetch = replies({ correction: "receive", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "recieve"), { word: "receive" });
+
+  // A word the model cannot place.
+  globalThis.fetch = replies({ correction: "", confident: false });
+  assert.equal(await aiSpellFix(SETTINGS, "xqzt"), null);
+
+  // A confident answer that is nonetheless not a correction of this word.
+  globalThis.fetch = replies({ correction: "quartz", confident: true });
+  assert.equal(
+    await aiSpellFix(SETTINGS, "xqzt"),
+    null,
+    "a substitution is not a spelling fix"
+  );
+
+  // Long words are allowed to be further out, but not arbitrarily.
+  globalThis.fetch = replies({ correction: "pronunciation", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "pronounciation"), { word: "pronunciation" });
+
+  // Never a phrase, never the word that was already tried.
+  globalThis.fetch = replies({ correction: "did you mean receive", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+  globalThis.fetch = replies({ correction: "Recieve.", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+});
+
+test("aiSpellFix wants confidence stated, not merely undenied", async () => {
+  // The field simply left out. The instruction the model is given tells it to
+  // send an empty value for anything it has nothing for, so this is an
+  // ordinary reply rather than a malformed one — and it was reading as sure.
+  globalThis.fetch = replies({ correction: "receive" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+
+  // JSON booleans arrive as strings about as often as as booleans, and
+  // "false" is a perfectly ordinary truthy value.
+  globalThis.fetch = replies({ correction: "receive", confident: "false" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+  globalThis.fetch = replies({ correction: "receive", confident: "no" });
+  assert.equal(await aiSpellFix(SETTINGS, "recieve"), null);
+
+  // Said either way, yes is yes.
+  globalThis.fetch = replies({ correction: "receive", confident: "true" });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "recieve"), { word: "receive" });
+});
+
+test("aiSpellFix sends the word and nothing else", async () => {
+  const sent = [];
+  globalThis.fetch = (url, init) => {
+    sent.push(JSON.parse(init.body));
+    return json(200, { choices: [{ message: { content: '{"correction":"receive","confident":true}' } }] });
+  };
+  await aiSpellFix(SETTINGS, "recieve");
+  const prompt = sent[0].messages.at(-1).content;
+  assert.match(prompt, /recieve/);
+  assert.equal(sent.length, 1);
+});
+
+test("aiRootMeaning writes senses for the derived word, not the root", async () => {
+  const sent = [];
+  globalThis.fetch = (url, init) => {
+    sent.push(JSON.parse(init.body));
+    return json(200, {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              senses: [
+                { pos: "Adverb", def: "In a way that holds the attention." },
+                { pos: "adverb", def: "Used to flag something worth noticing." },
+                { pos: "adverb", def: "A third sense." },
+                { pos: "adverb", def: "A fourth that is one too many." },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+  };
+
+  const { senses } = await aiRootMeaning(SETTINGS, {
+    word: "interestingly",
+    gloss: "In an interesting way.",
+    root: "interesting",
+    rootSenses: [{ pos: "adjective", def: "Holding the attention." }],
+  });
+
+  assert.equal(senses.length, 3, "an entry is not a list of everything the model thought of");
+  assert.deepEqual(senses[0], {
+    pos: "adverb",
+    def: "In a way that holds the attention.",
+    example: null,
+  });
+  const prompt = sent[0].messages.at(-1).content;
+  assert.match(prompt, /interestingly/);
+  assert.match(prompt, /Holding the attention\./);
+});
+
+test("aiRootMeaning refuses an empty answer rather than storing one", async () => {
+  globalThis.fetch = replies({ senses: [{ pos: "adverb", def: "" }] });
+  await assert.rejects(
+    () =>
+      aiRootMeaning(SETTINGS, {
+        word: "gases",
+        root: "gas",
+        rootSenses: [{ pos: "noun", def: "A state of matter." }],
+      }),
+    /No usable definition/
+  );
+});
+
+test("aiRootMeaning will not write from memory when the root's entry is missing", async () => {
+  let asked = 0;
+  globalThis.fetch = () => {
+    asked += 1;
+    return json(200, { choices: [{ message: { content: '{"senses":[]}' } }] });
+  };
+  await assert.rejects(
+    () => aiRootMeaning(SETTINGS, { word: "gases", root: "gas", rootSenses: [] }),
+    /No dictionary entry for “gas”/
+  );
+  assert.equal(asked, 0, "nothing is asked when there is nothing to work from");
+});
+
+test("a conflict brief carries the two copies and none of the student's logs", () => {
+  const brief = conflictBrief({
+    id: "demise:edit:aaaa:bbbb",
+    word: "demise",
+    kind: "edit",
+    keptSide: "this device",
+    lostSide: "the folder",
+    reasons: ["more practice (4× vs 1×)"],
+    kept: {
+      word: "demise",
+      senses: [{ pos: "noun", def: "A death." }],
+      synonyms: [{ word: "eclipse" }],
+      srs: { reps: 1, lapses: 0 },
+      times_used: 1,
+      review_events: { "2026-01-01": 1 },
+      essay_use_events: { "draft-42": 3 },
+      essay_uses: 3,
+    },
+    lost: {
+      word: "demise",
+      senses: [{ pos: "noun", def: "The end of something." }],
+      synonyms: ["oblivion"],
+      srs: { reps: 4, lapses: 1 },
+      times_used: 4,
+      review_events: { "2026-02-02": 1 },
+    },
+  }, 7);
+
+  assert.deepEqual(brief.kept, {
+    definition: "(noun) A death.",
+    synonyms: ["eclipse"],
+    reviews: 1,
+    lapses: 0,
+    practised: 1,
+  });
+  assert.equal(brief.discarded.reviews, 4);
+  assert.equal(brief.ref, "7", "the conflict's own id encodes a delete time and stays here");
+  const serialized = JSON.stringify(brief);
+  assert.doesNotMatch(serialized, /review_events|essay_use|draft-42|2026-|demise:edit/);
+});
+
+test("a definition conflict is briefed on the definitions alone", () => {
+  // restoreDefinition touches the dictionary fields and nothing else, so
+  // practice history has no bearing on the answer and is not shown.
+  const brief = conflictBrief(
+    {
+      id: "demise:def:aaaa:bbbb",
+      word: "demise",
+      kind: "definition",
+      keptSide: "this device",
+      lostSide: "github",
+      reasons: ["a different definition"],
+      kept: {
+        senses: [{ pos: "noun", def: "A death." }],
+        source: "Wiktionary",
+        srs: { reps: 2 },
+        times_used: 2,
+        synonyms: [{ word: "eclipse" }],
+      },
+      lost: {
+        senses: [{ pos: "noun", def: "The end of something once thriving." }],
+        source: "Wiktionary · written out by AI from “demise”",
+        srs: { reps: 20 },
+        times_used: 20,
+        synonyms: [{ word: "oblivion" }],
+      },
+    },
+    1
+  );
+
+  assert.deepEqual(Object.keys(brief.kept), ["definition", "source"]);
+  assert.deepEqual(Object.keys(brief.discarded), ["definition", "source"]);
+  assert.doesNotMatch(JSON.stringify(brief), /oblivion|eclipse|20/);
+});
+
+test("aiResolveConflicts answers per conflict and never invents an id", async () => {
+  const sent = [];
+  globalThis.fetch = (url, init) => {
+    sent.push(JSON.parse(init.body));
+    return json(200, {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              verdicts: [
+                { ref: "1", choice: "other", reason: "**the discarded copy** has the fuller definition" },
+                { ref: "2", choice: "unclear", reason: "no strong view" },
+                { ref: "3", choice: "other", reason: "not a conflict that was asked about" },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+  };
+
+  const record = (reps) => ({
+    word: "demise",
+    senses: [{ pos: "noun", def: "A death." }],
+    synonyms: [{ word: "eclipse" }],
+    srs: { reps, lapses: 0 },
+    times_used: reps,
+    review_events: { "2026-01-01": 1 },
+    essay_use_events: { "draft-42": 3 },
+  });
+
+  const { verdicts, asked } = await aiResolveConflicts(SETTINGS, [
+    {
+      id: "demise:edit:1111:2222",
+      word: "demise",
+      kind: "edit",
+      reasons: ["more practice (4× vs 1×)"],
+      kept: record(1),
+      lost: record(4),
+    },
+    {
+      id: "candid:deleted:1750000000000:3333",
+      word: "candid",
+      kind: "delete",
+      reasons: [],
+      kept: null,
+      lost: record(2),
+    },
+  ]);
+
+  assert.equal(asked, 2);
+  // The model answers about "1" and "2"; the caller gets its own ids back.
+  // "unclear" is no answer at all, so that conflict stays open for a person
+  // rather than being counted as a decision nobody made.
+  assert.deepEqual(verdicts.map((v) => [v.id, v.choice]), [
+    ["demise:edit:1111:2222", "other"],
+  ]);
+  assert.equal(verdicts[0].reason, "the discarded copy has the fuller definition");
+
+  // The whitelist has to hold at the boundary, not only in isolation: this is
+  // the request that actually leaves the device.
+  const body = JSON.stringify(sent[0]);
+  assert.doesNotMatch(body, /review_events|essay_use_events|draft-42/);
+  assert.doesNotMatch(body, /1750000000000/, "a delete's timestamp is not evidence here");
+  assert.doesNotMatch(body, /"3"/);
+});
+
+test("aiResolveConflicts declines an empty list rather than asking", async () => {
+  let asked = 0;
+  globalThis.fetch = () => {
+    asked += 1;
+    return json(200, { choices: [{ message: { content: "{}" } }] });
+  };
+  await assert.rejects(() => aiResolveConflicts(SETTINGS, []), /no conflicts/i);
+  assert.equal(asked, 0);
+});
+
+test("how far a correction may travel depends on how long the word is", async () => {
+  // A short word gets two edits, a long one four. Without the tiers a single
+  // bound would either reject "pronounciation" or accept a substitution.
+  globalThis.fetch = replies({ correction: "cat", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "dog"), null, "three letters apart in a three-letter word");
+
+  globalThis.fetch = replies({ correction: "accommodation", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "acomodation"), { word: "accommodation" });
+
+  globalThis.fetch = replies({ correction: "restaurant", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "restaraunt"), { word: "restaurant" });
+
+  // Ten letters of difference is a different word, however long the word is.
+  globalThis.fetch = replies({ correction: "photosynthesis", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "perpendicular"), null);
+});
+
+test("the model's own word for restoring is read as restoring", async () => {
+  const verdictFor = async (choice) => {
+    globalThis.fetch = replies({ verdicts: [{ ref: "1", choice, reason: "" }] });
+    const { verdicts } = await aiResolveConflicts(SETTINGS, [
+      { id: "one", word: "demise", kind: "edit", reasons: [], kept: null, lost: null },
+    ]).catch(() => ({ verdicts: [] }));
+    return verdicts[0]?.choice ?? null;
+  };
+
+  // The prompt says '"other" to restore the discarded one'; a model that
+  // answers with the verb rather than the label means the same thing.
+  assert.equal(await verdictFor("other"), "other");
+  assert.equal(await verdictFor("restore"), "other");
+  assert.equal(await verdictFor("the other copy"), "other");
+  assert.equal(await verdictFor("keep"), "keep");
+  assert.equal(await verdictFor("Keep."), "keep");
+  // And anything else is not a decision.
+  assert.equal(await verdictFor("maybe"), null);
+  // "none" is how a model declines to decide, not how it endorses the merge.
+  // Read as a keep, it dismissed a conflict nobody had decided.
+  assert.equal(await verdictFor("none"), null);
+  assert.equal(await verdictFor(""), null);
+});
+
+test("one ask carries at most a dozen conflicts", async () => {
+  let sent = null;
+  globalThis.fetch = (url, init) => {
+    sent = JSON.parse(init.body);
+    return json(200, {
+      choices: [{ message: { content: JSON.stringify({ verdicts: [{ ref: "1", choice: "keep", reason: "" }] }) } }],
+    });
+  };
+  const many = Array.from({ length: 30 }, (_, i) => ({
+    id: `w${i}`,
+    word: `word${i}`,
+    kind: "edit",
+    reasons: [],
+    kept: null,
+    lost: null,
+  }));
+
+  const { asked } = await aiResolveConflicts(SETTINGS, many);
+
+  assert.equal(asked, 12);
+  assert.doesNotMatch(sent.messages.at(-1).content, /word12|word29/);
+});
+
+test("a model that writes an essay instead of a definition is not banked", async () => {
+  globalThis.fetch = replies({
+    senses: [
+      { pos: "adverb", def: "x".repeat(401) },
+      { pos: "not a part of speech", def: "In a way that holds the attention." },
+    ],
+  });
+  const { senses } = await aiRootMeaning(SETTINGS, {
+    word: "interestingly",
+    root: "interesting",
+    rootSenses: [{ pos: "adjective", def: "Holding the attention." }],
+  });
+  assert.deepEqual(senses, [
+    { pos: "", def: "In a way that holds the attention.", example: null },
+  ]);
 });

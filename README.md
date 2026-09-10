@@ -1,9 +1,9 @@
 # lexis.
 
-A minimalist word bank for essay writers. Type a word; lexis fetches a concise,
-human-written definition, suggests sophisticated synonyms suited to analytical
-writing, and then makes sure the word actually ends up in your essays — not
-just in a list.
+A minimalist word bank for essay writers. Type a word; lexis fetches a concise
+definition from a human-edited dictionary, suggests sophisticated synonyms
+suited to analytical writing, and then makes sure the word actually ends up in
+your essays — not just in a list.
 
 Built for VCE English, useful anywhere precise vocabulary matters.
 
@@ -11,16 +11,20 @@ Built for VCE English, useful anywhere precise vocabulary matters.
 
 **Bank.** Type a word — say *demise* — and lexis looks it up in Wiktionary
 (via [dictionaryapi.dev](https://dictionaryapi.dev), falling back to the
-Wiktionary REST API). Definitions come from human-edited entries, never a
-language model. When an entry only restates an adverb as “in a … manner”,
-lexis clarifies it with common same-part-of-speech results from Datamuse
-instead of guessing which of the adjective's senses applies. Entries render
-like a print dictionary: headword, IPA, part of speech, numbered senses. Add
-several words in one go by separating them with spaces; lexis looks them up a
-few at a time and adds them — or, if one of them cannot be found, none of
-them — as a single change to the bank. As the bank grows, sort it by date
-added, alphabetically, by due date, or by how much you've practised or used a
-word in essays.
+Wiktionary REST API). Definitions come from human-edited entries; the one
+exception is described under *AI assist*, is offered only where the entry
+defines nothing, and says so in the entry itself. When an entry only restates
+an adverb as “in a … manner”, lexis clarifies it with common
+same-part-of-speech results from Datamuse instead of guessing which of the
+adjective's senses applies. Entries render like a print dictionary: headword,
+IPA, part of speech, numbered senses. Add several words in one go by
+separating them with spaces; lexis looks them up a few at a time and adds
+every word that resolved as a single change to the bank, naming any that it
+could not find rather than throwing the whole list away with them. A word
+whose entry does nothing but name another word as the correct spelling is
+added under that word instead, and the line under the box says so. As the bank grows, sort it
+by date added, alphabetically, by due date, or by how much you've practised or
+used a word in essays.
 
 **Synonyms for essays.** Each word also gets a short run of synonyms drawn
 from [Datamuse](https://www.datamuse.com/api/) (corpus statistics, not AI) and
@@ -95,7 +99,7 @@ until you hand it a key.
 
 Paste an [OpenRouter](https://openrouter.ai) API key into **settings → ai
 assist** (any model works; leave the model blank for OpenRouter's automatic
-routing). That unlocks three things:
+routing). That unlocks these:
 
 - **Essay feedback.** A second button beside *check essay* sends the draft
   for structured feedback: what already works, the few changes that would
@@ -110,6 +114,32 @@ routing). That unlocks three things:
   word the way an analytical essay would — drawing on your open draft when
   there is one, so the examples speak about your text rather than a generic
   novel.
+- **Spelling rescue.** When no dictionary has heard of a word you typed —
+  and only then, never when a dictionary is merely slow or down — the model is
+  asked which word you meant. Its answer is looked up like any other word and
+  used only if a dictionary recognises it, and it has to be a spelling fix
+  rather than a different word: “recieve” can become “receive”, “xqzt” cannot
+  become “quartz”. The word goes into your bank under the corrected spelling,
+  and lexis tells you it did that.
+- **Definitions that were only signposts.** Some entries define a word by
+  naming another one: *gases* is “plural of gas”, *interestingly* is “in an
+  interesting way”. That is true and it is not a meaning. Where an entry says
+  nothing else, lexis fetches the entry for the root word and asks the model to
+  write out what the derived form actually means — working from Wiktionary's
+  own words rather than from memory. If the root's own entry turns out to be
+  another signpost, as *realise* → *realize* is, it follows that one too; if
+  there is still nothing to work from, the model is not asked at all. The entry
+  records that it was written this way. Adverbs are usually settled before this
+  ever runs, by the Datamuse cross-check above, which costs nothing and needs
+  no key; and if the model returns another signpost, or anything goes wrong,
+  the editor's original text stays.
+- **Resolving conflicts.** The conflicts list (below) offers *resolve with
+  ai*: the model reads both copies of each word and says, one at a time, which
+  to keep and why. Each verdict is applied through the same “use the other
+  copy” path you would have used by hand, so nothing happens that you could
+  not undo yourself. One pass asks about a dozen words at most, and about each
+  word once; anything it does not answer for stays in the list, and the line
+  under it says how many.
 - **Passages to type.** In **type**, set *written by* to **ai** (or **both**)
   and the model writes passages built around your bank words, at whichever
   length you asked for. They are written *ahead* of being wanted — three sit
@@ -125,12 +155,16 @@ straight from the app to OpenRouter — there is no lexis server in between.
 What you send is what the feature needs, and no more: essay feedback sends the
 draft along with your bank's headwords; example sentences send the word and the
 opening of whatever draft is in the essay view, so they can speak about your
-text; passages to type send your bank's headwords and a length; similar words
-and **vs** send the words alone. Nothing you type *into* the typing test is
-sent anywhere — the scoring is arithmetic, done here.
+text; passages to type send your bank's headwords and a length; similar words,
+**vs**, and a spelling rescue send the words alone; writing out a signpost
+definition sends the word, its unhelpful gloss, and the dictionary's entry for
+the root; resolving conflicts sends both copies of each conflicted word — their
+definitions, synonyms, and how far each one's practice has got — and never your
+review dates or anything about your essays. Nothing you type *into* the typing
+test is sent anywhere — the scoring is arithmetic, done here.
 
 **Know what leaves the device.** Everything else in lexis is analysed here;
-these four features are not, and cannot be. Your draft goes to OpenRouter,
+these features are not, and cannot be. Your draft goes to OpenRouter,
 which forwards it to whichever provider serves the model you chose — and some
 providers keep what they are sent, or train on it.
 
@@ -266,17 +300,29 @@ reinstates the record, *use the other definition* replaces only the dictionary
 entry. Either is applied as an edit made now, so it propagates through GitHub
 and the folder by the ordinary rules.
 
+With an AI key saved, the list also offers *resolve with ai*: the model reads
+both copies of every word listed and works down them one at a time, saying for
+each which copy it chose and why. A verdict to restore takes the same path
+your own click would have; a verdict to keep leaves the merge's answer alone.
+Either way the entry is marked dealt with, and either way you can still undo
+it by hand.
+
 Undoing never costs you scheduling. Whichever copy is further along keeps the
 review history, because the schedule is not what a restore is for and it is the
 one thing that cannot be recovered once dropped — so *use the other copy* takes
-the discarded definition, synonyms, and practice count without rewinding
-spaced repetition.
+the discarded synonyms and practice count without rewinding spaced repetition.
+
+It leaves the definition where it is. A definition that differs is raised as
+its own conflict with its own button, so a word can have two of them open at
+once; restoring the record half would otherwise carry the rejected dictionary
+back in behind your back, and overrule the choice you had just made about it.
 
 ## Privacy
 
 **On the desktop, nothing changes.** Without sync and without an AI key, the
 only network requests are dictionary and thesaurus lookups when you add a
-word. Your bank, your review history, and every essay you check stay on your
+word — including the second lookup that follows a “misspelling of …” entry to
+the word it names, which is a dictionary request like any other. Your bank, your review history, and every essay you check stay on your
 machine in a single JSON file in the app data directory.
 
 **With sync on**, your bank — and only your bank — is copied to the private
@@ -289,7 +335,12 @@ device that made them.
 
 **With an AI key saved**, your work leaves for OpenRouter only when you ask
 for essay feedback or the vocabulary tools, and only with what that feature
-needs (see *AI assist* above). The typing test asks on its own account, but
+needs (see *AI assist* above). Two of those asks are made as part of adding a
+word rather than at a button — the spelling rescue and the written-out
+definition — and both happen only where a dictionary has already failed to
+answer the question. The first sends the mistyped word alone; the second
+sends the word, the unhelpful gloss, and the dictionary's entry for the root
+it names. The typing test asks on its own account, but
 only once you have set *quotes from* to **ai**, and only ever for passages
 built from your bank's headwords — never for anything you have typed. Because that includes your draft, it is held to
 the same standard as everything else here: strict privacy is on by default,
