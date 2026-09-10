@@ -308,9 +308,13 @@ export function resolvableConflicts(entries) {
  * Hence `reassert`: after the pass, the dictionary actually chosen for that
  * word is written again. A `record` of `null` means nobody decided the
  * dictionary this pass — so what the bank held before the restore is what
- * should stand, which is now also what the restore leaves behind, and the
- * caller supplies it either way. `updateDefinition` is a no-op when nothing
- * changed, so on the ordinary path this costs nothing.
+ * should stand, which is now also what the restore leaves behind, and there is
+ * nothing for the caller to do. It must not go looking for something: a
+ * snapshot taken earlier in the pass is stale by the time it would be written,
+ * and `updateDefinition` stamps `definition_updated` ahead of whatever it
+ * overwrites, so reverting a definition that synced in mid-pass would win every
+ * future merge as well. The word is still named, because a caller reporting on
+ * the pass wants to know it was restored.
  */
 export function planResolution(entries, verdicts) {
   const byId = new Map((entries ?? []).map((entry) => [entry.id, entry]));
