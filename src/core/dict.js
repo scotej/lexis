@@ -29,6 +29,10 @@ const HEDGE_AFTER_MS = 900;
  * on: a typo is worth correcting, a 503 is worth retrying. Everything that
  * means *the host answered, and there is no entry* is marked here, and
  * nothing else is.
+ *
+ * Which host said it decides the matter (see fetchRawDefinition). Wiktionary
+ * is the source; dictionaryapi.dev is a mirror of it with gaps, and it is
+ * currently the one having the bad afternoons.
  */
 export const NOT_FOUND = "not-found";
 
@@ -150,6 +154,9 @@ async function fetchDictionaryApi(word) {
 
 // ---- Fallback source: Wiktionary REST API ----
 
+/** Tags the errors whose verdict on a word's existence is the authoritative one. */
+const WIKTIONARY = "wiktionary";
+
 /**
  * Wiktionary ships a `<style>` block inside some entries — the one that sizes
  * the date superscripts. Dropping only the tags kept its *contents*, so
@@ -225,7 +232,11 @@ async function fetchRawDefinition(word) {
   let hedgeTimer = null;
   let fallback = null;
 
-  const startFallback = () => (fallback ??= fetchWiktionary(word));
+  const startFallback = () =>
+    (fallback ??= fetchWiktionary(word).catch((err) => {
+      err.source = WIKTIONARY;
+      throw err;
+    }));
   const hedge = new Promise((resolve) => {
     hedgeTimer = setTimeout(resolve, HEDGE_AFTER_MS);
   });
@@ -251,10 +262,13 @@ async function fetchRawDefinition(word) {
     const reasons = err?.errors ?? [err];
     const [why1, why2] = reasons.map((reason) => String(reason?.message ?? reason));
     const failure = new Error(`no dictionary entry found for "${word}" (${why1}; ${why2})`);
-    // Only when *both* hosts said there is no such word. One stalled host and
-    // one 404 is not evidence of a typo, and offering to correct a spelling on
-    // that basis would be guessing with someone else's word.
-    if (reasons.length && reasons.every((reason) => reason?.code === NOT_FOUND)) {
+    // Wiktionary's answer, and only Wiktionary's, decides whether this word
+    // exists. Asking for unanimity would silence the verdict on every
+    // afternoon dictionaryapi.dev spends timing out — which is most of them —
+    // and accepting either would let the mirror's gaps rewrite real words:
+    // it 404s on entries Wiktionary carries, so a stalled Wiktionary and a
+    // 404 from the mirror would offer to correct a perfectly good word.
+    if (reasons.some((reason) => reason?.source === WIKTIONARY && reason?.code === NOT_FOUND)) {
       failure.code = NOT_FOUND;
     }
     throw failure;
@@ -327,9 +341,21 @@ export function formOfGloss(sense) {
   if (!match) return null;
   const [, relationPhrase, root, rest] = match;
 
-  // Nothing may follow the root but punctuation: "comparative form of strict:
-  // more strict" is still a pointer, "a form of address for a duke" is not.
-  if (rest.trim() && !/^\s*[.,:;!?)\]]/.test(rest)) return null;
+  // Nothing may follow the root but punctuation, or the one continuation the
+  // comparative template uses: "comparative form of strict: more strict" is
+  // still a pointer. Reading only the first character after the root was not
+  // enough — Wiktionary's REST endpoint flattens sub-senses into one string,
+  // so "superlative form of hard: most hard. Most rigid or most difficult."
+  // arrives as a pointer with a real definition welded to the end of it, and
+  // rewriting that entry would throw away the half that answered the question.
+  const tail = rest.trim();
+  if (
+    tail &&
+    !/^[.,;!?)\]]+$/.test(tail) &&
+    !/^:\s*(?:more|most|less|least)\s+[a-z][a-z'-]*[.!]?$/i.test(tail)
+  ) {
+    return null;
+  }
 
   const relation = relationPhrase.trim().toLowerCase();
   const words = relation.split(/\s+/).filter(Boolean);
@@ -379,7 +405,12 @@ export function derivedFrom(dictionary) {
   return {
     root,
     relation: pointers[0].relation,
-    kind: pointers.every((pointer) => pointer.kind === "misspelling") ? "misspelling" : "form",
+    // One sense saying "misspelling of X" is the entry saying it. Wiktionary
+    // routinely pairs that with "obsolete form of X" on the same word —
+    // "seperate" and "arguement" both do — and requiring unanimity there sent
+    // the two commonest typos in English down the rewrite path instead of the
+    // correction path.
+    kind: pointers.some((pointer) => pointer.kind === "misspelling") ? "misspelling" : "form",
     gloss: senses.map((sense) => sense.def.trim()).join(" "),
   };
 }

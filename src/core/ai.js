@@ -1122,14 +1122,20 @@ export async function aiRootMeaning(settings, { word, gloss = "", root, rootSens
     })
     .filter(Boolean);
 
+  // No root entry, no request. The whole claim this feature makes is that the
+  // meaning comes from Wiktionary's own words and the model only does the
+  // grammar; asked with nothing to work from it would answer from memory,
+  // and the answer would be banked, synced, and labelled as if it had not.
+  if (!material.length) {
+    throw new Error(`No dictionary entry for “${base}” to work from.`);
+  }
+
   const parsed = await chatJSON(settings, {
     system: `${REGISTER} ${jsonOnlyInstruction('{senses: [{"pos": string, "def": string}]}')}`,
     prompt: [
       `A dictionary defines “${w}” only as ${gloss ? `“${gloss}”` : `a form of “${base}”`},`,
       `which tells a student nothing. Write what “${w}” itself means.`,
-      material.length
-        ? `The dictionary's own entry for “${base}” reads:\n${material.map((line) => `- ${line}`).join("\n")}`
-        : `Work from the ordinary meaning of “${base}”.`,
+      `The dictionary's own entry for “${base}” reads:\n${material.map((line) => `- ${line}`).join("\n")}`,
       "Give one or two senses. Each is one sentence, in the register a dictionary uses — a definition, not a usage note.",
       `"pos" is the part of speech of “${w}” itself (adverb, noun, verb, adjective), not of “${base}”.`,
       `Never restate the pointer: a definition that says “${w}” is a form of “${base}” is the answer that failed.`,
@@ -1157,19 +1163,35 @@ export async function aiRootMeaning(settings, { word, gloss = "", root, rootSens
 /* ---- feature: resolving sync conflicts ---- */
 
 /** How much of a losing copy is worth showing a model, and no more. */
-const BRIEF_SENSES = 2;
+const BRIEF_SENSES = 3;
 const BRIEF_SYNONYMS = 6;
-const BRIEF_DEF_CHARS = 220;
+const BRIEF_DEF_CHARS = 500;
 
-function briefCopy(record) {
+function briefDefinition(record) {
+  return (record.senses ?? [])
+    .slice(0, BRIEF_SENSES)
+    .map((sense) => `${sense?.pos ? `(${sense.pos}) ` : ""}${asString(sense?.def)}`.trim())
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, BRIEF_DEF_CHARS);
+}
+
+/**
+ * What is actually in dispute, which depends on which of a word's two clocks
+ * the merge had to choose on.
+ *
+ * A definition conflict is resolved through `restoreDefinition`, which by
+ * design touches the dictionary fields and nothing else — so showing a model
+ * the two copies' review counts there would be inviting it to decide the
+ * question on evidence that has no bearing on the outcome, and to restore a
+ * definition because the copy it came with had been practised more.
+ */
+function briefCopy(record, kind) {
   if (!record) return null;
+  const definition = briefDefinition(record);
+  if (kind === "definition") return { definition, source: asString(record.source) };
   return {
-    definition: (record.senses ?? [])
-      .slice(0, BRIEF_SENSES)
-      .map((sense) => `${sense?.pos ? `(${sense.pos}) ` : ""}${asString(sense?.def)}`.trim())
-      .filter(Boolean)
-      .join(" ")
-      .slice(0, BRIEF_DEF_CHARS),
+    definition,
     synonyms: (record.synonyms ?? [])
       .slice(0, BRIEF_SYNONYMS)
       .map((row) => asString(typeof row === "string" ? row : row?.word))
@@ -1190,16 +1212,20 @@ function briefCopy(record) {
  * whitelist is the only way to keep a field added later from quietly joining
  * the payload.
  */
-export function conflictBrief(entry) {
+export function conflictBrief(entry, ref) {
+  const kind = asString(entry?.kind);
   return {
-    id: asString(entry?.id),
+    // A number for this request, not the conflict's own id: that id encodes
+    // the millisecond at which a word was deleted, which decides nothing here
+    // and is nobody else's business. The caller maps the answer back.
+    ref: String(ref),
     word: asString(entry?.word),
-    kind: asString(entry?.kind),
+    kind,
     keptFrom: asString(entry?.keptSide),
     lostFrom: asString(entry?.lostSide),
     whatTheMergeDiscarded: asStringArray(entry?.reasons, 6),
-    kept: briefCopy(entry?.kept),
-    discarded: briefCopy(entry?.lost),
+    kept: briefCopy(entry?.kept, kind),
+    discarded: briefCopy(entry?.lost, kind),
   };
 }
 
@@ -1217,21 +1243,22 @@ const MAX_CONFLICTS_PER_ASK = 12;
 export async function aiResolveConflicts(settings, conflicts) {
   const list = (Array.isArray(conflicts) ? conflicts : []).slice(0, MAX_CONFLICTS_PER_ASK);
   if (!list.length) throw new Error("There are no conflicts to resolve.");
-  const briefs = list.map(conflictBrief);
+  const briefs = list.map((entry, at) => conflictBrief(entry, at + 1));
 
   const parsed = await chatJSON(settings, {
     system: `${REGISTER} ${jsonOnlyInstruction(
-      '{verdicts: [{"id": string, "choice": "keep" | "other", "reason": string}]}'
+      '{verdicts: [{"ref": string, "choice": "keep" | "other", "reason": string}]}'
     )}`,
     prompt: [
       "Two of a student's devices edited the same vocabulary words while apart.",
       "A merge already chose one copy of each; the other was discarded. Say whether it chose well.",
       '"choice" is "keep" to let the merge\'s copy stand, or "other" to restore the discarded one.',
       '"reason" is one short sentence a student would understand — say what the copy you chose has.',
-      "Prefer the copy with the fuller, more precise definition, and the one whose practice history is further along.",
+      "Prefer the copy with the fuller, more precise definition.",
+      'Where practice history is shown, prefer the copy that is further along; where it is not — a "definition" conflict restores the dictionary entry alone — decide on the definitions only.',
       "A word deleted on one device after being edited on the other is usually worth putting back only if the discarded copy holds real work.",
       "When the two are equally good, choose \"keep\" — an unnecessary restore is still a change to their bank.",
-      "Return one verdict per id, using the ids exactly as given.",
+      "Return one verdict per entry, using the \"ref\" numbers exactly as given.",
       "",
       JSON.stringify(briefs, null, 1),
     ].join("\n"),
@@ -1239,18 +1266,23 @@ export async function aiResolveConflicts(settings, conflicts) {
   });
 
   const rows = Array.isArray(parsed?.verdicts) ? parsed.verdicts : [];
-  const byId = new Map();
+  const answers = new Map();
   for (const row of rows) {
-    const id = asString(row?.id);
-    if (!id || byId.has(id)) continue;
-    byId.set(id, {
-      id,
+    const ref = asString(row?.ref ?? row?.id).trim();
+    if (!ref || answers.has(ref)) continue;
+    answers.set(ref, {
       choice: asString(row?.choice).trim().toLowerCase() === "other" ? "other" : "keep",
       reason: stripEmphasis(asString(row?.reason)).trim(),
     });
   }
 
-  const verdicts = briefs.map((brief) => byId.get(brief.id)).filter(Boolean);
+  // Back to the conflicts the caller knows about, in the order they were asked.
+  const verdicts = briefs
+    .map((brief, at) => {
+      const answer = answers.get(brief.ref);
+      return answer ? { id: asString(list[at]?.id), ...answer } : null;
+    })
+    .filter((verdict) => verdict && verdict.id);
   if (!verdicts.length) throw new Error("No usable verdicts came back. Try again.");
   return { verdicts, asked: briefs.length };
 }

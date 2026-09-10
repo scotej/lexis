@@ -863,9 +863,27 @@ test("aiRootMeaning writes senses for the derived word, not the root", async () 
 test("aiRootMeaning refuses an empty answer rather than storing one", async () => {
   globalThis.fetch = replies({ senses: [{ pos: "adverb", def: "" }] });
   await assert.rejects(
-    () => aiRootMeaning(SETTINGS, { word: "gases", root: "gas" }),
+    () =>
+      aiRootMeaning(SETTINGS, {
+        word: "gases",
+        root: "gas",
+        rootSenses: [{ pos: "noun", def: "A state of matter." }],
+      }),
     /No usable definition/
   );
+});
+
+test("aiRootMeaning will not write from memory when the root's entry is missing", async () => {
+  let asked = 0;
+  globalThis.fetch = () => {
+    asked += 1;
+    return json(200, { choices: [{ message: { content: '{"senses":[]}' } }] });
+  };
+  await assert.rejects(
+    () => aiRootMeaning(SETTINGS, { word: "gases", root: "gas", rootSenses: [] }),
+    /No dictionary entry for “gas”/
+  );
+  assert.equal(asked, 0, "nothing is asked when there is nothing to work from");
 });
 
 test("a conflict brief carries the two copies and none of the student's logs", () => {
@@ -894,7 +912,7 @@ test("a conflict brief carries the two copies and none of the student's logs", (
       times_used: 4,
       review_events: { "2026-02-02": 1 },
     },
-  });
+  }, 7);
 
   assert.deepEqual(brief.kept, {
     definition: "(noun) A death.",
@@ -904,8 +922,43 @@ test("a conflict brief carries the two copies and none of the student's logs", (
     practised: 1,
   });
   assert.equal(brief.discarded.reviews, 4);
+  assert.equal(brief.ref, "7", "the conflict's own id encodes a delete time and stays here");
   const serialized = JSON.stringify(brief);
-  assert.doesNotMatch(serialized, /review_events|essay_use|draft-42|2026-/);
+  assert.doesNotMatch(serialized, /review_events|essay_use|draft-42|2026-|demise:edit/);
+});
+
+test("a definition conflict is briefed on the definitions alone", () => {
+  // restoreDefinition touches the dictionary fields and nothing else, so
+  // practice history has no bearing on the answer and is not shown.
+  const brief = conflictBrief(
+    {
+      id: "demise:def:aaaa:bbbb",
+      word: "demise",
+      kind: "definition",
+      keptSide: "this device",
+      lostSide: "github",
+      reasons: ["a different definition"],
+      kept: {
+        senses: [{ pos: "noun", def: "A death." }],
+        source: "Wiktionary",
+        srs: { reps: 2 },
+        times_used: 2,
+        synonyms: [{ word: "eclipse" }],
+      },
+      lost: {
+        senses: [{ pos: "noun", def: "The end of something once thriving." }],
+        source: "Wiktionary · written out by AI from “demise”",
+        srs: { reps: 20 },
+        times_used: 20,
+        synonyms: [{ word: "oblivion" }],
+      },
+    },
+    1
+  );
+
+  assert.deepEqual(Object.keys(brief.kept), ["definition", "source"]);
+  assert.deepEqual(Object.keys(brief.discarded), ["definition", "source"]);
+  assert.doesNotMatch(JSON.stringify(brief), /oblivion|eclipse|20/);
 });
 
 test("aiResolveConflicts answers per conflict and never invents an id", async () => {
@@ -918,9 +971,9 @@ test("aiResolveConflicts answers per conflict and never invents an id", async ()
           message: {
             content: JSON.stringify({
               verdicts: [
-                { id: "a", choice: "other", reason: "**the discarded copy** has the fuller definition" },
-                { id: "b", choice: "unclear", reason: "no strong view" },
-                { id: "c", choice: "other", reason: "not a conflict that was asked about" },
+                { ref: "1", choice: "other", reason: "**the discarded copy** has the fuller definition" },
+                { ref: "2", choice: "unclear", reason: "no strong view" },
+                { ref: "3", choice: "other", reason: "not a conflict that was asked about" },
               ],
             }),
           },
@@ -929,18 +982,49 @@ test("aiResolveConflicts answers per conflict and never invents an id", async ()
     });
   };
 
+  const record = (reps) => ({
+    word: "demise",
+    senses: [{ pos: "noun", def: "A death." }],
+    synonyms: [{ word: "eclipse" }],
+    srs: { reps, lapses: 0 },
+    times_used: reps,
+    review_events: { "2026-01-01": 1 },
+    essay_use_events: { "draft-42": 3 },
+  });
+
   const { verdicts, asked } = await aiResolveConflicts(SETTINGS, [
-    { id: "a", word: "demise", kind: "edit", reasons: [], kept: null, lost: null },
-    { id: "b", word: "candid", kind: "definition", reasons: [], kept: null, lost: null },
+    {
+      id: "demise:edit:1111:2222",
+      word: "demise",
+      kind: "edit",
+      reasons: ["more practice (4× vs 1×)"],
+      kept: record(1),
+      lost: record(4),
+    },
+    {
+      id: "candid:deleted:1750000000000:3333",
+      word: "candid",
+      kind: "delete",
+      reasons: [],
+      kept: null,
+      lost: record(2),
+    },
   ]);
 
   assert.equal(asked, 2);
+  // The model answers about "1" and "2"; the caller gets its own ids back.
   assert.deepEqual(verdicts.map((v) => [v.id, v.choice]), [
-    ["a", "other"],
-    ["b", "keep"], // anything that is not "other" leaves the merge's answer alone
+    ["demise:edit:1111:2222", "other"],
+    ["candid:deleted:1750000000000:3333", "keep"], // not "other" leaves the merge alone
   ]);
   assert.equal(verdicts[0].reason, "the discarded copy has the fuller definition");
-  assert.doesNotMatch(JSON.stringify(sent[0]), /"c"/);
+
+  // The whitelist has to hold at the boundary, not only in isolation: this is
+  // the request that actually leaves the device.
+  const body = JSON.stringify(sent[0]);
+  assert.doesNotMatch(body, /review_events|essay_use_events|draft-42/);
+  assert.doesNotMatch(body, /1750000000000/, "a delete's timestamp is not evidence here");
+  assert.doesNotMatch(body, /"3"/);
 });
 
 test("aiResolveConflicts declines an empty list rather than asking", async () => {
@@ -951,4 +1035,21 @@ test("aiResolveConflicts declines an empty list rather than asking", async () =>
   };
   await assert.rejects(() => aiResolveConflicts(SETTINGS, []), /no conflicts/i);
   assert.equal(asked, 0);
+});
+
+test("how far a correction may travel depends on how long the word is", async () => {
+  // A short word gets two edits, a long one four. Without the tiers a single
+  // bound would either reject "pronounciation" or accept a substitution.
+  globalThis.fetch = replies({ correction: "cat", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "dog"), null, "three letters apart in a three-letter word");
+
+  globalThis.fetch = replies({ correction: "accommodation", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "acomodation"), { word: "accommodation" });
+
+  globalThis.fetch = replies({ correction: "restaurant", confident: true });
+  assert.deepEqual(await aiSpellFix(SETTINGS, "restaraunt"), { word: "restaurant" });
+
+  // Ten letters of difference is a different word, however long the word is.
+  globalThis.fetch = replies({ correction: "photosynthesis", confident: true });
+  assert.equal(await aiSpellFix(SETTINGS, "perpendicular"), null);
 });

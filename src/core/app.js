@@ -64,13 +64,21 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   const clarifyDefinition =
     services.clarifyDerivativeDefinitions ?? clarifyDerivativeDefinitions;
   /**
-   * The two optional AI helpers. Both are supplied by the interface, which
-   * holds the OpenRouter key, and both are absent whenever there is no key —
-   * so everything below reads as today's behaviour on a device that has never
-   * been given one, which is the only behaviour lexis promises.
+   * The two optional AI helpers, and the question that decides whether either
+   * is worth asking.
+   *
+   * `aiReady` is asked *before* anything is done on their behalf, not just
+   * before they are called. The interface installs the two functions once, at
+   * boot, and only learns whether there is a key some moments later — so a
+   * helper that is merely present is no evidence at all that it can answer,
+   * and a keyless device would otherwise pay for a root-word lookup whose only
+   * consumer immediately returns null. Absent, the answer is yes: a caller
+   * that supplies a helper and no predicate means what it supplied.
    */
   const suggestSpelling = services.suggestSpelling ?? null;
   const writeDerivedDefinition = services.writeDerivedDefinition ?? null;
+  const aiReady = services.aiReady ?? (() => true);
+  const canRescue = (helper) => Boolean(helper) && aiReady() !== false;
 
   /**
    * Storage and sync are asynchronous, but bank mutations must commit in the
@@ -165,12 +173,19 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     deleteGenerations.set(key, deleteGeneration(key) + 1);
   }
 
-  function supersededAddition(words, generations) {
-    return words.find((word) => deleteGeneration(word) !== generations.get(word)) ?? null;
-  }
-
+  /**
+   * Whether `word` has been deleted since this add was requested.
+   *
+   * The baseline is a snapshot of *every* generation, not only the words that
+   * were typed, because a word can be corrected into the batch after the fact:
+   * "recieve" is banked as "receive", and the delete that has to win may be a
+   * delete of "receive". A word with no generation recorded has never been
+   * deleted, which is generation zero — reading a missing key as "nothing to
+   * check" is what made this guard inert for exactly the word it was added
+   * for.
+   */
   function supersededWord(word, generations) {
-    return generations.has(word) && deleteGeneration(word) !== generations.get(word);
+    return deleteGeneration(word) !== (generations.get(word) ?? 0);
   }
 
   /**
@@ -195,7 +210,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
    * Whatever happens, the word the student typed is carried alongside the one
    * that was banked, so nothing is substituted silently.
    */
-  async function resolveWord(typed) {
+  async function resolveWord(typed, notify) {
     // Both questions at once, as before — settled rather than raced, because
     // the definition's failure is now a question rather than an answer, and a
     // synonym request left unobserved while that question is asked would be an
@@ -222,9 +237,9 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       }
     } else {
       const failure = definition.reason;
-      if (failure?.code !== NOT_FOUND || !suggestSpelling) throw failure;
+      if (failure?.code !== NOT_FOUND || !canRescue(suggestSpelling)) throw failure;
       const suggestion = await Promise.resolve()
-        .then(() => suggestSpelling(typed))
+        .then(() => suggestSpelling(typed, notify))
         .catch(() => null);
       const meant = String(suggestion?.word ?? suggestion ?? "").trim().toLowerCase();
       if (!meant || meant === typed) throw failure;
@@ -246,7 +261,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       synonyms = await lookupSynonyms(word);
     }
 
-    const explanation = await explained(word, dict);
+    const explanation = await explained(word, dict, notify);
     return { word, dict: explanation.dict, synonyms, corrected, written: explanation.written };
   }
 
@@ -261,19 +276,26 @@ export function createApp(storage, onChange = () => {}, services = {}) {
    * entry stays. So does it if anything at all goes wrong; this is an upgrade,
    * never a dependency.
    */
-  async function explained(word, dict) {
-    if (!writeDerivedDefinition) return { dict, written: null };
+  async function explained(word, dict, notify) {
+    if (!canRescue(writeDerivedDefinition)) return { dict, written: null };
     const derived = needsDefinitionRepair(word, dict);
     if (!derived) return { dict, written: null };
 
     try {
+      // The root's own entry is the whole point: without it there is nothing
+      // to write *from*, and a model asked anyway would answer from memory —
+      // which is the one thing this feature promises not to do.
       const rootEntry = await lookupDefinition(derived.root).catch(() => null);
-      const written = await writeDerivedDefinition({
-        word,
-        root: derived.root,
-        gloss: derived.gloss,
-        rootSenses: rootEntry?.senses ?? [],
-      });
+      if (!rootEntry?.senses?.length) return { dict, written: null };
+      const written = await writeDerivedDefinition(
+        {
+          word,
+          root: derived.root,
+          gloss: derived.gloss,
+          rootSenses: rootEntry.senses,
+        },
+        notify
+      );
       const senses = (written?.senses ?? [])
         .map((sense) => ({
           pos: String(sense?.pos ?? "").trim().toLowerCase(),
@@ -287,7 +309,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         ...dict,
         senses,
         source: `${dict.source} · written out by AI from “${derived.root}”`,
-        source_url: rootEntry?.source_url ?? dict.source_url,
+        source_url: rootEntry.source_url ?? dict.source_url,
       };
       if (needsDefinitionRepair(word, rewritten)) return { dict, written: null };
       return { dict: rewritten, written: { word, root: derived.root } };
@@ -366,11 +388,9 @@ export function createApp(storage, onChange = () => {}, services = {}) {
      * interface can say what happened rather than quietly substituting
      * something the student did not type.
      */
-    async addWord(input) {
+    async addWord(input, { onProgress } = {}) {
       const requested = normalizeWordInput(input);
-      const deleteState = new Map(
-        requested.map((word) => [word, deleteGeneration(word)])
-      );
+      const deleteState = new Map(deleteGenerations);
 
       return enqueueAddition(async () => {
         const pending = requested.filter((word) => !bankModel.find(bank, word));
@@ -391,7 +411,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
               continue;
             }
             try {
-              prepared[at] = await resolveWord(typed);
+              prepared[at] = await resolveWord(typed, onProgress ?? null);
             } catch (err) {
               failures[at] =
                 requested.length === 1
@@ -437,7 +457,11 @@ export function createApp(storage, onChange = () => {}, services = {}) {
               continue;
             }
             if (bankModel.find(next, candidate.word)) {
-              const error = alreadyStoredError([candidate.word]);
+              const error = candidate.corrected
+                ? new Error(
+                    `“${typed}” is a misspelling of “${candidate.word}”, which is already in your bank`
+                  )
+                : alreadyStoredError([candidate.word]);
               failed.push({ word: typed, message: String(error.message) });
               failures[at] = error;
               continue;

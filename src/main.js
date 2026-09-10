@@ -317,17 +317,6 @@ addInput.addEventListener("input", () => {
 });
 
 /**
- * What the add form is waiting on, when it is waiting on something it did not
- * expect to.
- *
- * The rescues below happen inside app.addWord(), and a model asked what a
- * mistyped word was meant to be can think for half a minute. Left saying
- * "finding “recieve”…" the whole time, that reads as a hang on a lookup that
- * has in fact already failed and is being repaired.
- */
-let addNarrator = null;
-
-/**
  * Everything that happened, in the order it happened to the words as typed:
  * what went in, what was corrected on the way, what a model had to write out,
  * and what could not be found at all. A batch is no longer all-or-nothing, so
@@ -360,11 +349,17 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.hidden = false;
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
-  addNarrator = (text) => {
-    addStatus.textContent = text;
-  };
   try {
-    const result = await app.addWord(word);
+    // A rescue inside the add can have a model thinking for half a minute.
+    // Left saying "finding “recieve”…" for all of it, that reads as a hang on
+    // a lookup which has in fact already failed and is being repaired. The
+    // channel travels with the call, so a second add started elsewhere cannot
+    // narrate into this line.
+    const result = await app.addWord(word, {
+      onProgress: (text) => {
+        addStatus.textContent = text;
+      },
+    });
     const addedEntries = result.added ?? result.batch ?? [result];
     for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
@@ -375,7 +370,6 @@ addForm.addEventListener("submit", async (e) => {
     addStatus.textContent = String(err.message ?? err);
     addStatus.classList.add("error");
   } finally {
-    addNarrator = null;
     addInput.disabled = false;
     addInput.focus();
   }
@@ -896,15 +890,26 @@ function renderLookupResult(word, dict) {
       lookupStatus.classList.remove("error");
       lookupStatus.textContent = `adding “${word}”…`;
       try {
-        // A misspelling is banked under the word it was a misspelling of, so
-        // the message names what went in rather than what was typed.
-        const stored = (await app.addWord(word)).word;
+        // A misspelling is banked under the word it was a misspelling of, and
+        // a signpost definition may have been written out on the way in — so
+        // the message names what actually went in rather than what was read
+        // on screen.
+        const result = await app.addWord(word, {
+          onProgress: (text) => {
+            lookupStatus.textContent = text;
+          },
+        });
+        const stored = result.word;
         expandedWords.add(stored);
         await renderBank();
-        lookupStatus.textContent =
+        lookupStatus.textContent = [
           stored === word
             ? `“${word}” is in your bank now`
-            : `“${word}” is a misspelling of “${stored}”, which is in your bank now`;
+            : `“${word}” is a misspelling of “${stored}”, which is in your bank now`,
+          ...(result.written ?? []).map(
+            (rewrite) => `ai wrote out its definition from “${rewrite.root}”`
+          ),
+        ].join(" · ");
         add.replaceWith(el("span", null, "in your bank"));
       } catch (err) {
         lookupStatus.textContent = String(err.message ?? err);
@@ -1376,6 +1381,8 @@ let conflictLog = [];
 
 async function recordConflicts(fresh) {
   conflictLog = foldConflicts(conflictLog, fresh);
+  // Whatever the last resolve pass said, it was about the list as it stood.
+  if (fresh.length) hideConflictStatus();
   try {
     if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
   } catch (err) {
@@ -1464,6 +1471,10 @@ function openConflicts() {
 }
 
 function renderConflicts() {
+  // A pass in progress owns the cards it is animating; a sync poll landing
+  // mid-pass would replace them and the remaining verdicts would have nowhere
+  // to land. The pass renders once when it is done.
+  if (resolvingConflicts) return;
   const open = openConflicts();
   conflictCards.clear();
   // A summary of what the model just did outlives the list it emptied.
@@ -1487,6 +1498,9 @@ function renderConflicts() {
 /** Long enough to read one verdict as it lands, short enough not to be a wait. */
 const VERDICT_STEP_MS = 420;
 
+/** One pass at a time, and the list is the pass's while it runs. */
+let resolvingConflicts = false;
+
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function showConflictStatus(text, isError = false) {
@@ -1494,6 +1508,34 @@ function showConflictStatus(text, isError = false) {
   status.textContent = text;
   status.classList.toggle("error", isError);
   status.hidden = false;
+}
+
+function hideConflictStatus() {
+  const status = $("conflicts-status");
+  status.hidden = true;
+  status.textContent = "";
+  status.classList.remove("error");
+}
+
+/**
+ * The list as a model should be asked about it: one entry per word and kind.
+ *
+ * The same word can hold two open entries of the same kind — two genuinely
+ * different divergences of it, seen on different days. Only the newest can be
+ * acted on, since restoring the older one's copy would be undone by the newer;
+ * asking about both spends money to be told the same thing twice. The log is
+ * newest-first, so the first of each pair is the one to ask about.
+ */
+function conflictsToResolve() {
+  const seen = new Set();
+  const picked = [];
+  for (const entry of openConflicts()) {
+    const key = `${entry.word}\u0000${entry.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push(entry);
+  }
+  return picked;
 }
 
 /** The model's answer, written onto the card it is about. */
@@ -1511,74 +1553,104 @@ function paintVerdict(card, verdict) {
 }
 
 async function resolveConflictsWithAi() {
-  const open = openConflicts();
+  if (resolvingConflicts) return;
+  const open = conflictsToResolve();
   if (!open.length || !aiReady()) return;
 
   const button = $("conflicts-ai");
   const list = $("conflict-list");
+  resolvingConflicts = true;
   button.disabled = true;
   button.textContent = "reading both copies…";
   list.classList.add("deciding");
   showConflictStatus("asking ai to read every pair…");
 
-  let verdicts;
   try {
-    ({ verdicts } = await aiResolveConflicts(aiSettings, open));
-  } catch (err) {
-    console.error(err);
-    showConflictStatus(String(err.message ?? err), true);
-    return;
+    let verdicts;
+    try {
+      ({ verdicts } = await aiResolveConflicts(aiSettings, open));
+    } catch (err) {
+      console.error(err);
+      showConflictStatus(String(err.message ?? err), true);
+      return;
+    } finally {
+      list.classList.remove("deciding");
+    }
+
+    const byId = new Map(open.map((entry) => [entry.id, entry]));
+    let restored = 0;
+    let kept = 0;
+
+    await mutate(async () => {
+      // A word's record and its dictionary are two conflicts with two answers,
+      // and restoring the record carries the loser's dictionary fields along
+      // with it — so whatever was decided about the definition is re-asserted
+      // afterwards. updateDefinition is a no-op when nothing changed, so this
+      // costs nothing on the ordinary path.
+      const restoredWords = new Set();
+      const definitionVerdicts = [];
+
+      for (const verdict of verdicts) {
+        const entry = byId.get(verdict.id);
+        if (!entry) continue;
+        const card = conflictCards.get(verdict.id);
+        paintVerdict(card, verdict);
+        await pause(VERDICT_STEP_MS);
+        if (entry.kind === "definition") {
+          definitionVerdicts.push({ entry, verdict });
+          if (verdict.choice === "other") await app.restoreDefinition(entry.lost);
+        } else if (verdict.choice === "other") {
+          // The same path the card's own button takes: an edit made now, which
+          // then propagates through GitHub and the folder by the ordinary rules.
+          await app.restoreWord(entry.lost);
+          restoredWords.add(entry.word);
+        }
+        if (verdict.choice === "other") restored += 1;
+        else kept += 1;
+        card?.classList.add("resolved");
+        conflictLog = conflictLog.map((c) =>
+          c.id === verdict.id ? { ...c, dismissed: true } : c
+        );
+      }
+
+      for (const { entry, verdict } of definitionVerdicts) {
+        if (!restoredWords.has(entry.word)) continue;
+        const wanted = verdict.choice === "other" ? entry.lost : entry.kept;
+        if (wanted) await app.restoreDefinition(wanted);
+      }
+
+      // One write for the whole pass, after the last verdict has been applied.
+      try {
+        if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+      } catch (err) {
+        console.error(err); // the list still works this session
+      }
+    });
+
+    // Whatever is still open — a conflict the model skipped, or an older
+    // divergence of a word it was not asked about twice — is said plainly
+    // rather than left to be discovered in the list.
+    const leftOpen = openConflicts().length;
+    showConflictStatus(
+      [
+        restored ? `restored ${restored}` : "",
+        kept ? `kept the merge’s copy for ${kept}` : "",
+        leftOpen ? `${leftOpen} left for you` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ") || "nothing to resolve"
+    );
+    await pause(VERDICT_STEP_MS);
   } finally {
-    list.classList.remove("deciding");
+    // Only now: the button was live for the whole paced loop before this, and
+    // a second click would have sent a second request about conflicts the
+    // first pass was still working through.
+    resolvingConflicts = false;
     button.disabled = false;
     button.textContent = "resolve with ai";
+    // Whatever a sync poll wanted to draw while the pass owned the list.
+    renderConflicts();
   }
-
-  const byId = new Map(open.map((entry) => [entry.id, entry]));
-  let restored = 0;
-  let kept = 0;
-
-  await mutate(async () => {
-    for (const verdict of verdicts) {
-      const entry = byId.get(verdict.id);
-      if (!entry) continue;
-      const card = conflictCards.get(verdict.id);
-      paintVerdict(card, verdict);
-      await pause(VERDICT_STEP_MS);
-      if (verdict.choice === "other") {
-        // The same path the card's own button takes: an edit made now, which
-        // then propagates through GitHub and the folder by the ordinary rules.
-        if (entry.kind === "definition") await app.restoreDefinition(entry.lost);
-        else await app.restoreWord(entry.lost);
-        restored += 1;
-      } else {
-        kept += 1;
-      }
-      card?.classList.add("resolved");
-      conflictLog = conflictLog.map((c) =>
-        c.id === verdict.id ? { ...c, dismissed: true } : c
-      );
-    }
-    // One write for the whole pass, after the last verdict has been applied.
-    try {
-      if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
-    } catch (err) {
-      console.error(err); // the list still works this session
-    }
-  });
-
-  const unanswered = open.length - restored - kept;
-  showConflictStatus(
-    [
-      restored ? `restored ${restored}` : "",
-      kept ? `kept the merge's copy for ${kept}` : "",
-      unanswered > 0 ? `${unanswered} left for you` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ")
-  );
-  await pause(VERDICT_STEP_MS);
-  renderConflicts();
   await renderBank();
 }
 
@@ -1594,6 +1666,7 @@ $("conflicts-clear").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
   }
+  hideConflictStatus();
   renderConflicts();
 });
 
@@ -2373,18 +2446,22 @@ function wireApp() {
     {
       /**
        * The two rescues the core hands back to the interface, because the
-       * interface is what holds the key. Both answer `null` when there is no
-       * key, which is what makes an add on a keyless device behave exactly as
-       * it always has.
+       * interface is what holds the key — and the question that decides
+       * whether asking either is worth anything.
+       *
+       * `aiReady` is separate from the two functions because these are
+       * installed at boot, before the key has been unsealed, and a keyless
+       * device must not so much as look up a root word on their behalf.
        */
-      async suggestSpelling(word) {
+      aiReady,
+      async suggestSpelling(word, notify) {
         if (!aiReady()) return null;
-        addNarrator?.(`no dictionary has “${word}” — asking ai what you meant…`);
+        notify?.(`no dictionary has “${word}” — asking ai what you meant…`);
         return await aiSpellFix(aiSettings, word);
       },
-      async writeDerivedDefinition(request) {
+      async writeDerivedDefinition(request, notify) {
         if (!aiReady()) return null;
-        addNarrator?.(
+        notify?.(
           `“${request.word}” is only defined as a form of “${request.root}” — asking ai to write it out…`
         );
         return await aiRootMeaning(aiSettings, request);
