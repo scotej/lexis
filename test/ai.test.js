@@ -1013,9 +1013,10 @@ test("aiResolveConflicts answers per conflict and never invents an id", async ()
 
   assert.equal(asked, 2);
   // The model answers about "1" and "2"; the caller gets its own ids back.
+  // "unclear" is no answer at all, so that conflict stays open for a person
+  // rather than being counted as a decision nobody made.
   assert.deepEqual(verdicts.map((v) => [v.id, v.choice]), [
     ["demise:edit:1111:2222", "other"],
-    ["candid:deleted:1750000000000:3333", "keep"], // not "other" leaves the merge alone
   ]);
   assert.equal(verdicts[0].reason, "the discarded copy has the fuller definition");
 
@@ -1052,4 +1053,64 @@ test("how far a correction may travel depends on how long the word is", async ()
   // Ten letters of difference is a different word, however long the word is.
   globalThis.fetch = replies({ correction: "photosynthesis", confident: true });
   assert.equal(await aiSpellFix(SETTINGS, "perpendicular"), null);
+});
+
+test("the model's own word for restoring is read as restoring", async () => {
+  const verdictFor = async (choice) => {
+    globalThis.fetch = replies({ verdicts: [{ ref: "1", choice, reason: "" }] });
+    const { verdicts } = await aiResolveConflicts(SETTINGS, [
+      { id: "one", word: "demise", kind: "edit", reasons: [], kept: null, lost: null },
+    ]).catch(() => ({ verdicts: [] }));
+    return verdicts[0]?.choice ?? null;
+  };
+
+  // The prompt says '"other" to restore the discarded one'; a model that
+  // answers with the verb rather than the label means the same thing.
+  assert.equal(await verdictFor("other"), "other");
+  assert.equal(await verdictFor("restore"), "other");
+  assert.equal(await verdictFor("the other copy"), "other");
+  assert.equal(await verdictFor("keep"), "keep");
+  assert.equal(await verdictFor("Keep."), "keep");
+  // And anything else is not a decision.
+  assert.equal(await verdictFor("maybe"), null);
+});
+
+test("one ask carries at most a dozen conflicts", async () => {
+  let sent = null;
+  globalThis.fetch = (url, init) => {
+    sent = JSON.parse(init.body);
+    return json(200, {
+      choices: [{ message: { content: JSON.stringify({ verdicts: [{ ref: "1", choice: "keep", reason: "" }] }) } }],
+    });
+  };
+  const many = Array.from({ length: 30 }, (_, i) => ({
+    id: `w${i}`,
+    word: `word${i}`,
+    kind: "edit",
+    reasons: [],
+    kept: null,
+    lost: null,
+  }));
+
+  const { asked } = await aiResolveConflicts(SETTINGS, many);
+
+  assert.equal(asked, 12);
+  assert.doesNotMatch(sent.messages.at(-1).content, /word12|word29/);
+});
+
+test("a model that writes an essay instead of a definition is not banked", async () => {
+  globalThis.fetch = replies({
+    senses: [
+      { pos: "adverb", def: "x".repeat(401) },
+      { pos: "not a part of speech", def: "In a way that holds the attention." },
+    ],
+  });
+  const { senses } = await aiRootMeaning(SETTINGS, {
+    word: "interestingly",
+    root: "interesting",
+    rootSenses: [{ pos: "adjective", def: "Holding the attention." }],
+  });
+  assert.deepEqual(senses, [
+    { pos: "", def: "In a way that holds the attention.", example: null },
+  ]);
 });

@@ -18,6 +18,7 @@ import {
 import { analyze } from "./essay.js";
 import {
   clarifyDerivativeDefinitions,
+  derivedFrom,
   fetchDefinition,
   fetchSynonyms,
   misspellingOf,
@@ -276,6 +277,41 @@ export function createApp(storage, onChange = () => {}, services = {}) {
    * entry stays. So does it if anything at all goes wrong; this is an upgrade,
    * never a dependency.
    */
+  /**
+   * An entry for `root` that actually says something, following one pointer if
+   * the first one only points again.
+   *
+   * The British spellings a student here types do this constantly: "realised"
+   * points at "realise", whose whole entry is "Non-Oxford British standard
+   * spelling of realize." Handing *that* to a model as its source material is
+   * asking it to work from nothing while telling it to stay inside the
+   * meanings given — which is the invitation to answer from memory that this
+   * whole path exists to refuse. One hop is enough; a chain longer than that
+   * is not a derivation any student needs explaining.
+   */
+  async function meaningfulEntry(root) {
+    for (let hop = 0; hop < 2; hop++) {
+      const entry = await lookupDefinition(root).catch(() => null);
+      if (!entry?.senses?.length) return null;
+      const onwards = derivedFrom(entry);
+      if (!onwards) return { root, entry };
+      if (onwards.root === root) return null;
+      root = onwards.root;
+    }
+    return null;
+  }
+
+  /** Whether the model simply handed the unhelpful gloss back in its own words. */
+  function echoesGloss(dict, rewritten) {
+    const plain = (text) =>
+      String(text ?? "")
+        .toLowerCase()
+        .replace(/[.!]+$/, "")
+        .trim();
+    const original = new Set((dict.senses ?? []).map((sense) => plain(sense.def)));
+    return rewritten.senses.some((sense) => original.has(plain(sense.def)));
+  }
+
   async function explained(word, dict, notify) {
     if (!canRescue(writeDerivedDefinition)) return { dict, written: null };
     const derived = needsDefinitionRepair(word, dict);
@@ -285,14 +321,14 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       // The root's own entry is the whole point: without it there is nothing
       // to write *from*, and a model asked anyway would answer from memory —
       // which is the one thing this feature promises not to do.
-      const rootEntry = await lookupDefinition(derived.root).catch(() => null);
-      if (!rootEntry?.senses?.length) return { dict, written: null };
+      const source = await meaningfulEntry(derived.root);
+      if (!source) return { dict, written: null };
       const written = await writeDerivedDefinition(
         {
           word,
-          root: derived.root,
+          root: source.root,
           gloss: derived.gloss,
-          rootSenses: rootEntry.senses,
+          rootSenses: source.entry.senses,
         },
         notify
       );
@@ -308,11 +344,15 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       const rewritten = {
         ...dict,
         senses,
-        source: `${dict.source} · written out by AI from “${derived.root}”`,
-        source_url: rootEntry.source_url ?? dict.source_url,
+        source: `${dict.source} · written out by AI from “${source.root}”`,
+        source_url: source.entry.source_url ?? dict.source_url,
       };
-      if (needsDefinitionRepair(word, rewritten)) return { dict, written: null };
-      return { dict: rewritten, written: { word, root: derived.root } };
+      // A reply that is itself a signpost, or that simply hands the gloss
+      // back, has not answered — and the editor's text is better than either.
+      if (derivedFrom(rewritten) || echoesGloss(dict, rewritten)) {
+        return { dict, written: null };
+      }
+      return { dict: rewritten, written: { word, root: source.root } };
     } catch {
       return { dict, written: null };
     }

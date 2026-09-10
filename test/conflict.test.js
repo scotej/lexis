@@ -12,7 +12,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { detectConflicts, foldConflicts, CONFLICT_LOG_LIMIT } from "../src/core/conflict.js";
+import {
+  CONFLICT_LOG_LIMIT,
+  detectConflicts,
+  foldConflicts,
+  planResolution,
+  resolvableConflicts,
+} from "../src/core/conflict.js";
 import { mergeBanks } from "../src/core/merge.js";
 import { newSrs } from "../src/core/srs.js";
 
@@ -279,4 +285,110 @@ test("review events differ without conflicting, because the merge unions them", 
   assert.deepEqual(detectConflicts(mine, theirs, sides), []);
   const merged = mergeBanks(mine, theirs).words[0];
   assert.deepEqual(Object.keys(merged.review_events).sort(), ["review:a", "review:b"]);
+});
+
+/* ---- resolving a whole list in one pass ---- */
+
+function openEntry(word, kind, extra = {}) {
+  return {
+    id: `${word}:${kind}:${extra.tag ?? "1"}`,
+    word,
+    kind,
+    reasons: [],
+    kept: { word, senses: [{ pos: "noun", def: `${word} kept` }] },
+    lost: { word, senses: [{ pos: "noun", def: `${word} lost` }] },
+    at: extra.at ?? 1,
+  };
+}
+
+test("only the newest divergence of a word and kind is worth asking about", () => {
+  const newest = openEntry("demise", "edit", { tag: "new", at: 2 });
+  const older = openEntry("demise", "edit", { tag: "old", at: 1 });
+  const other = openEntry("candid", "edit");
+
+  assert.deepEqual(
+    resolvableConflicts([newest, older, other]).map((entry) => entry.id),
+    [newest.id, other.id]
+  );
+  assert.deepEqual(resolvableConflicts([]), []);
+});
+
+test("restoring a record re-asserts whichever dictionary was chosen for that word", () => {
+  const definition = openEntry("demise", "definition");
+  const edit = openEntry("demise", "edit");
+
+  // The definition is kept and the record restored: reinstateWord would carry
+  // the rejected definition back in, so the kept one is written again.
+  const kept = planResolution(
+    [definition, edit],
+    [
+      { id: definition.id, choice: "keep", reason: "this one is fuller" },
+      { id: edit.id, choice: "other", reason: "more practice" },
+    ]
+  );
+  assert.deepEqual(
+    kept.steps.map((step) => [step.kind, step.action]),
+    [
+      ["definition", "none"],
+      ["edit", "restore-word"],
+    ]
+  );
+  assert.deepEqual(kept.reassert, [{ word: "demise", record: definition.kept }]);
+
+  // Both restored: the discarded definition is the one to end up with.
+  const both = planResolution(
+    [definition, edit],
+    [
+      { id: definition.id, choice: "other", reason: "" },
+      { id: edit.id, choice: "other", reason: "" },
+    ]
+  );
+  assert.deepEqual(both.reassert, [{ word: "demise", record: definition.lost }]);
+
+  // The order the verdicts arrive in does not change where the word ends up.
+  const reversed = planResolution(
+    [definition, edit],
+    [
+      { id: edit.id, choice: "other", reason: "" },
+      { id: definition.id, choice: "keep", reason: "" },
+    ]
+  );
+  assert.deepEqual(reversed.reassert, [{ word: "demise", record: definition.kept }]);
+});
+
+test("a record restored with nothing said about its definition keeps the bank's own", () => {
+  // The model answered the edit and skipped the definition, which is the
+  // commonest way for a rejected dictionary to be carried back in unnoticed.
+  const definition = openEntry("demise", "definition");
+  const edit = openEntry("demise", "edit");
+  const plan = planResolution([definition, edit], [{ id: edit.id, choice: "other", reason: "" }]);
+
+  assert.deepEqual(plan.reassert, [{ word: "demise", record: null }]);
+  assert.deepEqual(plan.unanswered, [definition.id]);
+});
+
+test("a verdict about a conflict nobody asked about is ignored, and repeats count once", () => {
+  const edit = openEntry("demise", "edit");
+  const plan = planResolution(
+    [edit],
+    [
+      { id: edit.id, choice: "other", reason: "first" },
+      { id: edit.id, choice: "keep", reason: "second thoughts" },
+      { id: "a word from another list", choice: "other", reason: "" },
+    ]
+  );
+  assert.equal(plan.steps.length, 1);
+  assert.equal(plan.steps[0].reason, "first");
+  assert.deepEqual(plan.unanswered, []);
+});
+
+test("a keep needs no work, and a delete conflict restores the whole record", () => {
+  const deleted = { ...openEntry("candid", "delete"), kept: null };
+  const plan = planResolution(
+    [deleted],
+    [{ id: deleted.id, choice: "other", reason: "it had a fortnight of reviews" }]
+  );
+  assert.equal(plan.steps[0].action, "restore-word");
+  assert.equal(plan.steps[0].record, deleted.lost);
+  assert.deepEqual(plan.reassert, [{ word: "candid", record: null }]);
 });

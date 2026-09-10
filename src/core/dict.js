@@ -299,14 +299,17 @@ const RELATION_WORDS = new Set([
   "attributive", "australian", "britain", "british", "canada", "canadian", "capitalization",
   "capitalisation", "case", "clipping", "colloquial", "common", "commonwealth", "comparative",
   "conjugation", "construed", "contraction", "dated", "dative", "declension", "definite",
-  "deliberate", "dialect", "dialectal", "diminutive", "eye", "feminine", "form", "forms",
+  "deliberate", "dialect", "dialectal", "diminutive", "english", "eye", "feminine",
+  "form", "forms",
   "future", "genitive", "gerund", "honorific", "imperative", "indefinite", "indicative",
   "infinitive", "inflection", "informal", "initialism", "ireland", "irish", "masculine",
   "misconstruction", "misspelling", "neuter", "new", "nominative", "nonstandard",
-  "non-standard", "noun", "obsolete", "or", "oxford", "participle", "passive", "past",
-  "person", "plural", "present", "pronunciation", "rare", "romanization", "romanisation",
-  "second", "second-person", "simple", "singular", "spelling", "standard", "states",
-  "superlative", "superseded", "synonym", "tense", "third", "third-person", "transliteration",
+  "non-oxford", "non-standard", "northern", "noun", "obsolete", "or", "oxford",
+  "participle", "passive", "past", "person", "plural", "present", "pronunciation",
+  "proscribed", "rare", "regional", "romanization", "romanisation", "scotland",
+  "scottish", "second", "second-person", "simple", "singular", "southern", "spelling",
+  "standard", "states", "superlative", "superseded", "synonym", "tense", "third",
+  "third-person", "transliteration", "wales", "welsh",
   "uk", "united", "us", "usa", "verb", "vocative", "zealand",
 ]);
 
@@ -324,7 +327,10 @@ const RELATION_KEYS = new Set([
 
 const MAX_RELATION_WORDS = 8;
 const LEADING_LABEL = /^\s*\([^)]*\)\s*/;
-const FORM_OF = /^([a-z][a-z' -]*?) of ([a-z][a-z'-]*)(.*)$/i;
+// The relation phrase may carry commas: Wiktionary writes "British, Canadian,
+// Commonwealth, and Ireland standard spelling of honor." for half the words an
+// Australian student types.
+const FORM_OF = /^([a-z][a-z', -]*?) of ([a-z][a-z'-]*)(.*)$/i;
 
 /**
  * The pointer in a gloss, or null when the gloss is a definition.
@@ -357,8 +363,8 @@ export function formOfGloss(sense) {
     return null;
   }
 
-  const relation = relationPhrase.trim().toLowerCase();
-  const words = relation.split(/\s+/).filter(Boolean);
+  const relation = relationPhrase.trim().toLowerCase().replace(/,+$/, "");
+  const words = relation.split(/[\s,]+/).filter(Boolean);
   if (!words.length || words.length > MAX_RELATION_WORDS) return null;
   // An article means an ordinary sentence: "a plural of ..." is prose, "plural
   // of ..." is the gloss template.
@@ -373,6 +379,29 @@ export function formOfGloss(sense) {
       ? "misspelling"
       : "form",
   };
+}
+
+/**
+ * A sense that is *shaped* like a pointer, whether or not the strict rule
+ * above recognises the relation.
+ *
+ * The strict rule is deliberately conservative because a false positive there
+ * rewrites a human-written definition. This is the same question asked in the
+ * other direction — "is there a meaning in here to work from?" — where a false
+ * positive costs only a rewrite that does not happen, and Wiktionary's supply
+ * of label vocabulary is bottomless ("Non-Oxford British standard spelling
+ * of…"). Anchored at both ends, so ordinary prose that merely contains "of"
+ * does not match.
+ */
+const POINTER_SHAPED = /^[a-z][a-z', -]{0,60} of [a-z][a-z'’-]+[.,:;!?]*$/i;
+
+/** Whether an entry holds any sense that is a meaning rather than a signpost. */
+export function saysSomething(dictionary) {
+  return (dictionary?.senses ?? []).some((sense) => {
+    const text = String(sense?.def ?? "").trim().replace(LEADING_LABEL, "");
+    if (!text) return false;
+    return !formOfGloss(sense) && !referencedAdjective(sense) && !POINTER_SHAPED.test(text);
+  });
 }
 
 /** What a sense points at, whether by form-of gloss or by opaque adverb formula. */

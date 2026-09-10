@@ -126,14 +126,20 @@ routing). That unlocks these:
   interesting way”. That is true and it is not a meaning. Where an entry says
   nothing else, lexis fetches the entry for the root word and asks the model to
   write out what the derived form actually means — working from Wiktionary's
-  own words rather than from memory. The entry records that it was written
-  this way; if the model returns another signpost, or anything goes wrong, the
-  editor's original text stays.
+  own words rather than from memory. If the root's own entry turns out to be
+  another signpost, as *realise* → *realize* is, it follows that one too; if
+  there is still nothing to work from, the model is not asked at all. The entry
+  records that it was written this way. Adverbs are usually settled before this
+  ever runs, by the Datamuse cross-check above, which costs nothing and needs
+  no key; and if the model returns another signpost, or anything goes wrong,
+  the editor's original text stays.
 - **Resolving conflicts.** The conflicts list (below) offers *resolve with
   ai*: the model reads both copies of each word and says, one at a time, which
   to keep and why. Each verdict is applied through the same “use the other
   copy” path you would have used by hand, so nothing happens that you could
-  not undo yourself.
+  not undo yourself. One pass asks about a dozen words at most, and about each
+  word once; anything it does not answer for stays in the list, and the line
+  under it says how many.
 - **Passages to type.** In **type**, set *written by* to **ai** (or **both**)
   and the model writes passages built around your bank words, at whichever
   length you asked for. They are written *ahead* of being wanted — three sit
