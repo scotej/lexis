@@ -271,3 +271,89 @@ export async function saveConflictLog(key, entries) {
 export async function clearConflictLog() {
   await storeRemove(LOG_KEY);
 }
+
+/* ---- resolving the log in one pass ---- */
+
+/**
+ * The list as it is worth asking about: one entry per word and kind.
+ *
+ * The same word can hold two open entries of the same kind — two genuinely
+ * different divergences of it, seen on different days. Only the newest can be
+ * acted on, since restoring the older one's copy would be undone by the newer;
+ * asking about both spends money to be told the same thing twice. The log is
+ * newest first, so the first of each pair is the one that counts.
+ */
+export function resolvableConflicts(entries) {
+  const seen = new Set();
+  const picked = [];
+  for (const entry of entries ?? []) {
+    const key = `${entry.word} ${entry.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push(entry);
+  }
+  return picked;
+}
+
+/**
+ * Turns a set of verdicts into the work they imply, in the order to do it.
+ *
+ * The subtlety this exists for: a word's record and its dictionary are two
+ * conflicts with two answers, and `reinstateWord` restores a *whole* record —
+ * dictionary fields included. So "use the other copy" on the record half
+ * silently carries the rejected definition back in with it, whatever was
+ * decided about the definition half, and in either order.
+ *
+ * Hence `reassert`: after the pass, the dictionary actually chosen for that
+ * word is written again. A `record` of `null` means nobody decided the
+ * dictionary this pass — so what the bank held *before* the restore is what
+ * should stand, and the caller supplies it. `updateDefinition` is a no-op when
+ * nothing changed, so on the ordinary path this costs nothing.
+ */
+export function planResolution(entries, verdicts) {
+  const byId = new Map((entries ?? []).map((entry) => [entry.id, entry]));
+  const steps = [];
+  const done = new Set();
+  const definitionChoice = new Map();
+  const restored = [];
+
+  for (const verdict of verdicts ?? []) {
+    const entry = byId.get(verdict?.id);
+    if (!entry || done.has(entry.id)) continue;
+    done.add(entry.id);
+    const choice = verdict.choice === "other" ? "other" : "keep";
+    let action = "none";
+    let record = null;
+
+    if (entry.kind === "definition") {
+      definitionChoice.set(entry.word, choice === "other" ? entry.lost : entry.kept);
+      if (choice === "other") {
+        action = "restore-definition";
+        record = entry.lost;
+      }
+    } else if (choice === "other") {
+      action = "restore-word";
+      record = entry.lost;
+      restored.push(entry.word);
+    }
+
+    steps.push({
+      id: entry.id,
+      word: entry.word,
+      kind: entry.kind,
+      choice,
+      reason: typeof verdict.reason === "string" ? verdict.reason : "",
+      action,
+      record,
+    });
+  }
+
+  return {
+    steps,
+    reassert: [...new Set(restored)].map((word) => ({
+      word,
+      record: definitionChoice.get(word) ?? null,
+    })),
+    unanswered: (entries ?? []).filter((entry) => !done.has(entry.id)).map((entry) => entry.id),
+  };
+}

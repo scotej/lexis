@@ -1096,6 +1096,20 @@ const MAX_REPAIRED_SENSES = 3;
 const MAX_ROOT_SENSES = 4;
 
 /**
+ * This is the only model-written text lexis stores, syncs, and shows as a
+ * definition, so it is held to a dictionary's shape rather than a chat
+ * reply's: a part of speech that is one, and a sense short enough to have
+ * been the one sentence that was asked for. Anything longer is not a
+ * definition that was trimmed, it is a different kind of answer.
+ */
+const MAX_DEF_CHARS = 400;
+const PARTS_OF_SPEECH = new Set([
+  "noun", "proper noun", "verb", "adjective", "adverb", "pronoun", "preposition",
+  "conjunction", "interjection", "determiner", "article", "numeral", "particle",
+  "phrase", "prefix", "suffix",
+]);
+
+/**
  * A definition for a word whose dictionary entry only points at another word.
  *
  * "interestingly" is *in an interesting way*; "gases" is *plural of gas*.
@@ -1148,12 +1162,9 @@ export async function aiRootMeaning(settings, { word, gloss = "", root, rootSens
   const senses = [];
   for (const row of rows) {
     const def = asString(typeof row === "string" ? row : row?.def).trim();
-    if (!def) continue;
-    senses.push({
-      pos: asString(typeof row === "string" ? "" : row?.pos).trim().toLowerCase(),
-      def,
-      example: null,
-    });
+    if (!def || def.length > MAX_DEF_CHARS) continue;
+    const pos = asString(typeof row === "string" ? "" : row?.pos).trim().toLowerCase();
+    senses.push({ pos: PARTS_OF_SPEECH.has(pos) ? pos : "", def, example: null });
     if (senses.length >= MAX_REPAIRED_SENSES) break;
   }
   if (!senses.length) throw new Error("No usable definition came back. Try again.");
@@ -1233,6 +1244,30 @@ export function conflictBrief(entry, ref) {
 const MAX_CONFLICTS_PER_ASK = 12;
 
 /**
+ * The two answers, in the words a model actually uses for them.
+ *
+ * Treating everything that is not the literal "other" as "keep" made the one
+ * word the prompt itself uses to *describe* restoring — "restore the discarded
+ * one" — mean its opposite. Anything still unreadable is no answer at all, and
+ * an unanswered conflict stays open for a person, which is the safe end of
+ * being wrong.
+ */
+const RESTORE_WORDS = new Set([
+  "other", "restore", "restored", "discarded", "take-other", "take other", "other copy",
+  "the other", "the other copy", "lost",
+]);
+const KEEP_WORDS = new Set([
+  "keep", "kept", "keep current", "current", "merge", "merged", "as-is", "as is", "none",
+]);
+
+function readChoice(value) {
+  const text = asString(value).trim().toLowerCase().replace(/[."'\s]+$/, "");
+  if (RESTORE_WORDS.has(text)) return "other";
+  if (KEEP_WORDS.has(text)) return "keep";
+  return null;
+}
+
+/**
  * Reads the conflict list and says, for each one, whether the copy the merge
  * kept is the right one — with a reason a person can disagree with.
  *
@@ -1270,10 +1305,9 @@ export async function aiResolveConflicts(settings, conflicts) {
   for (const row of rows) {
     const ref = asString(row?.ref ?? row?.id).trim();
     if (!ref || answers.has(ref)) continue;
-    answers.set(ref, {
-      choice: asString(row?.choice).trim().toLowerCase() === "other" ? "other" : "keep",
-      reason: stripEmphasis(asString(row?.reason)).trim(),
-    });
+    const choice = readChoice(row?.choice);
+    if (!choice) continue; // unreadable: the card stays open for a person
+    answers.set(ref, { choice, reason: stripEmphasis(asString(row?.reason)).trim() });
   }
 
   // Back to the conflicts the caller knows about, in the order they were asked.

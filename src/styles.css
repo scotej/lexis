@@ -1437,6 +1437,7 @@ main {
   }
 }
 
+.conflict-list.busy .conflict-actions,
 .conflict.resolving .conflict-actions {
   opacity: 0.35;
   pointer-events: none;

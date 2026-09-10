@@ -15,6 +15,8 @@ import { createMirror, newDeviceId, peerFileName, sealMirror } from "./core/mirr
 import {
   foldConflicts,
   loadConflictLog,
+  planResolution,
+  resolvableConflicts,
   saveConflictLog,
   clearConflictLog,
 } from "./core/conflict.js";
@@ -365,6 +367,8 @@ addForm.addEventListener("submit", async (e) => {
     addInput.value = "";
     await renderBank();
     addStatus.textContent = describeAddition(result);
+    // Something in there did not work, even though something else did.
+    addStatus.classList.toggle("error", (result.failed ?? []).length > 0);
     addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
@@ -1400,6 +1404,7 @@ async function recordConflicts(fresh) {
  */
 async function dropConflict(id) {
   conflictLog = conflictLog.map((c) => (c.id === id ? { ...c, dismissed: true } : c));
+  hideConflictStatus(); // the summary described the list as it stood
   try {
     if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
   } catch (err) {
@@ -1517,52 +1522,21 @@ function hideConflictStatus() {
   status.classList.remove("error");
 }
 
-/**
- * The list as a model should be asked about it: one entry per word and kind.
- *
- * The same word can hold two open entries of the same kind — two genuinely
- * different divergences of it, seen on different days. Only the newest can be
- * acted on, since restoring the older one's copy would be undone by the newer;
- * asking about both spends money to be told the same thing twice. The log is
- * newest-first, so the first of each pair is the one to ask about.
- */
-function conflictsToResolve() {
-  const seen = new Set();
-  const picked = [];
-  for (const entry of openConflicts()) {
-    const key = `${entry.word}\u0000${entry.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    picked.push(entry);
-  }
-  return picked;
-}
-
-/** The model's answer, written onto the card it is about. */
-function paintVerdict(card, verdict) {
-  if (!card) return;
-  const line = el(
-    "p",
-    "conflict-verdict",
-    verdict.reason ||
-      (verdict.choice === "other" ? "restoring the other copy" : "keeping this copy")
-  );
-  line.classList.add(verdict.choice === "other" ? "restored" : "kept");
-  card.append(line);
-  card.classList.add("resolving");
-}
-
 async function resolveConflictsWithAi() {
   if (resolvingConflicts) return;
-  const open = conflictsToResolve();
+  const open = resolvableConflicts(openConflicts());
   if (!open.length || !aiReady()) return;
 
   const button = $("conflicts-ai");
+  const clear = $("conflicts-clear");
   const list = $("conflict-list");
   resolvingConflicts = true;
   button.disabled = true;
   button.textContent = "reading both copies…";
-  list.classList.add("deciding");
+  // The whole panel belongs to the pass while it runs: a card's own buttons
+  // would otherwise restore or dismiss a conflict the pass is midway through.
+  clear.disabled = true;
+  list.classList.add("busy", "deciding");
   showConflictStatus("asking ai to read every pair…");
 
   try {
@@ -1577,69 +1551,79 @@ async function resolveConflictsWithAi() {
       list.classList.remove("deciding");
     }
 
-    const byId = new Map(open.map((entry) => [entry.id, entry]));
+    const plan = planResolution(open, verdicts);
+    const before = new Map();
     let restored = 0;
     let kept = 0;
+    let trouble = null;
 
     await mutate(async () => {
-      // A word's record and its dictionary are two conflicts with two answers,
-      // and restoring the record carries the loser's dictionary fields along
-      // with it — so whatever was decided about the definition is re-asserted
-      // afterwards. updateDefinition is a no-op when nothing changed, so this
-      // costs nothing on the ordinary path.
-      const restoredWords = new Set();
-      const definitionVerdicts = [];
-
-      for (const verdict of verdicts) {
-        const entry = byId.get(verdict.id);
-        if (!entry) continue;
-        const card = conflictCards.get(verdict.id);
-        paintVerdict(card, verdict);
-        await pause(VERDICT_STEP_MS);
-        if (entry.kind === "definition") {
-          definitionVerdicts.push({ entry, verdict });
-          if (verdict.choice === "other") await app.restoreDefinition(entry.lost);
-        } else if (verdict.choice === "other") {
-          // The same path the card's own button takes: an edit made now, which
-          // then propagates through GitHub and the folder by the ordinary rules.
-          await app.restoreWord(entry.lost);
-          restoredWords.add(entry.word);
-        }
-        if (verdict.choice === "other") restored += 1;
-        else kept += 1;
-        card?.classList.add("resolved");
-        conflictLog = conflictLog.map((c) =>
-          c.id === verdict.id ? { ...c, dismissed: true } : c
-        );
-      }
-
-      for (const { entry, verdict } of definitionVerdicts) {
-        if (!restoredWords.has(entry.word)) continue;
-        const wanted = verdict.choice === "other" ? entry.lost : entry.kept;
-        if (wanted) await app.restoreDefinition(wanted);
-      }
-
-      // One write for the whole pass, after the last verdict has been applied.
       try {
-        if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+        for (const step of plan.steps) {
+          const card = conflictCards.get(step.id);
+          paintVerdict(card, step);
+          await pause(VERDICT_STEP_MS);
+          if (step.action === "restore-word") {
+            // What the bank holds for this word now, in case the pass says
+            // nothing about its dictionary: reinstating the record carries the
+            // other copy's definition in with it.
+            const current = app.listWords().find((entry) => entry.word === step.word);
+            before.set(step.word, current ? { ...current } : null);
+            // The same path the card's own button takes: an edit made now, which
+            // then propagates through GitHub and the folder by the ordinary rules.
+            await app.restoreWord(step.record);
+          } else if (step.action === "restore-definition") {
+            await app.restoreDefinition(step.record);
+          }
+          if (step.choice === "other") restored += 1;
+          else kept += 1;
+          card?.classList.add("resolved");
+          conflictLog = conflictLog.map((c) =>
+            c.id === step.id ? { ...c, dismissed: true } : c
+          );
+        }
+
+        for (const { word, record } of plan.reassert) {
+          const wanted = record ?? before.get(word);
+          if (wanted) await app.restoreDefinition(wanted);
+        }
       } catch (err) {
-        console.error(err); // the list still works this session
+        // mutate() shows the save failure itself; this is so the summary below
+        // does not go on to claim the whole list was dealt with.
+        trouble = err;
+        throw err;
       }
     });
 
-    // Whatever is still open — a conflict the model skipped, or an older
-    // divergence of a word it was not asked about twice — is said plainly
-    // rather than left to be discovered in the list.
-    const leftOpen = openConflicts().length;
-    showConflictStatus(
-      [
-        restored ? `restored ${restored}` : "",
-        kept ? `kept the merge’s copy for ${kept}` : "",
-        leftOpen ? `${leftOpen} left for you` : "",
-      ]
-        .filter(Boolean)
-        .join(" · ") || "nothing to resolve"
-    );
+    // Whatever did land is written down, even when something later failed.
+    try {
+      if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+    } catch (err) {
+      console.error(err); // the list still works this session
+    }
+
+    if (trouble) {
+      showConflictStatus(
+        `applied ${restored + kept} of ${plan.steps.length} before it stopped — ${String(
+          trouble.message ?? trouble
+        )}`,
+        true
+      );
+    } else {
+      // Whatever is still open — a conflict the model skipped, or an older
+      // divergence of a word it was not asked about twice — is said plainly
+      // rather than left to be discovered in the list.
+      const leftOpen = openConflicts().length;
+      showConflictStatus(
+        [
+          restored ? `restored ${restored}` : "",
+          kept ? `kept the merge’s copy for ${kept}` : "",
+          leftOpen ? `${leftOpen} left for you` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ") || "nothing to resolve"
+      );
+    }
     await pause(VERDICT_STEP_MS);
   } finally {
     // Only now: the button was live for the whole paced loop before this, and
@@ -1648,6 +1632,8 @@ async function resolveConflictsWithAi() {
     resolvingConflicts = false;
     button.disabled = false;
     button.textContent = "resolve with ai";
+    clear.disabled = false;
+    list.classList.remove("busy");
     // Whatever a sync poll wanted to draw while the pass owned the list.
     renderConflicts();
   }
