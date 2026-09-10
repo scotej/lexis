@@ -242,7 +242,8 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       const suggestion = await Promise.resolve()
         .then(() => suggestSpelling(typed, notify))
         .catch(() => null);
-      const meant = String(suggestion?.word ?? suggestion ?? "").trim().toLowerCase();
+      const answer = typeof suggestion === "string" ? suggestion : suggestion?.word;
+      const meant = typeof answer === "string" ? answer.trim().toLowerCase() : "";
       if (!meant || meant === typed) throw failure;
       // If the model's word is no more findable than the typed one, the honest
       // thing to report is still the original failure.
