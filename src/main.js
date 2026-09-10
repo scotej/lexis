@@ -31,8 +31,11 @@ import {
   aiEssayReview,
   aiExampleSentences,
   aiNuance,
+  aiResolveConflicts,
+  aiRootMeaning,
   aiSessionUsage,
   aiSimilarWords,
+  aiSpellFix,
   exampleContext,
   fetchKeyInfo,
   fetchModels,
@@ -313,6 +316,42 @@ addInput.addEventListener("input", () => {
   addStatus.classList.remove("error");
 });
 
+/**
+ * What the add form is waiting on, when it is waiting on something it did not
+ * expect to.
+ *
+ * The rescues below happen inside app.addWord(), and a model asked what a
+ * mistyped word was meant to be can think for half a minute. Left saying
+ * "finding “recieve”…" the whole time, that reads as a hang on a lookup that
+ * has in fact already failed and is being repaired.
+ */
+let addNarrator = null;
+
+/**
+ * Everything that happened, in the order it happened to the words as typed:
+ * what went in, what was corrected on the way, what a model had to write out,
+ * and what could not be found at all. A batch is no longer all-or-nothing, so
+ * "added ‘x’" on its own would be a half-truth whenever anything else
+ * occurred.
+ */
+function describeAddition(result) {
+  const added = result.added ?? result.batch ?? [result];
+  const notes = [];
+  if (added.length) notes.push(`added “${added.map((entry) => entry.word).join(" · ")}”`);
+  for (const fix of result.corrected ?? []) {
+    notes.push(
+      fix.by === "ai"
+        ? `ai corrected “${fix.typed}” to “${fix.word}”`
+        : `“${fix.typed}” is a misspelling of “${fix.word}”`
+    );
+  }
+  for (const rewrite of result.written ?? []) {
+    notes.push(`ai wrote out “${rewrite.word}” from “${rewrite.root}”`);
+  }
+  for (const failure of result.failed ?? []) notes.push(failure.message);
+  return notes.join(" · ");
+}
+
 addForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const word = addInput.value.trim();
@@ -321,18 +360,22 @@ addForm.addEventListener("submit", async (e) => {
   addStatus.hidden = false;
   addStatus.classList.remove("error");
   addStatus.textContent = `finding “${word.toLowerCase()}”…`;
+  addNarrator = (text) => {
+    addStatus.textContent = text;
+  };
   try {
     const result = await app.addWord(word);
-    const addedEntries = result.batch ?? [result];
+    const addedEntries = result.added ?? result.batch ?? [result];
     for (const entry of addedEntries) expandedWords.add(entry.word);
     addInput.value = "";
     await renderBank();
-    addStatus.textContent = `added “${addedEntries.map((entry) => entry.word).join(" · ")}”`;
+    addStatus.textContent = describeAddition(result);
     addStatus.hidden = false;
   } catch (err) {
     addStatus.textContent = String(err.message ?? err);
     addStatus.classList.add("error");
   } finally {
+    addNarrator = null;
     addInput.disabled = false;
     addInput.focus();
   }
@@ -853,10 +896,15 @@ function renderLookupResult(word, dict) {
       lookupStatus.classList.remove("error");
       lookupStatus.textContent = `adding “${word}”…`;
       try {
-        await app.addWord(word);
-        expandedWords.add(word);
+        // A misspelling is banked under the word it was a misspelling of, so
+        // the message names what went in rather than what was typed.
+        const stored = (await app.addWord(word)).word;
+        expandedWords.add(stored);
         await renderBank();
-        lookupStatus.textContent = `“${word}” is in your bank now`;
+        lookupStatus.textContent =
+          stored === word
+            ? `“${word}” is in your bank now`
+            : `“${word}” is a misspelling of “${stored}”, which is in your bank now`;
         add.replaceWith(el("span", null, "in your bank"));
       } catch (err) {
         lookupStatus.textContent = String(err.message ?? err);
@@ -1353,8 +1401,12 @@ async function dropConflict(id) {
   renderConflicts();
 }
 
+/** The card on screen for each open conflict, so a verdict can find its own. */
+const conflictCards = new Map();
+
 function conflictNode(entry) {
   const li = el("li", "conflict");
+  conflictCards.set(entry.id, li);
   li.append(el("p", "conflict-word", entry.word));
 
   const when = new Date(entry.at ?? 0);
@@ -1407,11 +1459,130 @@ function conflictNode(entry) {
   return li;
 }
 
-function renderConflicts() {
-  const open = conflictLog.filter((c) => !c.dismissed);
-  $("conflicts").hidden = open.length === 0;
-  $("conflict-list").replaceChildren(...open.map(conflictNode));
+function openConflicts() {
+  return conflictLog.filter((c) => !c.dismissed);
 }
+
+function renderConflicts() {
+  const open = openConflicts();
+  conflictCards.clear();
+  // A summary of what the model just did outlives the list it emptied.
+  $("conflicts").hidden = open.length === 0 && $("conflicts-status").hidden;
+  $("conflict-list").replaceChildren(...open.map(conflictNode));
+  // The button exists only where it can work: a key, and something to resolve.
+  $("conflicts-ai").hidden = !aiReady() || open.length === 0;
+  $("conflicts-ai-note").hidden = $("conflicts-ai").hidden;
+}
+
+/* ---- resolving the list with a model ----
+ *
+ * A conflict is a genuine judgement — one copy has a fuller definition, the
+ * other a fortnight of reviews — and making it by hand means reading two
+ * versions of a word for every entry in the list. This asks a model to read
+ * them instead, and then does exactly what the buttons on each card do: it
+ * restores a discarded copy, or it lets the merge's answer stand. Nothing
+ * happens here that could not have been done, and undone, by hand.
+ */
+
+/** Long enough to read one verdict as it lands, short enough not to be a wait. */
+const VERDICT_STEP_MS = 420;
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function showConflictStatus(text, isError = false) {
+  const status = $("conflicts-status");
+  status.textContent = text;
+  status.classList.toggle("error", isError);
+  status.hidden = false;
+}
+
+/** The model's answer, written onto the card it is about. */
+function paintVerdict(card, verdict) {
+  if (!card) return;
+  const line = el(
+    "p",
+    "conflict-verdict",
+    verdict.reason ||
+      (verdict.choice === "other" ? "restoring the other copy" : "keeping this copy")
+  );
+  line.classList.add(verdict.choice === "other" ? "restored" : "kept");
+  card.append(line);
+  card.classList.add("resolving");
+}
+
+async function resolveConflictsWithAi() {
+  const open = openConflicts();
+  if (!open.length || !aiReady()) return;
+
+  const button = $("conflicts-ai");
+  const list = $("conflict-list");
+  button.disabled = true;
+  button.textContent = "reading both copies…";
+  list.classList.add("deciding");
+  showConflictStatus("asking ai to read every pair…");
+
+  let verdicts;
+  try {
+    ({ verdicts } = await aiResolveConflicts(aiSettings, open));
+  } catch (err) {
+    console.error(err);
+    showConflictStatus(String(err.message ?? err), true);
+    return;
+  } finally {
+    list.classList.remove("deciding");
+    button.disabled = false;
+    button.textContent = "resolve with ai";
+  }
+
+  const byId = new Map(open.map((entry) => [entry.id, entry]));
+  let restored = 0;
+  let kept = 0;
+
+  await mutate(async () => {
+    for (const verdict of verdicts) {
+      const entry = byId.get(verdict.id);
+      if (!entry) continue;
+      const card = conflictCards.get(verdict.id);
+      paintVerdict(card, verdict);
+      await pause(VERDICT_STEP_MS);
+      if (verdict.choice === "other") {
+        // The same path the card's own button takes: an edit made now, which
+        // then propagates through GitHub and the folder by the ordinary rules.
+        if (entry.kind === "definition") await app.restoreDefinition(entry.lost);
+        else await app.restoreWord(entry.lost);
+        restored += 1;
+      } else {
+        kept += 1;
+      }
+      card?.classList.add("resolved");
+      conflictLog = conflictLog.map((c) =>
+        c.id === verdict.id ? { ...c, dismissed: true } : c
+      );
+    }
+    // One write for the whole pass, after the last verdict has been applied.
+    try {
+      if (sessionKey) await saveConflictLog(sessionKey, conflictLog);
+    } catch (err) {
+      console.error(err); // the list still works this session
+    }
+  });
+
+  const unanswered = open.length - restored - kept;
+  showConflictStatus(
+    [
+      restored ? `restored ${restored}` : "",
+      kept ? `kept the merge's copy for ${kept}` : "",
+      unanswered > 0 ? `${unanswered} left for you` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ")
+  );
+  await pause(VERDICT_STEP_MS);
+  renderConflicts();
+  await renderBank();
+}
+
+$("conflicts-ai").addEventListener("click", resolveConflictsWithAi);
 
 $("conflicts-clear").addEventListener("click", async () => {
   // Dismiss rather than delete. Detection re-derives from the channels every
@@ -1529,6 +1700,9 @@ function showAiStatus(text, isError = false) {
 function renderAiSettings() {
   const has = aiReady();
   $("essay-ai-review").hidden = !has;
+  // The conflicts list carries its own AI button, and it appears and vanishes
+  // with the key like every other one.
+  if (conflictLog.length) renderConflicts();
   $("ai-remove").hidden = !has;
   $("ai-key-note").hidden = has;
   // The key field stays empty once saved; showing even a fragment invites copying.
@@ -2188,12 +2362,35 @@ $("gate-setup").addEventListener("submit", async (e) => {
 /* ---- boot ---- */
 
 function wireApp() {
-  app = createApp(platform.storage, () => {
-    sync?.schedule();
-    // The typing test filters passages by what is in the bank, so a word added
-    // or removed changes what it can serve.
-    notifyTypingBankChanged();
-  });
+  app = createApp(
+    platform.storage,
+    () => {
+      sync?.schedule();
+      // The typing test filters passages by what is in the bank, so a word added
+      // or removed changes what it can serve.
+      notifyTypingBankChanged();
+    },
+    {
+      /**
+       * The two rescues the core hands back to the interface, because the
+       * interface is what holds the key. Both answer `null` when there is no
+       * key, which is what makes an add on a keyless device behave exactly as
+       * it always has.
+       */
+      async suggestSpelling(word) {
+        if (!aiReady()) return null;
+        addNarrator?.(`no dictionary has “${word}” — asking ai what you meant…`);
+        return await aiSpellFix(aiSettings, word);
+      },
+      async writeDerivedDefinition(request) {
+        if (!aiReady()) return null;
+        addNarrator?.(
+          `“${request.word}” is only defined as a form of “${request.root}” — asking ai to write it out…`
+        );
+        return await aiRootMeaning(aiSettings, request);
+      },
+    }
+  );
   initTypingView({ app, getAiSettings: () => aiSettings, aiReady });
   sync = createSyncController({
     app,

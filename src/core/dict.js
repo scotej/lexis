@@ -23,12 +23,30 @@ const TIMEOUT_MS = 12000;
  */
 const HEDGE_AFTER_MS = 900;
 
+/**
+ * "The dictionary has no such word" and "the dictionary is having a bad
+ * afternoon" are different answers, and only the first one is worth acting
+ * on: a typo is worth correcting, a 503 is worth retrying. Everything that
+ * means *the host answered, and there is no entry* is marked here, and
+ * nothing else is.
+ */
+export const NOT_FOUND = "not-found";
+
+function notFound(message) {
+  const err = new Error(message);
+  err.code = NOT_FOUND;
+  return err;
+}
+
 async function getJSON(url) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
     const resp = await fetch(url, { signal: ctl.signal, headers: { Accept: "application/json" } });
-    if (!resp.ok) throw new Error(`${new URL(url).host} returned ${resp.status}`);
+    if (!resp.ok) {
+      const message = `${new URL(url).host} returned ${resp.status}`;
+      throw resp.status === 404 ? notFound(message) : new Error(message);
+    }
     return await resp.json();
   } finally {
     clearTimeout(timer);
@@ -100,7 +118,7 @@ async function fetchDictionaryApi(word) {
     `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`
   );
   const entry = Array.isArray(entries) ? entries[0] : null;
-  if (!entry) throw new Error("empty response");
+  if (!entry) throw notFound("empty response");
 
   const phonetic =
     (entry.phonetic && entry.phonetic.length ? entry.phonetic : null) ??
@@ -120,7 +138,7 @@ async function fetchDictionaryApi(word) {
       });
     });
   });
-  if (!senses.length) throw new Error("no definitions in response");
+  if (!senses.length) throw notFound("no definitions in response");
 
   return {
     phonetic,
@@ -132,10 +150,17 @@ async function fetchDictionaryApi(word) {
 
 // ---- Fallback source: Wiktionary REST API ----
 
+/**
+ * Wiktionary ships a `<style>` block inside some entries — the one that sizes
+ * the date superscripts. Dropping only the tags kept its *contents*, so
+ * "simple past of begin" arrived with a stylesheet welded to the end of it.
+ */
+const EMBEDDED_STYLESHEET = /<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+
 export function stripHtml(s) {
   let out = "";
   let inTag = false;
-  for (const c of s) {
+  for (const c of String(s ?? "").replace(EMBEDDED_STYLESHEET, " ")) {
     if (c === "<") inTag = true;
     else if (c === ">") inTag = false;
     else if (!inTag) out += c;
@@ -157,7 +182,7 @@ async function fetchWiktionary(word) {
     `https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`
   );
   const usages = body?.en;
-  if (!usages) throw new Error("no English entry");
+  if (!usages) throw notFound("no English entry");
 
   const senses = [];
   usages.slice(0, 3).forEach((usage, i) => {
@@ -170,7 +195,7 @@ async function fetchWiktionary(word) {
       if (senses.filter((s) => s.pos === pos).length >= keep) break;
     }
   });
-  if (!senses.length) throw new Error("no definitions found");
+  if (!senses.length) throw notFound("no definitions found");
 
   return {
     phonetic: null,
@@ -223,11 +248,166 @@ async function fetchRawDefinition(word) {
   try {
     return await Promise.any([primary, startFallback()]);
   } catch (err) {
-    const [why1, why2] = (err?.errors ?? [err]).map((reason) =>
-      String(reason?.message ?? reason)
-    );
-    throw new Error(`no dictionary entry found for "${word}" (${why1}; ${why2})`);
+    const reasons = err?.errors ?? [err];
+    const [why1, why2] = reasons.map((reason) => String(reason?.message ?? reason));
+    const failure = new Error(`no dictionary entry found for "${word}" (${why1}; ${why2})`);
+    // Only when *both* hosts said there is no such word. One stalled host and
+    // one 404 is not evidence of a typo, and offering to correct a spelling on
+    // that basis would be guessing with someone else's word.
+    if (reasons.length && reasons.every((reason) => reason?.code === NOT_FOUND)) {
+      failure.code = NOT_FOUND;
+    }
+    throw failure;
   }
+}
+
+/* ---- glosses that define a word by naming another one ---- */
+
+/**
+ * A dictionary can answer a question with a pointer. "gases" is *plural of
+ * gas*; "colour" is *Commonwealth and Ireland standard spelling of color*;
+ * "recieve" is *misspelling of receive*. Each of those is true, useful to a
+ * lexicographer, and no use at all to someone who asked what the word means —
+ * it is the "noun of interested" answer, and banking it stores a signpost
+ * where a definition should be.
+ *
+ * Recognising the shape is what lets the app do something about it: point the
+ * student at the word they meant, or go and read the entry the gloss is
+ * pointing at. Precision matters more than reach here — a false positive
+ * rewrites a real definition — so a gloss is only recognised when it is
+ * *entirely* one of these pointers: a relation phrase built from grammatical
+ * vocabulary, the word "of", one word, and then nothing but punctuation.
+ */
+
+/** Words that can appear in a form-of relation phrase. Anything else disqualifies it. */
+const RELATION_WORDS = new Set([
+  "abbreviation", "accusative", "acronym", "alternative", "alternate", "and", "archaic",
+  "attributive", "australian", "britain", "british", "canada", "canadian", "capitalization",
+  "capitalisation", "case", "clipping", "colloquial", "common", "commonwealth", "comparative",
+  "conjugation", "construed", "contraction", "dated", "dative", "declension", "definite",
+  "deliberate", "dialect", "dialectal", "diminutive", "eye", "feminine", "form", "forms",
+  "future", "genitive", "gerund", "honorific", "imperative", "indefinite", "indicative",
+  "infinitive", "inflection", "informal", "initialism", "ireland", "irish", "masculine",
+  "misconstruction", "misspelling", "neuter", "new", "nominative", "nonstandard",
+  "non-standard", "noun", "obsolete", "or", "oxford", "participle", "passive", "past",
+  "person", "plural", "present", "pronunciation", "rare", "romanization", "romanisation",
+  "second", "second-person", "simple", "singular", "spelling", "standard", "states",
+  "superlative", "superseded", "synonym", "tense", "third", "third-person", "transliteration",
+  "uk", "united", "us", "usa", "verb", "vocative", "zealand",
+]);
+
+/**
+ * The relation must actually be about word*form*, not about meaning. Without
+ * this, "a form of address for a duke" reads as a pointer to "address".
+ */
+const RELATION_KEYS = new Set([
+  "abbreviation", "acronym", "capitalization", "capitalisation", "clipping", "comparative",
+  "conjugation", "contraction", "declension", "form", "forms", "gerund", "imperative",
+  "indicative", "infinitive", "inflection", "initialism", "misconstruction", "misspelling",
+  "participle", "past", "plural", "present", "pronunciation", "romanization", "romanisation",
+  "singular", "spelling", "superlative", "synonym", "tense", "transliteration",
+]);
+
+const MAX_RELATION_WORDS = 8;
+const LEADING_LABEL = /^\s*\([^)]*\)\s*/;
+const FORM_OF = /^([a-z][a-z' -]*?) of ([a-z][a-z'-]*)(.*)$/i;
+
+/**
+ * The pointer in a gloss, or null when the gloss is a definition.
+ *
+ * `kind` separates the one relation that is a *mistake* from the ones that are
+ * merely indirect: only a misspelling justifies quietly looking somewhere else
+ * for the word the student meant. "Commonwealth spelling of color" is not a
+ * typo, and treating it as one would rewrite an Australian student's spelling
+ * of their own word.
+ */
+export function formOfGloss(sense) {
+  const text = String(sense?.def ?? "").trim().replace(LEADING_LABEL, "");
+  const match = text.match(FORM_OF);
+  if (!match) return null;
+  const [, relationPhrase, root, rest] = match;
+
+  // Nothing may follow the root but punctuation: "comparative form of strict:
+  // more strict" is still a pointer, "a form of address for a duke" is not.
+  if (rest.trim() && !/^\s*[.,:;!?)\]]/.test(rest)) return null;
+
+  const relation = relationPhrase.trim().toLowerCase();
+  const words = relation.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > MAX_RELATION_WORDS) return null;
+  // An article means an ordinary sentence: "a plural of ..." is prose, "plural
+  // of ..." is the gloss template.
+  if (["a", "an", "the"].includes(words[0])) return null;
+  if (!words.every((w) => RELATION_WORDS.has(w))) return null;
+  if (!words.some((w) => RELATION_KEYS.has(w))) return null;
+
+  return {
+    relation,
+    root: root.toLowerCase(),
+    kind: words.includes("misspelling") || words.includes("misconstruction")
+      ? "misspelling"
+      : "form",
+  };
+}
+
+/** What a sense points at, whether by form-of gloss or by opaque adverb formula. */
+function pointsAt(sense) {
+  const gloss = formOfGloss(sense);
+  if (gloss) return gloss;
+  const adjective = referencedAdjective(sense);
+  return adjective ? { relation: "adverb", root: adjective, kind: "form" } : null;
+}
+
+/**
+ * The word an entry is really about, when the entry says nothing itself.
+ *
+ * Reported only when *every* sense is a pointer. "running" glosses its verb
+ * form as "present participle of run" and then goes on to define the
+ * adjective properly; that entry has already answered the question, and
+ * rewriting it would throw away the part that did.
+ */
+export function derivedFrom(dictionary) {
+  const senses = (dictionary?.senses ?? []).filter((sense) => String(sense?.def ?? "").trim());
+  if (!senses.length) return null;
+  const pointers = senses.map(pointsAt);
+  if (pointers.some((pointer) => !pointer)) return null;
+
+  const root = pointers[0].root;
+  // Two pointers at two different words is a homograph, not a derivation, and
+  // there is no single root to go and read.
+  if (pointers.some((pointer) => pointer.root !== root)) return null;
+
+  return {
+    root,
+    relation: pointers[0].relation,
+    kind: pointers.every((pointer) => pointer.kind === "misspelling") ? "misspelling" : "form",
+    gloss: senses.map((sense) => sense.def.trim()).join(" "),
+  };
+}
+
+/**
+ * The correctly-spelled word this entry says the student meant, if that is
+ * all the entry says.
+ *
+ * This costs nothing and asks no model: Wiktionary has already made the
+ * judgement, and it is a better-evidenced one than a guess.
+ */
+export function misspellingOf(word, dictionary) {
+  const derived = derivedFrom(dictionary);
+  if (!derived || derived.kind !== "misspelling") return null;
+  const root = derived.root;
+  return root && root !== String(word ?? "").trim().toLowerCase() ? root : null;
+}
+
+/**
+ * Whether an entry is worth asking a model to write out properly — every
+ * sense a pointer, and the pointer is not a misspelling (those are corrected
+ * rather than explained).
+ */
+export function needsDefinitionRepair(word, dictionary) {
+  const derived = derivedFrom(dictionary);
+  if (!derived || derived.kind === "misspelling") return null;
+  if (derived.root === String(word ?? "").trim().toLowerCase()) return null;
+  return derived;
 }
 
 // Wiktionary sometimes defines a derived adverb only through its adjective:
@@ -240,7 +420,9 @@ async function fetchRawDefinition(word) {
 // "strictly" while retaining "rigorously", "rigidly", and "sternly". If that
 // evidence is weak or unavailable, preserve the original editor-written text.
 
-const OPAQUE_ADVERB = /^in an? ([a-z][a-z'-]*) manner[.!]?$/i;
+// "In a fervent manner", "In an interesting way", "In a wry fashion" — the
+// same non-answer in the three phrasings Wiktionary's editors actually use.
+const OPAQUE_ADVERB = /^in an? ([a-z][a-z'-]*) (?:manner|way|fashion)[.!]?$/i;
 const MIN_CLARIFICATION_FREQ = 0.05;
 const MAX_CLARIFICATION_WORDS = 3;
 

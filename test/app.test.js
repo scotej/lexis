@@ -450,13 +450,13 @@ test("an invalid token rejects a multi-word submission before any lookup or save
   assert.equal(storage.saves, 0);
 });
 
-test("a failed lookup leaves a multi-word submission completely unapplied", async () => {
+test("a failed lookup costs only its own word", async () => {
   const storage = new MemoryStorage(bankModel.emptyBank());
   const lookups = [];
   const app = createApp(storage, () => {}, fakeLexicon(lookups, "modality"));
   await app.init();
 
-  await assert.rejects(() => app.addWord("deontic modality"), /couldn’t add “modality”: lookup failed/);
+  const result = await app.addWord("deontic modality");
 
   // A word's definition and its synonyms go out together, so the failing word
   // still costs both requests. One wasted call on the word that broke the
@@ -467,6 +467,36 @@ test("a failed lookup leaves a multi-word submission completely unapplied", asyn
     "definition:modality",
     "synonyms:modality",
   ]);
+  assert.deepEqual(app.listWords().map((word) => word.word), ["deontic"]);
+  assert.equal(result.word, "deontic");
+  assert.deepEqual(result.failed, [
+    { word: "modality", message: "couldn’t add “modality”: lookup failed" },
+  ]);
+  // Still one write: the words that resolved are added together, or not at all.
+  assert.equal(storage.saves, 1);
+});
+
+test("a batch in which nothing resolves reports the first failure and saves nothing", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const lookups = [];
+  const lexicon = fakeLexicon(lookups);
+  const app = createApp(
+    storage,
+    () => {},
+    {
+      ...lexicon,
+      async fetchDefinition(word) {
+        lookups.push(`definition:${word}`);
+        throw new Error(`${word} is unknown`);
+      },
+    }
+  );
+  await app.init();
+
+  await assert.rejects(
+    () => app.addWord("deontic modality"),
+    /couldn’t add “deontic”: deontic is unknown/
+  );
   assert.deepEqual(app.listWords(), []);
   assert.equal(storage.saves, 0);
 });
@@ -648,4 +678,231 @@ test("a delete supersedes an add that is still waiting behind an earlier add", a
   assert.equal(bankModel.find(app.getBank(), "deontic"), null);
   assert.ok(app.getBank().deleted.some((item) => item.word === "deontic"));
   assert.equal(storage.saves, 3, "merge, delete, and the unrelated first add should be the only saves");
+});
+
+/* ---- rescuing a word that the dictionary cannot answer ---- */
+
+function notFound(message) {
+  const err = new Error(message);
+  err.code = "not-found";
+  return err;
+}
+
+/**
+ * A dictionary that knows a fixed set of words, plus whatever glosses are
+ * handed to it — enough to play out a typo, a "misspelling of" entry, and a
+ * signpost definition without a network.
+ */
+function lexicon({ known = [], glosses = {}, unknown = "not-found", log = [] } = {}) {
+  return {
+    log,
+    async fetchDefinition(word) {
+      log.push(`definition:${word}`);
+      if (glosses[word]) {
+        return {
+          phonetic: null,
+          senses: glosses[word],
+          source: "Wiktionary",
+          source_url: `https://en.wiktionary.org/wiki/${word}`,
+        };
+      }
+      if (!known.includes(word)) {
+        throw unknown === "not-found"
+          ? notFound(`no dictionary entry found for "${word}"`)
+          : new Error("api.dictionaryapi.dev returned 503");
+      }
+      return {
+        phonetic: null,
+        senses: [{ pos: "noun", def: `${word} definition`, example: null }],
+        source: "Wiktionary",
+        source_url: `https://en.wiktionary.org/wiki/${word}`,
+      };
+    },
+    async fetchSynonyms(word) {
+      log.push(`synonyms:${word}`);
+      return [{ word: `${word}-syn`, freq: 1, score: 1 }];
+    },
+  };
+}
+
+test("an unfindable word is corrected by the model and checked against the dictionary", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const asked = [];
+  const dict = lexicon({ known: ["receive"] });
+  const app = createApp(storage, () => {}, {
+    ...dict,
+    async suggestSpelling(word) {
+      asked.push(word);
+      return { word: "receive" };
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("recieve");
+
+  assert.deepEqual(asked, ["recieve"]);
+  assert.deepEqual(app.listWords().map((word) => word.word), ["receive"]);
+  assert.deepEqual(result.corrected, [{ typed: "recieve", word: "receive", by: "ai" }]);
+  // The synonyms of a misspelling are not this word's synonyms.
+  assert.deepEqual(
+    dict.log.filter((call) => call.startsWith("synonyms:")),
+    ["synonyms:recieve", "synonyms:receive"]
+  );
+  assert.deepEqual(app.listWords()[0].synonyms, [{ word: "receive-syn", freq: 1, score: 1 }]);
+});
+
+test("a dictionary having a bad day is never treated as a misspelling", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: ["receive"], unknown: "network" }),
+    async suggestSpelling() {
+      asked += 1;
+      return { word: "receive" };
+    },
+  });
+  await app.init();
+
+  await assert.rejects(() => app.addWord("recieve"), /returned 503/);
+  assert.equal(asked, 0, "a 503 is not evidence that a word was mistyped");
+  assert.deepEqual(app.listWords(), []);
+});
+
+test("a correction no dictionary recognises leaves the original failure standing", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: [] }),
+    async suggestSpelling() {
+      return { word: "quartz" };
+    },
+  });
+  await app.init();
+
+  await assert.rejects(() => app.addWord("xqzt"), /no dictionary entry found for "xqzt"/);
+  assert.deepEqual(app.listWords(), []);
+});
+
+test("a model that has nothing to suggest, or fails, changes nothing", async () => {
+  for (const suggestSpelling of [async () => null, async () => { throw new Error("no key"); }]) {
+    const storage = new MemoryStorage(bankModel.emptyBank());
+    const app = createApp(storage, () => {}, { ...lexicon({ known: [] }), suggestSpelling });
+    await app.init();
+    await assert.rejects(() => app.addWord("xqzt"), /no dictionary entry found for "xqzt"/);
+    assert.deepEqual(app.listWords(), []);
+  }
+});
+
+test("an entry that only says “misspelling of” is followed, with no model involved", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      known: ["receive"],
+      glosses: { recieve: [{ pos: "verb", def: "Misspelling of receive.", example: null }] },
+    }),
+    async suggestSpelling() {
+      asked += 1;
+      return null;
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("recieve");
+
+  assert.equal(asked, 0);
+  assert.deepEqual(app.listWords().map((word) => word.word), ["receive"]);
+  assert.deepEqual(result.corrected, [
+    { typed: "recieve", word: "receive", by: "dictionary" },
+  ]);
+});
+
+test("a correction that lands on a word already banked is reported, not duplicated", async () => {
+  const initial = bankModel.emptyBank();
+  initial.words.push(entry("receive", todayISO()));
+  const storage = new MemoryStorage(initial);
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: ["receive", "deontic"] }),
+    async suggestSpelling() {
+      return { word: "receive" };
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("recieve deontic");
+
+  assert.deepEqual(app.listWords("word-asc").map((word) => word.word), ["deontic", "receive"]);
+  assert.deepEqual(result.failed, [
+    { word: "recieve", message: "“receive” is already in your bank" },
+  ]);
+});
+
+test("a signpost definition is written out from the root entry", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const seen = [];
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      known: ["interesting"],
+      glosses: { interestingly: [{ pos: "adverb", def: "In an interesting way.", example: null }] },
+    }),
+    async writeDerivedDefinition(request) {
+      seen.push(request);
+      return { senses: [{ pos: "adverb", def: "In a way that holds the attention." }] };
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("interestingly");
+
+  assert.deepEqual(result.written, [{ word: "interestingly", root: "interesting" }]);
+  const stored = app.listWords()[0];
+  assert.deepEqual(seen.map((request) => [request.word, request.root]), [
+    ["interestingly", "interesting"],
+  ]);
+  assert.deepEqual(seen[0].rootSenses, [
+    { pos: "noun", def: "interesting definition", example: null },
+  ]);
+  assert.deepEqual(stored.senses, [
+    { pos: "adverb", def: "In a way that holds the attention.", example: null },
+  ]);
+  assert.match(stored.source, /written out by AI from “interesting”/);
+  assert.equal(stored.source_url, "https://en.wiktionary.org/wiki/interesting");
+});
+
+test("a rewrite that is another signpost, or that fails, keeps the editor's words", async () => {
+  const gloss = [{ pos: "noun", def: "plural of gas", example: null }];
+  for (const writeDerivedDefinition of [
+    async () => ({ senses: [{ pos: "noun", def: "plural of gas" }] }),
+    async () => ({ senses: [] }),
+    async () => {
+      throw new Error("the model refused");
+    },
+  ]) {
+    const storage = new MemoryStorage(bankModel.emptyBank());
+    const app = createApp(storage, () => {}, {
+      ...lexicon({ known: ["gas"], glosses: { gases: gloss } }),
+      writeDerivedDefinition,
+    });
+    await app.init();
+
+    await app.addWord("gases");
+
+    assert.deepEqual(app.listWords()[0].senses, gloss);
+    assert.equal(app.listWords()[0].source, "Wiktionary");
+  }
+});
+
+test("with no model at hand, a signpost entry is stored exactly as the dictionary wrote it", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(
+    storage,
+    () => {},
+    lexicon({ known: ["gas"], glosses: { gases: [{ pos: "noun", def: "plural of gas", example: null }] } })
+  );
+  await app.init();
+
+  await app.addWord("gases");
+
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "noun", def: "plural of gas", example: null },
+  ]);
 });

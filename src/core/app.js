@@ -20,7 +20,10 @@ import {
   clarifyDerivativeDefinitions,
   fetchDefinition,
   fetchSynonyms,
+  misspellingOf,
+  needsDefinitionRepair,
   needsDerivativeClarification,
+  NOT_FOUND,
 } from "./dict.js";
 import { mergeBanks } from "./merge.js";
 import { todayISO } from "./srs.js";
@@ -60,6 +63,14 @@ export function createApp(storage, onChange = () => {}, services = {}) {
   const lookupSynonyms = services.fetchSynonyms ?? fetchSynonyms;
   const clarifyDefinition =
     services.clarifyDerivativeDefinitions ?? clarifyDerivativeDefinitions;
+  /**
+   * The two optional AI helpers. Both are supplied by the interface, which
+   * holds the OpenRouter key, and both are absent whenever there is no key —
+   * so everything below reads as today's behaviour on a device that has never
+   * been given one, which is the only behaviour lexis promises.
+   */
+  const suggestSpelling = services.suggestSpelling ?? null;
+  const writeDerivedDefinition = services.writeDerivedDefinition ?? null;
 
   /**
    * Storage and sync are asynchronous, but bank mutations must commit in the
@@ -158,6 +169,133 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     return words.find((word) => deleteGeneration(word) !== generations.get(word)) ?? null;
   }
 
+  function supersededWord(word, generations) {
+    return generations.has(word) && deleteGeneration(word) !== generations.get(word);
+  }
+
+  /**
+   * The dictionary entry, synonyms, and — if the word needed rescuing on the
+   * way — what was done about it.
+   *
+   * Two things can be wrong with a word by the time it reaches a dictionary,
+   * and neither is the student's fault for typing it:
+   *
+   *   - **Nobody has heard of it.** Usually a typo. When the failure is
+   *     specifically "no such entry" (never a timeout, never a 503 — those
+   *     are the network having a bad day, and a word must not be rewritten
+   *     on that evidence) the model is asked which word was meant, and the
+   *     suggestion is only used if a dictionary then recognises it. So the
+   *     correction is checked against the same source everything else here
+   *     comes from, rather than believed.
+   *
+   *   - **The entry is a signpost.** "recieve" resolves happily to
+   *     "Misspelling of receive", and Wiktionary has already done the
+   *     diagnosis; taking it costs nothing and asks no model.
+   *
+   * Whatever happens, the word the student typed is carried alongside the one
+   * that was banked, so nothing is substituted silently.
+   */
+  async function resolveWord(typed) {
+    // Both questions at once, as before — settled rather than raced, because
+    // the definition's failure is now a question rather than an answer, and a
+    // synonym request left unobserved while that question is asked would be an
+    // unhandled rejection.
+    const [definition, thesaurus] = await Promise.allSettled([
+      lookupDefinition(typed),
+      lookupSynonyms(typed),
+    ]);
+
+    let word = typed;
+    let dict = null;
+    let corrected = null;
+
+    if (definition.status === "fulfilled") {
+      dict = definition.value;
+      const meant = misspellingOf(typed, dict);
+      if (meant) {
+        const real = await lookupDefinition(meant).catch(() => null);
+        if (real) {
+          word = meant;
+          dict = real;
+          corrected = { typed, word: meant, by: "dictionary" };
+        }
+      }
+    } else {
+      const failure = definition.reason;
+      if (failure?.code !== NOT_FOUND || !suggestSpelling) throw failure;
+      const suggestion = await Promise.resolve()
+        .then(() => suggestSpelling(typed))
+        .catch(() => null);
+      const meant = String(suggestion?.word ?? suggestion ?? "").trim().toLowerCase();
+      if (!meant || meant === typed) throw failure;
+      // If the model's word is no more findable than the typed one, the honest
+      // thing to report is still the original failure.
+      const real = await lookupDefinition(meant).catch(() => null);
+      if (!real) throw failure;
+      word = meant;
+      dict = real;
+      corrected = { typed, word: meant, by: "ai" };
+    }
+
+    // The typo's synonyms belong to the typo. A corrected word asks again.
+    let synonyms;
+    if (word === typed) {
+      if (thesaurus.status === "rejected") throw thesaurus.reason;
+      synonyms = thesaurus.value;
+    } else {
+      synonyms = await lookupSynonyms(word);
+    }
+
+    const explanation = await explained(word, dict);
+    return { word, dict: explanation.dict, synonyms, corrected, written: explanation.written };
+  }
+
+  /**
+   * A definition that only names another word, replaced with one that says
+   * what this word means.
+   *
+   * The model is not asked what the word means from memory — it is handed the
+   * human-written entry for the root and asked to do the grammar, which is the
+   * one step Wiktionary left out. The result has to survive the same test that
+   * sent it there: if it comes back as another signpost, the editor-written
+   * entry stays. So does it if anything at all goes wrong; this is an upgrade,
+   * never a dependency.
+   */
+  async function explained(word, dict) {
+    if (!writeDerivedDefinition) return { dict, written: null };
+    const derived = needsDefinitionRepair(word, dict);
+    if (!derived) return { dict, written: null };
+
+    try {
+      const rootEntry = await lookupDefinition(derived.root).catch(() => null);
+      const written = await writeDerivedDefinition({
+        word,
+        root: derived.root,
+        gloss: derived.gloss,
+        rootSenses: rootEntry?.senses ?? [],
+      });
+      const senses = (written?.senses ?? [])
+        .map((sense) => ({
+          pos: String(sense?.pos ?? "").trim().toLowerCase(),
+          def: String(sense?.def ?? "").trim(),
+          example: null,
+        }))
+        .filter((sense) => sense.def);
+      if (!senses.length) return { dict, written: null };
+
+      const rewritten = {
+        ...dict,
+        senses,
+        source: `${dict.source} · written out by AI from “${derived.root}”`,
+        source_url: rootEntry?.source_url ?? dict.source_url,
+      };
+      if (needsDefinitionRepair(word, rewritten)) return { dict, written: null };
+      return { dict: rewritten, written: { word, root: derived.root } };
+    } catch {
+      return { dict, written: null };
+    }
+  }
+
   function additionSupersededError(word) {
     return new Error(`couldn’t add “${word}”: it was removed after this add was requested`);
   }
@@ -202,7 +340,7 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     },
 
     /**
-     * Adds one or more whitespace-separated words as one transaction.
+     * Adds one or more whitespace-separated words.
      *
      * Addition *requests* are still serialized in request order — a later add
      * cannot overtake an earlier one — but the lookups inside one batch are
@@ -213,10 +351,20 @@ export function createApp(storage, onChange = () => {}, services = {}) {
      * of them. LOOKUP_CONCURRENCY is what keeps that a few requests rather
      * than a burst.
      *
-     * The bank is not touched until every requested new word has been
-     * resolved, so a bad lookup or failed save cannot leave a half-added batch
-     * behind — and the failure reported is the earliest one in the order the
-     * words were typed, exactly as when they were fetched in that order.
+     * Each word now stands or falls on its own. A batch used to be one
+     * transaction in the strong sense: one unknown word and the other nine
+     * were thrown away too, which is a defensible rule for a database and an
+     * infuriating one for a list of words typed by hand — the fix for a typo
+     * was to retype everything. So the words that resolved are added together
+     * in a single save, and the ones that did not are named. Nothing is
+     * half-added: the save is still one write of one bank, and a word is
+     * either in it or reported.
+     *
+     * A word nobody can find is usually a word that was mistyped, and a word
+     * whose only definition is "plural of gas" is not a definition at all.
+     * Both are handled in `resolveWord`, and both are reported back so the
+     * interface can say what happened rather than quietly substituting
+     * something the student did not type.
      */
     async addWord(input) {
       const requested = normalizeWordInput(input);
@@ -228,43 +376,27 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         const pending = requested.filter((word) => !bankModel.find(bank, word));
         if (!pending.length) throw alreadyStoredError(requested);
 
-        const staleBeforeLookup = supersededAddition(pending, deleteState);
-        if (staleBeforeLookup) throw additionSupersededError(staleBeforeLookup);
-
         const prepared = new Array(pending.length);
-        // The earliest-indexed thing that went wrong, so a batch reports the
-        // same failure whichever word's request happened to land first.
-        let failed = null;
-        const fail = (at, error) => {
-          if (!failed || at < failed.at) failed = { at, error };
-        };
+        const failures = new Array(pending.length);
 
         let cursor = 0;
         const worker = async () => {
-          // A recorded failure stops new words being started, the way the old
-          // sequential loop stopped at the first one. Words already in flight
-          // finish; only their results are dropped.
-          while (cursor < pending.length && !failed) {
+          while (cursor < pending.length) {
             const at = cursor++;
-            const word = pending[at];
-            const stale = supersededAddition(pending, deleteState);
-            if (stale) {
-              fail(at, additionSupersededError(stale));
-              return;
+            const typed = pending[at];
+            // A delete requested since this add was asked for wins, and it
+            // wins before the network is troubled on that word's behalf.
+            if (supersededWord(typed, deleteState)) {
+              failures[at] = additionSupersededError(typed);
+              continue;
             }
             try {
-              const [dict, synonyms] = await Promise.all([
-                lookupDefinition(word),
-                lookupSynonyms(word),
-              ]);
-              prepared[at] = { word, dict, synonyms };
+              prepared[at] = await resolveWord(typed);
             } catch (err) {
-              fail(
-                at,
+              failures[at] =
                 requested.length === 1
                   ? err
-                  : new Error(`couldn’t add “${word}”: ${String(err.message ?? err)}`)
-              );
+                  : new Error(`couldn’t add “${typed}”: ${String(err.message ?? err)}`);
             }
           }
         };
@@ -272,40 +404,75 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         await Promise.all(
           Array.from({ length: Math.min(LOOKUP_CONCURRENCY, pending.length) }, worker)
         );
-        if (failed) throw failed.error;
 
         return enqueueMutation(async () => {
-          // A local delete requested after this add must win even if a sync made
-          // the word visible while its lookup was running. Without this guard,
-          // insertWord would clear the newer tombstone and resurrect the word.
-          const stale = supersededAddition(pending, deleteState);
-          if (stale) throw additionSupersededError(stale);
-
           // Sync or another mutation may have completed while the network
           // requests above were in flight. Re-check against a transactional
           // clone and add only candidates that are still absent.
           const next = cloneBank();
           const today = todayISO();
           const added = [];
-          for (const candidate of prepared) {
-            if (bankModel.find(next, candidate.word)) continue;
-            const entry = bankModel.newWord(candidate.word, candidate.dict, candidate.synonyms, today);
+          const corrected = [];
+          const written = [];
+          const failed = [];
+
+          for (let at = 0; at < pending.length; at++) {
+            const typed = pending[at];
+            if (failures[at]) {
+              failed.push({ word: typed, message: String(failures[at].message ?? failures[at]) });
+              continue;
+            }
+            const candidate = prepared[at];
+            // A local delete requested after this add must win even if a sync
+            // made the word visible while its lookup was running. Without this
+            // guard, insertWord would clear the newer tombstone and resurrect
+            // the word.
+            if (
+              supersededWord(typed, deleteState) ||
+              supersededWord(candidate.word, deleteState)
+            ) {
+              const error = additionSupersededError(typed);
+              failed.push({ word: typed, message: String(error.message) });
+              failures[at] = error;
+              continue;
+            }
+            if (bankModel.find(next, candidate.word)) {
+              const error = alreadyStoredError([candidate.word]);
+              failed.push({ word: typed, message: String(error.message) });
+              failures[at] = error;
+              continue;
+            }
+            const entry = bankModel.newWord(
+              candidate.word,
+              candidate.dict,
+              candidate.synonyms,
+              today
+            );
             bankModel.insertWord(next, entry, today);
             added.push(entry);
+            if (candidate.corrected) corrected.push(candidate.corrected);
+            if (candidate.written) written.push(candidate.written);
           }
 
-          if (!added.length) throw alreadyStoredError(requested);
+          // Nothing survived: report the earliest failure, exactly as when a
+          // batch was all-or-nothing — and as a single word always has.
+          if (!added.length) {
+            throw failures.find(Boolean) ?? alreadyStoredError(requested);
+          }
           await persistReplacement(next);
 
           // Preserve the established single-word return contract. For a genuine
           // batch, return a presentation-compatible summary while keeping the
           // real entries available to callers that want them.
-          if (added.length === 1) return added[0];
-          return {
-            ...added[0],
-            word: added.map((entry) => entry.word).join(" · "),
-            batch: added,
-          };
+          const summary =
+            added.length === 1
+              ? { ...added[0] }
+              : { ...added[0], word: added.map((entry) => entry.word).join(" · "), batch: added };
+          summary.added = added;
+          summary.corrected = corrected;
+          summary.written = written;
+          summary.failed = failed;
+          return summary;
         });
       });
     },
