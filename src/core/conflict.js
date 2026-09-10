@@ -271,3 +271,98 @@ export async function saveConflictLog(key, entries) {
 export async function clearConflictLog() {
   await storeRemove(LOG_KEY);
 }
+
+/* ---- resolving the log in one pass ---- */
+
+/**
+ * The list as it is worth asking about: one entry per word and kind.
+ *
+ * The same word can hold two open entries of the same kind — two genuinely
+ * different divergences of it, seen on different days. Only the newest can be
+ * acted on, since restoring the older one's copy would be undone by the newer;
+ * asking about both spends money to be told the same thing twice. The log is
+ * newest first, so the first of each pair is the one that counts.
+ */
+export function resolvableConflicts(entries) {
+  const seen = new Set();
+  const picked = [];
+  for (const entry of entries ?? []) {
+    const key = `${entry.word} ${entry.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push(entry);
+  }
+  return picked;
+}
+
+/**
+ * Turns a set of verdicts into the work they imply, in the order to do it.
+ *
+ * The subtlety this exists for: a word's record and its dictionary are two
+ * conflicts with two answers, and restoring a record restores a *whole*
+ * record. `app.restoreWord` now keeps whatever dictionary the bank already
+ * held, so the rejected one no longer rides back in on either path — but that
+ * keeps the *old* dictionary, and a pass that decided the definition half
+ * wants the decided one.
+ *
+ * Hence `reassert`: after the pass, the dictionary actually chosen for that
+ * word is written again. A `record` of `null` means nobody decided the
+ * dictionary this pass — so what the bank held before the restore is what
+ * should stand, which is now also what the restore leaves behind, and there is
+ * nothing for the caller to do. It must not go looking for something: a
+ * snapshot taken earlier in the pass is stale by the time it would be written,
+ * and `updateDefinition` stamps `definition_updated` ahead of whatever it
+ * overwrites, so reverting a definition that synced in mid-pass would win every
+ * future merge as well. The word is still named, because a caller reporting on
+ * the pass wants to know it was restored.
+ */
+export function planResolution(entries, verdicts) {
+  const byId = new Map((entries ?? []).map((entry) => [entry.id, entry]));
+  const steps = [];
+  const done = new Set();
+  const definitionChoice = new Map();
+  const restored = [];
+
+  for (const verdict of verdicts ?? []) {
+    const entry = byId.get(verdict?.id);
+    if (!entry || done.has(entry.id)) continue;
+    done.add(entry.id);
+    const choice = verdict.choice === "other" ? "other" : "keep";
+    let action = "none";
+    let record = null;
+
+    if (entry.kind === "definition") {
+      definitionChoice.set(entry.word, choice === "other" ? entry.lost : entry.kept);
+      if (choice === "other") {
+        action = "restore-definition";
+        record = entry.lost;
+      }
+    } else if (choice === "other") {
+      action = "restore-word";
+      record = entry.lost;
+      restored.push(entry.word);
+    }
+
+    steps.push({
+      id: entry.id,
+      word: entry.word,
+      kind: entry.kind,
+      choice,
+      reason: typeof verdict.reason === "string" ? verdict.reason : "",
+      action,
+      record,
+    });
+  }
+
+  return {
+    steps,
+    // No count of what went unanswered: the caller says how much is left by
+    // reading the list the user is looking at, which also counts the older
+    // divergences the pass was never asked about. Two numbers for one fact
+    // only ever drift apart.
+    reassert: [...new Set(restored)].map((word) => ({
+      word,
+      record: definitionChoice.get(word) ?? null,
+    })),
+  };
+}
