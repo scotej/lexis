@@ -4,10 +4,16 @@ import {
   adjectiveFormsForAdverb,
   adverbClarification,
   clearLookupCaches,
+  derivedFrom,
   expandDerivativeDefinitions,
   fetchDefinition,
   fetchSynonyms,
+  formOfGloss,
+  misspellingOf,
+  needsDefinitionRepair,
   needsDerivativeClarification,
+  NOT_FOUND,
+  stripHtml,
 } from "../src/core/dict.js";
 
 function dictionary(senses) {
@@ -484,5 +490,157 @@ test("synonyms ask both Datamuse relations at once rather than one after the oth
     );
   } finally {
     globalThis.fetch = previousFetch;
+  }
+});
+
+/* ---- glosses that point at another word instead of defining this one ---- */
+
+test("a gloss template is recognised, and an ordinary definition is not", () => {
+  const pointer = (def) => formOfGloss({ pos: "noun", def });
+
+  assert.deepEqual(pointer("plural of gas"), {
+    relation: "plural",
+    root: "gas",
+    kind: "form",
+  });
+  assert.equal(pointer("third-person singular simple present indicative of gas").root, "gas");
+  assert.equal(pointer("present participle and gerund of run").root, "run");
+  assert.equal(pointer("comparative form of strict: more strict").root, "strict");
+  assert.equal(pointer("Commonwealth and Ireland standard spelling of color.").root, "color");
+  assert.equal(pointer("Synonym of death.").root, "death");
+  assert.equal(pointer("Misspelling of receive.").kind, "misspelling");
+  assert.equal(pointer("(informal) Abbreviation of laboratory.").root, "laboratory");
+
+  // Prose that happens to contain "of" is a definition, not a signpost — this
+  // is the whole reason the relation vocabulary is a closed list.
+  assert.equal(pointer("A form of address for a duke."), null);
+  assert.equal(pointer("The act of transferring an estate by will or lease."), null);
+  assert.equal(pointer("Any of various heavy gases used in refrigeration."), null);
+  assert.equal(pointer("One of the four classical elements."), null);
+  assert.equal(pointer("Deprived of sight."), null);
+});
+
+test("an entry is only rewritten when every sense is a signpost at one word", () => {
+  const entry = (senses) => dictionary(senses);
+
+  assert.equal(
+    needsDefinitionRepair("gases", entry([{ pos: "noun", def: "plural of gas", example: null }]))
+      ?.root,
+    "gas"
+  );
+  assert.equal(
+    needsDefinitionRepair(
+      "interestingly",
+      entry([{ pos: "adverb", def: "In an interesting way.", example: null }])
+    )?.root,
+    "interesting"
+  );
+
+  // "running" answers the question in its adjective senses; the entry stands.
+  assert.equal(
+    needsDefinitionRepair(
+      "running",
+      entry([
+        { pos: "verb", def: "present participle and gerund of run", example: null },
+        { pos: "adjective", def: "Moving or advancing at a run.", example: null },
+      ])
+    ),
+    null
+  );
+
+  // Two signposts at two different words is a homograph, not a derivation.
+  assert.equal(
+    derivedFrom(
+      entry([
+        { pos: "noun", def: "plural of bass", example: null },
+        { pos: "verb", def: "plural of base", example: null },
+      ])
+    ),
+    null
+  );
+
+  // A misspelling is corrected rather than explained, so it is not a rewrite.
+  assert.equal(
+    needsDefinitionRepair(
+      "recieve",
+      entry([{ pos: "verb", def: "Misspelling of receive.", example: null }])
+    ),
+    null
+  );
+});
+
+test("only an entry that says nothing but “misspelling of” offers a correction", () => {
+  assert.equal(
+    misspellingOf("recieve", dictionary([{ pos: "verb", def: "Misspelling of receive.", example: null }])),
+    "receive"
+  );
+  // A real word that also has a joke spelling keeps its own entry.
+  assert.equal(
+    misspellingOf(
+      "teh",
+      dictionary([
+        { pos: "symbol", def: "ISO 639-3 language code for Tehuelche.", example: null },
+        { pos: "article", def: "Deliberate misspelling of the, for effect.", example: null },
+      ])
+    ),
+    null
+  );
+  // An alternative spelling is not a mistake.
+  assert.equal(
+    misspellingOf(
+      "colour",
+      dictionary([
+        { pos: "noun", def: "Commonwealth and Ireland standard spelling of color.", example: null },
+      ])
+    ),
+    null
+  );
+});
+
+test("a Wiktionary stylesheet never reaches a definition", () => {
+  assert.equal(
+    stripHtml(
+      'simple past of <i>begin</i><style data-mw-deduplicate="x">.mw-parser-output .defdate{font-size:smaller}</style>'
+    ),
+    "simple past of begin"
+  );
+});
+
+test("“no such word” is told apart from “the dictionary is down”", async () => {
+  const previousFetch = globalThis.fetch;
+  clearLookupCaches();
+
+  const reply = (host, status) => ({
+    ok: status < 400,
+    status,
+    async json() {
+      return host === "api.dictionaryapi.dev" ? [] : {};
+    },
+  });
+
+  try {
+    // Both hosts say the word does not exist.
+    globalThis.fetch = async (url) => reply(new URL(url).host, 404);
+    const missing = await fetchDefinition("xqzt").then(
+      () => null,
+      (err) => err
+    );
+    assert.match(String(missing.message), /no dictionary entry found for "xqzt"/);
+    assert.equal(missing.code, NOT_FOUND);
+
+    // One of them is merely unwell, which is no evidence about the word.
+    clearLookupCaches();
+    globalThis.fetch = async (url) => {
+      const { host } = new URL(url);
+      return reply(host, host === "api.dictionaryapi.dev" ? 503 : 404);
+    };
+    const unwell = await fetchDefinition("xqzt").then(
+      () => null,
+      (err) => err
+    );
+    assert.equal(unwell.code, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    clearLookupCaches();
   }
 });
