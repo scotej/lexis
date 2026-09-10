@@ -606,7 +606,7 @@ test("a Wiktionary stylesheet never reaches a definition", () => {
   );
 });
 
-test("“no such word” is told apart from “the dictionary is down”", async () => {
+test("Wiktionary alone decides whether a word exists", async () => {
   const previousFetch = globalThis.fetch;
   clearLookupCaches();
 
@@ -617,30 +617,82 @@ test("“no such word” is told apart from “the dictionary is down”", async
       return host === "api.dictionaryapi.dev" ? [] : {};
     },
   });
-
-  try {
-    // Both hosts say the word does not exist.
-    globalThis.fetch = async (url) => reply(new URL(url).host, 404);
-    const missing = await fetchDefinition("xqzt").then(
-      () => null,
-      (err) => err
-    );
-    assert.match(String(missing.message), /no dictionary entry found for "xqzt"/);
-    assert.equal(missing.code, NOT_FOUND);
-
-    // One of them is merely unwell, which is no evidence about the word.
+  const codeFor = async (statuses) => {
     clearLookupCaches();
     globalThis.fetch = async (url) => {
       const { host } = new URL(url);
-      return reply(host, host === "api.dictionaryapi.dev" ? 503 : 404);
+      return reply(host, statuses[host]);
     };
-    const unwell = await fetchDefinition("xqzt").then(
+    return await fetchDefinition("xqzt").then(
       () => null,
-      (err) => err
+      (err) => err.code
     );
-    assert.equal(unwell.code, undefined);
+  };
+
+  try {
+    assert.equal(
+      await codeFor({ "api.dictionaryapi.dev": 404, "en.wiktionary.org": 404 }),
+      NOT_FOUND,
+      "both hosts agree there is no such word"
+    );
+    // The mirror times out most afternoons; requiring its agreement would
+    // silence Wiktionary's verdict exactly when it is the only one there is.
+    assert.equal(
+      await codeFor({ "api.dictionaryapi.dev": 503, "en.wiktionary.org": 404 }),
+      NOT_FOUND,
+      "the source said no; the mirror said nothing"
+    );
+    // And the mirror's own gaps are not evidence about a word: it 404s on
+    // entries Wiktionary carries.
+    assert.equal(
+      await codeFor({ "api.dictionaryapi.dev": 404, "en.wiktionary.org": 503 }),
+      undefined,
+      "only the mirror answered, and it is not the authority"
+    );
   } finally {
     globalThis.fetch = previousFetch;
     clearLookupCaches();
   }
+});
+
+test("a real definition welded to a signpost is left alone", () => {
+  // Wiktionary's REST endpoint flattens sub-senses into one string, so the
+  // gloss and the definition arrive together. Rewriting these would discard
+  // the half that answered the question.
+  for (const def of [
+    "superlative form of hard: most hard. Most rigid or most difficult.",
+    "superlative form of bad: most bad Most inferior; doing the least good.",
+    "Synonym of allegorize. To interpret (a picture, story, or poem) allegorically.",
+  ]) {
+    assert.equal(formOfGloss({ pos: "adjective", def }), null, def);
+  }
+  // The bare comparative template is still a signpost.
+  assert.equal(
+    formOfGloss({ pos: "adjective", def: "comparative form of strict: more strict" })?.root,
+    "strict"
+  );
+});
+
+test("one sense saying “misspelling” settles the entry", () => {
+  // Wiktionary pairs the two on the commonest typos in English.
+  assert.equal(
+    misspellingOf(
+      "seperate",
+      dictionary([
+        { pos: "adjective", def: "Misspelling of separate.", example: null },
+        { pos: "verb", def: "Obsolete form of separate.", example: null },
+      ])
+    ),
+    "separate"
+  );
+  assert.equal(
+    misspellingOf(
+      "arguement",
+      dictionary([
+        { pos: "noun", def: "Obsolete form of argument.", example: null },
+        { pos: "noun", def: "Misspelling of argument.", example: null },
+      ])
+    ),
+    "argument"
+  );
 });

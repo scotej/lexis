@@ -1,9 +1,9 @@
 # lexis.
 
-A minimalist word bank for essay writers. Type a word; lexis fetches a concise,
-human-written definition, suggests sophisticated synonyms suited to analytical
-writing, and then makes sure the word actually ends up in your essays — not
-just in a list.
+A minimalist word bank for essay writers. Type a word; lexis fetches a concise
+definition from a human-edited dictionary, suggests sophisticated synonyms
+suited to analytical writing, and then makes sure the word actually ends up in
+your essays — not just in a list.
 
 Built for VCE English, useful anywhere precise vocabulary matters.
 
@@ -21,8 +21,8 @@ IPA, part of speech, numbered senses. Add several words in one go by
 separating them with spaces; lexis looks them up a few at a time and adds
 every word that resolved as a single change to the bank, naming any that it
 could not find rather than throwing the whole list away with them. A word
-whose entry reads only “misspelling of …” is added under the word it is a
-misspelling of, and the line under the box says so. As the bank grows, sort it
+whose entry does nothing but name another word as the correct spelling is
+added under that word instead, and the line under the box says so. As the bank grows, sort it
 by date added, alphabetically, by due date, or by how much you've practised or
 used a word in essays.
 
@@ -99,7 +99,7 @@ until you hand it a key.
 
 Paste an [OpenRouter](https://openrouter.ai) API key into **settings → ai
 assist** (any model works; leave the model blank for OpenRouter's automatic
-routing). That unlocks three things:
+routing). That unlocks these:
 
 - **Essay feedback.** A second button beside *check essay* sends the draft
   for structured feedback: what already works, the few changes that would
@@ -325,10 +325,12 @@ device that made them.
 
 **With an AI key saved**, your work leaves for OpenRouter only when you ask
 for essay feedback or the vocabulary tools, and only with what that feature
-needs (see *AI assist* above). Two of those asks are made on your behalf as
-part of adding a word — the spelling rescue and the written-out definition —
-and both happen only when the dictionary has already failed to answer, on the
-word alone. The typing test asks on its own account, but
+needs (see *AI assist* above). Two of those asks are made as part of adding a
+word rather than at a button — the spelling rescue and the written-out
+definition — and both happen only where a dictionary has already failed to
+answer the question. The first sends the mistyped word alone; the second
+sends the word, the unhelpful gloss, and the dictionary's entry for the root
+it names. The typing test asks on its own account, but
 only once you have set *quotes from* to **ai**, and only ever for passages
 built from your bank's headwords — never for anything you have typed. Because that includes your draft, it is held to
 the same standard as everything else here: strict privacy is on by default,

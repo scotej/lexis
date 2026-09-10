@@ -832,7 +832,10 @@ test("a correction that lands on a word already banked is reported, not duplicat
 
   assert.deepEqual(app.listWords("word-asc").map((word) => word.word), ["deontic", "receive"]);
   assert.deepEqual(result.failed, [
-    { word: "recieve", message: "“receive” is already in your bank" },
+    {
+      word: "recieve",
+      message: "“recieve” is a misspelling of “receive”, which is already in your bank",
+    },
   ]);
 });
 
@@ -904,5 +907,145 @@ test("with no model at hand, a signpost entry is stored exactly as the dictionar
 
   assert.deepEqual(app.listWords()[0].senses, [
     { pos: "noun", def: "plural of gas", example: null },
+  ]);
+});
+
+test("a delete during a correction's lookup wins over the add", async () => {
+  const initial = bankModel.emptyBank();
+  initial.words.push(entry("receive", todayISO()));
+  const storage = new MemoryStorage(initial);
+  let startedResolve;
+  let release;
+  const started = new Promise((resolve) => {
+    startedResolve = resolve;
+  });
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  const app = createApp(storage, () => {}, {
+    async fetchDefinition(word) {
+      if (word === "recieve") {
+        return {
+          phonetic: null,
+          senses: [{ pos: "verb", def: "Misspelling of receive.", example: null }],
+          source: "Wiktionary",
+          source_url: "https://en.wiktionary.org/wiki/recieve",
+        };
+      }
+      // The lookup of the word the correction landed on is the slow one.
+      startedResolve();
+      await gate;
+      return {
+        phonetic: null,
+        senses: [{ pos: "verb", def: "receive definition", example: null }],
+        source: "Wiktionary",
+        source_url: "https://en.wiktionary.org/wiki/receive",
+      };
+    },
+    async fetchSynonyms() {
+      return [];
+    },
+  });
+  await app.init();
+
+  const adding = app.addWord("recieve");
+  const rejected = assert.rejects(adding, /removed after this add was requested/);
+  await started;
+
+  await app.deleteWord("receive");
+  assert.equal(bankModel.find(app.getBank(), "receive"), null);
+
+  release();
+  await rejected;
+
+  // The delete stands, tombstone and all: an add that arrived at this word by
+  // correction must not resurrect it any more than one that was typed.
+  assert.equal(bankModel.find(app.getBank(), "receive"), null);
+  assert.ok(app.getBank().deleted.some((item) => item.word === "receive"));
+});
+
+test("without a key, a signpost entry costs no extra lookup at all", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const log = [];
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: ["gas"], glosses: { gases: [{ pos: "noun", def: "plural of gas", example: null }] }, log }),
+    aiReady: () => false,
+    async suggestSpelling() {
+      asked += 1;
+      return null;
+    },
+    async writeDerivedDefinition() {
+      asked += 1;
+      return null;
+    },
+  });
+  await app.init();
+
+  await app.addWord("gases");
+
+  assert.equal(asked, 0);
+  assert.deepEqual(log, ["definition:gases", "synonyms:gases"], "no root lookup was paid for");
+});
+
+test("an unfindable word is not sent to a model that has no key either", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: [] }),
+    aiReady: () => false,
+    async suggestSpelling() {
+      asked += 1;
+      return { word: "receive" };
+    },
+  });
+  await app.init();
+
+  await assert.rejects(() => app.addWord("recieve"), /no dictionary entry found/);
+  assert.equal(asked, 0);
+});
+
+test("the caller is told when a word is handed to a model, and about which word", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const said = [];
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      known: ["receive", "interesting"],
+      glosses: { interestingly: [{ pos: "adverb", def: "In an interesting way.", example: null }] },
+    }),
+    async suggestSpelling(word, notify) {
+      notify?.(`spelling:${word}`);
+      return { word: "receive" };
+    },
+    async writeDerivedDefinition(request, notify) {
+      notify?.(`definition:${request.word}:${request.root}`);
+      return { senses: [{ pos: "adverb", def: "In a way that holds the attention." }] };
+    },
+  });
+  await app.init();
+
+  await app.addWord("recieve", { onProgress: (text) => said.push(text) });
+  await app.addWord("interestingly", { onProgress: (text) => said.push(text) });
+
+  assert.deepEqual(said, ["spelling:recieve", "definition:interestingly:interesting"]);
+});
+
+test("a thesaurus failure still fails its own word", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, {
+    ...lexicon({ known: ["deontic", "modality"] }),
+    async fetchSynonyms(word) {
+      if (word === "modality") throw new Error("datamuse is down");
+      return [];
+    },
+  });
+  await app.init();
+
+  const result = await app.addWord("deontic modality");
+
+  assert.deepEqual(app.listWords().map((word) => word.word), ["deontic"]);
+  assert.deepEqual(result.failed, [
+    { word: "modality", message: "couldn’t add “modality”: datamuse is down" },
   ]);
 });
