@@ -364,7 +364,8 @@ test("a record restored with nothing said about its definition keeps the bank's 
   const plan = planResolution([definition, edit], [{ id: edit.id, choice: "other", reason: "" }]);
 
   assert.deepEqual(plan.reassert, [{ word: "demise", record: null }]);
-  assert.deepEqual(plan.unanswered, [definition.id]);
+  // The definition conflict is simply absent from the plan, and so stays open.
+  assert.deepEqual(plan.steps.map((step) => step.id), [edit.id]);
 });
 
 test("a verdict about a conflict nobody asked about is ignored, and repeats count once", () => {
@@ -379,7 +380,6 @@ test("a verdict about a conflict nobody asked about is ignored, and repeats coun
   );
   assert.equal(plan.steps.length, 1);
   assert.equal(plan.steps[0].reason, "first");
-  assert.deepEqual(plan.unanswered, []);
 });
 
 test("a keep needs no work, and a delete conflict restores the whole record", () => {

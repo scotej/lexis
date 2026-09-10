@@ -310,8 +310,12 @@ it by hand.
 Undoing never costs you scheduling. Whichever copy is further along keeps the
 review history, because the schedule is not what a restore is for and it is the
 one thing that cannot be recovered once dropped — so *use the other copy* takes
-the discarded definition, synonyms, and practice count without rewinding
-spaced repetition.
+the discarded synonyms and practice count without rewinding spaced repetition.
+
+It leaves the definition where it is. A definition that differs is raised as
+its own conflict with its own button, so a word can have two of them open at
+once; restoring the record half would otherwise carry the rejected dictionary
+back in behind your back, and overrule the choice you had just made about it.
 
 ## Privacy
 

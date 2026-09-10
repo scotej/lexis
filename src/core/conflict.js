@@ -299,16 +299,18 @@ export function resolvableConflicts(entries) {
  * Turns a set of verdicts into the work they imply, in the order to do it.
  *
  * The subtlety this exists for: a word's record and its dictionary are two
- * conflicts with two answers, and `reinstateWord` restores a *whole* record —
- * dictionary fields included. So "use the other copy" on the record half
- * silently carries the rejected definition back in with it, whatever was
- * decided about the definition half, and in either order.
+ * conflicts with two answers, and restoring a record restores a *whole*
+ * record. `app.restoreWord` now keeps whatever dictionary the bank already
+ * held, so the rejected one no longer rides back in on either path — but that
+ * keeps the *old* dictionary, and a pass that decided the definition half
+ * wants the decided one.
  *
  * Hence `reassert`: after the pass, the dictionary actually chosen for that
  * word is written again. A `record` of `null` means nobody decided the
- * dictionary this pass — so what the bank held *before* the restore is what
- * should stand, and the caller supplies it. `updateDefinition` is a no-op when
- * nothing changed, so on the ordinary path this costs nothing.
+ * dictionary this pass — so what the bank held before the restore is what
+ * should stand, which is now also what the restore leaves behind, and the
+ * caller supplies it either way. `updateDefinition` is a no-op when nothing
+ * changed, so on the ordinary path this costs nothing.
  */
 export function planResolution(entries, verdicts) {
   const byId = new Map((entries ?? []).map((entry) => [entry.id, entry]));
@@ -350,10 +352,13 @@ export function planResolution(entries, verdicts) {
 
   return {
     steps,
+    // No count of what went unanswered: the caller says how much is left by
+    // reading the list the user is looking at, which also counts the older
+    // divergences the pass was never asked about. Two numbers for one fact
+    // only ever drift apart.
     reassert: [...new Set(restored)].map((word) => ({
       word,
       record: definitionChoice.get(word) ?? null,
     })),
-    unanswered: (entries ?? []).filter((entry) => !done.has(entry.id)).map((entry) => entry.id),
   };
 }

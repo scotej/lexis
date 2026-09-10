@@ -588,6 +588,20 @@ function asString(value) {
   return s;
 }
 
+/**
+ * Whether a field a model was asked for as a boolean actually says yes.
+ *
+ * Models answer booleans in JSON with strings about as often as with booleans,
+ * and `"false"` is a perfectly ordinary truthy value. A guard written as "not
+ * literally `false`" therefore lets both the string and the missing field
+ * through, which is the wrong direction for every use here: absent evidence is
+ * not consent.
+ */
+function affirms(value) {
+  if (typeof value === "string") return /^(?:true|yes|y|1)$/i.test(value.trim());
+  return value === true || value === 1;
+}
+
 function asStringArray(value, limit) {
   if (!Array.isArray(value)) return [];
   return value
@@ -1083,7 +1097,12 @@ export async function aiSpellFix(settings, word) {
   });
 
   const suggestion = asString(parsed?.correction).trim().toLowerCase().replace(/[.,!?]+$/, "");
-  if (!suggestion || parsed?.confident === false) return null;
+  // Confidence has to be *stated*, not merely not-denied. A reply that drops
+  // the field, or sends the string "false" — both of which the surrounding
+  // instruction to give an empty value for anything unknown invites — was
+  // reading as confident, and the correction went in under a notice claiming
+  // the student had typed it.
+  if (!suggestion || !affirms(parsed?.confident)) return null;
   if (!SPELLABLE.test(suggestion) || suggestion === typed) return null;
   if (editDistance(typed, suggestion) > correctionBudget(typed)) return null;
   return { word: suggestion };
@@ -1256,8 +1275,11 @@ const RESTORE_WORDS = new Set([
   "other", "restore", "restored", "discarded", "take-other", "take other", "other copy",
   "the other", "the other copy", "lost",
 ]);
+// "none" is not on this list. It is how a model says it has no verdict, not
+// how it says the merge was right, and reading it as a decision dismissed a
+// conflict nobody had decided.
 const KEEP_WORDS = new Set([
-  "keep", "kept", "keep current", "current", "merge", "merged", "as-is", "as is", "none",
+  "keep", "kept", "keep current", "current", "merge", "merged", "as-is", "as is",
 ]);
 
 function readChoice(value) {

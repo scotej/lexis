@@ -476,6 +476,25 @@ test("a failed lookup costs only its own word", async () => {
   assert.equal(storage.saves, 1);
 });
 
+test("a word already in the bank is named rather than quietly dropped", async () => {
+  // Atomic batches could leave this unsaid, because the whole add failed and
+  // said why. Now that the others go in regardless, silence reads as success.
+  const initial = bankModel.emptyBank();
+  initial.words.push(entry("demise", todayISO()));
+  const storage = new MemoryStorage(initial);
+  const app = createApp(storage, () => {}, lexicon({ known: ["gases"] }));
+  await app.init();
+
+  const result = await app.addWord("demise gases");
+
+  assert.deepEqual(result.added.map((word) => word.word), ["gases"]);
+  assert.deepEqual(result.failed, [
+    { word: "demise", message: "“demise” is already in your bank" },
+  ]);
+  // A single word that is already held still throws, exactly as it always has.
+  await assert.rejects(() => app.addWord("demise"), /already in your bank/);
+});
+
 test("a batch in which nothing resolves reports the first failure and saves nothing", async () => {
   const storage = new MemoryStorage(bankModel.emptyBank());
   const lookups = [];
@@ -871,6 +890,93 @@ test("a signpost definition is written out from the root entry", async () => {
   assert.equal(stored.source_url, "https://en.wiktionary.org/wiki/interesting");
 });
 
+test("only the root senses that say something are handed to the model", async () => {
+  // The entry qualifies because of its last sense, and the first four are the
+  // ones a fixed-size slice would take. Sent as they are, the model is told to
+  // stay inside meanings it was never given — which is answering from memory
+  // with a citation attached.
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const seen = [];
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      glosses: {
+        gases: [{ pos: "noun", def: "plural of gas", example: null }],
+        gas: [
+          { pos: "noun", def: "Obsolete form of gas.", example: null },
+          { pos: "noun", def: "Alternative spelling of gas.", example: null },
+          { pos: "noun", def: "Archaic form of gas.", example: null },
+          { pos: "noun", def: "Dated form of gas.", example: null },
+          { pos: "noun", def: "A substance that expands to fill its container.", example: null },
+        ],
+      },
+    }),
+    async writeDerivedDefinition(request) {
+      seen.push(request);
+      return { senses: [{ pos: "noun", def: "More than one such substance." }] };
+    },
+  });
+  await app.init();
+
+  await app.addWord("gases");
+
+  assert.deepEqual(seen[0].rootSenses, [
+    { pos: "noun", def: "A substance that expands to fill its container.", example: null },
+  ]);
+});
+
+test("a root entry with nothing but signposts is not asked about at all", async () => {
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  let asked = 0;
+  const app = createApp(storage, () => {}, {
+    ...lexicon({
+      glosses: {
+        gases: [{ pos: "noun", def: "plural of gas", example: null }],
+        gas: [{ pos: "noun", def: "Obsolete form of gaz.", example: null }],
+        gaz: [{ pos: "noun", def: "Alternative spelling of gas.", example: null }],
+      },
+    }),
+    async writeDerivedDefinition() {
+      asked += 1;
+      return { senses: [{ pos: "noun", def: "invented" }] };
+    },
+  });
+  await app.init();
+
+  await app.addWord("gases");
+
+  assert.equal(asked, 0);
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "noun", def: "plural of gas", example: null },
+  ]);
+});
+
+test("a misspelling whose real word cannot be looked up is reported, not banked", async () => {
+  // The entry we hold is "Misspelling of receive." — a signpost under the
+  // student's own typo, and `needsDefinitionRepair` declines misspellings, so
+  // banking it would leave a word with no definition and no way to mend it.
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, {
+    async fetchDefinition(word) {
+      if (word === "recieve") {
+        return {
+          phonetic: null,
+          senses: [{ pos: "verb", def: "Misspelling of receive.", example: null }],
+          source: "Wiktionary",
+          source_url: "https://en.wiktionary.org/wiki/recieve",
+        };
+      }
+      throw new Error("api.dictionaryapi.dev returned 503");
+    },
+    async fetchSynonyms() {
+      return [];
+    },
+  });
+  await app.init();
+
+  await assert.rejects(() => app.addWord("recieve"), /misspelling of “receive”.*503/s);
+  assert.deepEqual(app.listWords(), []);
+});
+
 test("a rewrite that is another signpost, or that fails, keeps the editor's words", async () => {
   const gloss = [{ pos: "noun", def: "plural of gas", example: null }];
   for (const writeDerivedDefinition of [
@@ -1137,5 +1243,69 @@ test("only the senses that answer are kept out of a mixed reply", async () => {
 
   assert.deepEqual(app.listWords()[0].senses, [
     { pos: "noun", def: "More than one gas.", example: null },
+  ]);
+});
+
+test("restoring a record keeps the definition the bank already holds", async () => {
+  // A record and its dictionary are two conflicts with two answers. Restoring
+  // the record half used to carry the rejected definition back in with it —
+  // and bump its clock past both copies, so it won every future merge too.
+  const today = todayISO();
+  const initial = bankModel.emptyBank();
+  const held = entry("demise", today);
+  held.senses = [{ pos: "noun", def: "the definition the student chose", example: null }];
+  held.source = "Wiktionary";
+  initial.words.push(held);
+  const storage = new MemoryStorage(initial);
+  const app = createApp(storage, () => {}, lexicon({}));
+  await app.init();
+
+  const lost = bankModel.newWord(
+    "demise",
+    {
+      phonetic: null,
+      senses: [{ pos: "noun", def: "the definition they rejected", example: null }],
+      source: "Wiktionary",
+      source_url: "https://en.wiktionary.org/wiki/demise",
+    },
+    [],
+    today
+  );
+  lost.times_used = 9;
+
+  await app.restoreWord(lost);
+
+  const now = app.listWords()[0];
+  assert.deepEqual(now.senses, [
+    { pos: "noun", def: "the definition the student chose", example: null },
+  ]);
+  // The half that was in dispute still comes across.
+  assert.equal(now.times_used, 9);
+});
+
+test("restoring a word that was deleted brings its own definition with it", async () => {
+  // Nothing local to keep: the delete conflict is the one case where the
+  // record's dictionary is the only one there is.
+  const today = todayISO();
+  const storage = new MemoryStorage(bankModel.emptyBank());
+  const app = createApp(storage, () => {}, lexicon({}));
+  await app.init();
+
+  const lost = bankModel.newWord(
+    "demise",
+    {
+      phonetic: null,
+      senses: [{ pos: "noun", def: "the definition it was deleted with", example: null }],
+      source: "Wiktionary",
+      source_url: "https://en.wiktionary.org/wiki/demise",
+    },
+    [],
+    today
+  );
+
+  await app.restoreWord(lost);
+
+  assert.deepEqual(app.listWords()[0].senses, [
+    { pos: "noun", def: "the definition it was deleted with", example: null },
   ]);
 });
