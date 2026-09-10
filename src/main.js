@@ -1579,7 +1579,6 @@ async function resolveConflictsWithAi() {
     }
 
     const plan = planResolution(open, verdicts);
-    const before = new Map();
     let restored = 0;
     let kept = 0;
     let trouble = null;
@@ -1591,11 +1590,6 @@ async function resolveConflictsWithAi() {
           paintVerdict(card, step);
           await pause(VERDICT_STEP_MS);
           if (step.action === "restore-word") {
-            // What the bank holds for this word now, in case the pass says
-            // nothing about its dictionary: reinstating the record carries the
-            // other copy's definition in with it.
-            const current = app.listWords().find((entry) => entry.word === step.word);
-            before.set(step.word, current ? { ...current } : null);
             // The same path the card's own button takes: an edit made now, which
             // then propagates through GitHub and the folder by the ordinary rules.
             await app.restoreWord(step.record);
@@ -1610,9 +1604,16 @@ async function resolveConflictsWithAi() {
           );
         }
 
-        for (const { word, record } of plan.reassert) {
-          const wanted = record ?? before.get(word);
-          if (wanted) await app.restoreDefinition(wanted);
+        // Only a dictionary this pass actually decided. A null record means
+        // nobody decided one, and `restoreWord` has already kept whatever the
+        // bank held — so there is nothing left to put back. Writing a snapshot
+        // taken earlier in this loop instead would be a no-op on the ordinary
+        // path and a data loss on the one that matters: a definition that
+        // arrived from sync while the loop was running would be reverted, and
+        // `updateDefinition` stamps `definition_updated` past it, so the revert
+        // would go on to win every future merge on both devices.
+        for (const { record } of plan.reassert) {
+          if (record) await app.restoreDefinition(record);
         }
       } catch (err) {
         // mutate() shows the save failure itself; this is so the summary below
