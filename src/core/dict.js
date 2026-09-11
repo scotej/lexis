@@ -658,9 +658,14 @@ export async function expandDerivativeDefinitions(
  * adjective and its result would be discarded, so that caller asks for the
  * entry as the dictionary wrote it. Cached apart, because the two answers are
  * different answers to the same question.
+ *
+ * The two keys are told apart by a NUL, which is the one character a looked-up
+ * phrase cannot contain — the quick-lookup panel passes whatever was typed, so
+ * a space would not do. Written as an escape: as a literal byte it was invisible
+ * in the editor and it made `grep` treat this whole file as binary and skip it.
  */
 export async function fetchDefinition(word, { clarify = true } = {}) {
-  const key = `${String(word ?? "").trim().toLowerCase()}${clarify ? "" : " raw"}`;
+  const key = `${String(word ?? "").trim().toLowerCase()}${clarify ? "" : "\0raw"}`;
   const entry = await definitionCache.run(key, async () => {
     const dictionary = await fetchRawDefinition(word);
     return clarify ? await clarifyDerivativeDefinitions(word, dictionary) : dictionary;
