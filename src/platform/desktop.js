@@ -57,6 +57,10 @@ export function createDesktopPlatform() {
   return {
     kind: "desktop",
 
+    savePdf(bytes, filename) {
+      return invoke('save_pdf', { bytes: Array.from(bytes), filename });
+    },
+
     /**
      * The AES-GCM key that seals AI settings on this device. The desktop has
      * no master password by design, so the Rust side supplies a random

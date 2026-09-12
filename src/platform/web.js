@@ -257,6 +257,21 @@ export function createWebPlatform() {
   return {
     kind: "web",
 
+    async savePdf(bytes, filename) {
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      try { link.click(); }
+      finally {
+        link.remove();
+        // Downloads may start after this task, especially in Safari.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+      return true;
+    },
+
     /** Called once the password has been accepted; storage is inert until then. */
     setKey(k) {
       key = k;

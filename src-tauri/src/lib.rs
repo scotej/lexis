@@ -21,6 +21,32 @@ fn save_bank(state: tauri::State<'_, Mutex<Store>>, json: String) -> Result<(), 
     store.save(&json)
 }
 
+/// Only the path selected in the native save dialog receives the PDF bytes.
+#[tauri::command]
+async fn save_pdf(app: tauri::AppHandle, bytes: Vec<u8>, filename: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    if !bytes.starts_with(b"%PDF-") {
+        return Err("The export is not a PDF file.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("Export word bank")
+            .set_file_name(&filename)
+            .add_filter("PDF document", &["pdf"])
+            .blocking_save_file();
+        let Some(selected) = selected else {
+            return Ok(false);
+        };
+        let path = selected.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(path, bytes).map_err(|e| format!("Could not save the PDF: {e}"))?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /* ---- the device key ----
  *
  * One command: hand the webview the raw key material it needs to seal AI
@@ -122,6 +148,7 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -134,6 +161,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_bank,
             save_bank,
+            save_pdf,
             ai_device_key,
             check_update,
             install_update,

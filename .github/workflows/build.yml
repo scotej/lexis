@@ -34,6 +34,9 @@ jobs:
 
       # The shared core carries the app logic now, so its tests are the ones
       # that matter most; cargo covers the storage layer that remains.
+      - name: install test dependencies
+        run: npm ci
+
       - name: test the shared core
         run: npm test
 

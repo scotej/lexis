@@ -4,6 +4,8 @@
  */
 
 import { createApp } from "./core/app.js";
+import { installBankTools } from "./bank-tools.js";
+import { preloadBankPdf } from "./core/pdf.js";
 import { fetchDefinition } from "./core/dict.js";
 import { createSyncController } from "./core/sync-controller.js";
 import { absorbImports } from "./core/reconcile.js";
@@ -275,12 +277,18 @@ function entryNode(word) {
   return wrap;
 }
 
-const bankSort = $("bank-sort");
-
-bankSort.addEventListener("change", () => renderBank());
+const bankTools = installBankTools({
+  getWords: () => app?.listWords() ?? [],
+  getAiSettings: () => aiSettings,
+  onChange: () => { if (app) renderBank(); },
+  savePdf: (bytes, filename) => platform.savePdf(bytes, filename),
+});
+// Warm local PDF assets while the app starts so its first export can work
+// after disconnecting. A failed preload is retried by the export action.
+preloadBankPdf().catch(() => {});
 
 async function renderBank() {
-  const words = app.listWords(bankSort.value);
+  const words = bankTools.displayWords();
   const liveWords = new Set(words.map((word) => word.word));
   for (const word of expandedWords) {
     if (!liveWords.has(word)) expandedWords.delete(word);
@@ -296,7 +304,6 @@ async function renderBank() {
   list.replaceChildren();
   words.forEach((w) => list.append(entryNode(w)));
   $("bank-empty").hidden = words.length > 0;
-  $("bank-tools").hidden = words.length < 2;
 
   const guide = $("guide-words");
   if (words.length >= 2) {
@@ -1935,6 +1942,7 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
       strictPrivacy: $("ai-strict-privacy").checked,
     });
     aiSettings = next;
+    bankTools.reset();
     aiKeyInfo = null; // a replaced key has its own balance
     // Prove the key works before celebrating it — but a verification failure
     // must not read as a failed *save*, which it isn't.
@@ -1980,6 +1988,7 @@ $("ai-refresh").addEventListener("click", async () => {
  */
 function forgetAiKeyInSession() {
   aiSettings = emptyAiSettings();
+  bankTools.reset();
   aiModels = null;
   aiModelsPromise = null;
   aiKeyInfo = null;

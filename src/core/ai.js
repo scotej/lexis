@@ -97,8 +97,11 @@ async function apiFetch(path, apiKey, init = {}) {
   const timeoutMs = timeoutFor(path);
 
   for (let attempt = 1; attempt <= net.retries; attempt++) {
+    init.signal?.throwIfAborted();
     const last = attempt >= net.retries;
     const ctrl = new AbortController();
+    const abort = () => ctrl.abort(init.signal.reason);
+    init.signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let resp;
     let text;
@@ -106,6 +109,7 @@ async function apiFetch(path, apiKey, init = {}) {
       resp = await fetch(url, { ...init, headers, signal: ctrl.signal });
       text = await resp.text();
     } catch (err) {
+      init.signal?.throwIfAborted();
       if (last) {
         throw transientError(
           err?.name === "AbortError"
@@ -118,6 +122,7 @@ async function apiFetch(path, apiKey, init = {}) {
       continue;
     } finally {
       clearTimeout(timer);
+      init.signal?.removeEventListener("abort", abort);
     }
 
     // Throttling and server trouble are worth one polite retry.
@@ -242,6 +247,40 @@ export function resetAiSessionUsage() {
   session.promptTokens = 0;
   session.completionTokens = 0;
   session.cost = 0;
+}
+
+/** Semantic vectors use an embedding model, independently of the chat model. */
+export async function aiEmbedWords(settings, input, { signal } = {}) {
+  if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
+  const provider = privacyRouting(settings);
+  const data = await apiJSON("/embeddings", settings.key, {
+    method: "POST",
+    signal,
+    body: JSON.stringify({
+      model: "openai/text-embedding-3-small",
+      input,
+      dimensions: 256,
+      encoding_format: "float",
+      ...(provider ? { provider } : {}),
+    }),
+  }, { strict: Boolean(provider) });
+  recordUsage(data?.usage);
+  const rows = data?.data;
+  const invalid = () => new Error("OpenRouter returned incomplete or invalid word embeddings. Try again.");
+  if (!Array.isArray(rows) || rows.length !== input.length) throw invalid();
+  const vectors = new Array(input.length);
+  let dimensions;
+  for (const row of rows) {
+    const { index, embedding } = row ?? {};
+    if (!Number.isInteger(index) || index < 0 || index >= input.length || vectors[index] ||
+        !Array.isArray(embedding) || !embedding.length ||
+        embedding.some(value => !Number.isFinite(value))) throw invalid();
+    dimensions ??= embedding.length;
+    const magnitude = Math.hypot(...embedding);
+    if (embedding.length !== dimensions || !Number.isFinite(magnitude) || magnitude === 0) throw invalid();
+    vectors[index] = embedding.map(value => value / magnitude);
+  }
+  return vectors;
 }
 
 /* ---- the chat completion core ---- */
