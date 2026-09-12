@@ -26,6 +26,30 @@ added under that word instead, and the line under the box says so. As the bank g
 by date added, alphabetically, by due date, or by how much you've practised or
 used a word in essays.
 
+**PDF export.** In **bank**, choose **export PDF** to save every word and its
+complete stored entry: all meanings, definitions, examples, pronunciation,
+synonyms, sources, and study history. The A4 document uses white pages, dark
+text, muted blue headwords, and page numbers. It includes collapsed entries
+too. Choose date added, alphabetical, due date, practice count, essay-use count,
+word length, or last-practised order, in either direction; the dialog starts
+with the bank's current order. PDF generation runs on your device and works
+offline once its PDF assets have loaded, with bundled fonts for accented words,
+IPA and foreign-script examples. Rare characters outside the font/renderer
+coverage are printed as explicit Unicode values such as `[U+1F600]`. Desktop opens a save
+dialog; the web app downloads a `.pdf` file.
+
+Choose **related meanings — AI** in either the bank or export order to arrange
+words by semantic similarity. It uses your saved OpenRouter key and privacy
+setting, with the `openai/text-embedding-3-small` embedding model (independent
+of your chosen chat model). Words, dictionary meanings and synonyms are sent
+in batches; a local comparison links the closest remaining meanings across
+the whole bank. All words are retained. This is an approximate semantic order,
+and neighbours can be related without being interchangeable synonyms.
+AI ordering uses API credits, shows progress, and can be cancelled. The order
+is reused in memory for exports and repeat selections during the session;
+changing bank membership or dictionary content requires a new sort. Standard
+sorting and exporting an existing AI order need no AI request.
+
 **Synonyms for essays.** Each word also gets a short run of synonyms drawn
 from [Datamuse](https://www.datamuse.com/api/) (corpus statistics, not AI) and
 ranked by an on-device scorer that favours the formal register — uncommon but
@@ -153,7 +177,9 @@ device that holds it, never synced to GitHub or the backup folder, never
 baked into any build, and sent nowhere except to `openrouter.ai`. Requests go
 straight from the app to OpenRouter — there is no lexis server in between.
 What you send is what the feature needs, and no more: essay feedback sends the
-draft along with your bank's headwords; example sentences send the word and the
+draft along with your bank's headwords; related ordering sends headwords,
+dictionary senses and synonyms (up to 6,000 characters per word), without
+study history or account settings; example sentences send the word and the
 opening of whatever draft is in the essay view, so they can speak about your
 text; passages to type send your bank's headwords and a length; similar words,
 **vs**, and a spelling rescue send the words alone; writing out a signpost

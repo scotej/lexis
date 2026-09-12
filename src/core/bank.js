@@ -726,7 +726,29 @@ const wordSorters = new Map([
   ["practised-least", (a, b) => countOf(a.times_used) - countOf(b.times_used)],
   ["essay-most", (a, b) => countOf(b.essay_uses) - countOf(a.essay_uses)],
   ["essay-least", (a, b) => countOf(a.essay_uses) - countOf(b.essay_uses)],
+  ["length-shortest", (a, b) => [...a.word].length - [...b.word].length],
+  ["length-longest", (a, b) => [...b.word].length - [...a.word].length],
+  ["review-newest", (a, b) => compareLastReview(a, b, -1)],
+  ["review-oldest", (a, b) => compareLastReview(a, b, 1)],
 ]);
+
+function compareLastReview(a, b, direction) {
+  const first = a.srs?.last;
+  const second = b.srs?.last;
+  if (!first || !second) return first ? -1 : second ? 1 : 0;
+  return direction * (first < second ? -1 : first > second ? 1 : 0);
+}
+
+export const BANK_ORDERS = [
+  ['added-newest', 'date added — newest'], ['added-oldest', 'date added — oldest'],
+  ['word-asc', 'word — A–Z'], ['word-desc', 'word — Z–A'],
+  ['due-soonest', 'due — soonest'], ['due-latest', 'due — latest'],
+  ['practised-most', 'practised — most'], ['practised-least', 'practised — least'],
+  ['essay-most', 'essay uses — most'], ['essay-least', 'essay uses — least'],
+  ['length-shortest', 'length — shortest'], ['length-longest', 'length — longest'],
+  ['review-newest', 'last practised — newest'], ['review-oldest', 'last practised — oldest'],
+  ['related', 'related meanings — AI'],
+];
 
 /** Returns a sorted copy for display without changing the synced bank order. */
 export function listWords(bank, order = "added-newest") {

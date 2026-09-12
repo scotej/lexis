@@ -123,19 +123,17 @@
           <p class="guide-words" id="guide-words" hidden></p>
           <label class="bank-sort">
             <span>sort by</span>
-            <select id="bank-sort" aria-label="Sort bank">
-              <option value="added-newest">date added — newest</option>
-              <option value="added-oldest">date added — oldest</option>
-              <option value="word-asc">word — A–Z</option>
-              <option value="word-desc">word — Z–A</option>
-              <option value="due-soonest">due — soonest</option>
-              <option value="due-latest">due — latest</option>
-              <option value="practised-most">practised — most</option>
-              <option value="practised-least">practised — least</option>
-              <option value="essay-most">essay uses — most</option>
-              <option value="essay-least">essay uses — least</option>
-            </select>
+            <select id="bank-sort" aria-label="Sort bank" aria-describedby="bank-ai-note"></select>
           </label>
+          <button id="bank-export" class="link-quiet" type="button" aria-haspopup="dialog">export PDF</button>
+        </div>
+        <div class="bank-ai-tools" id="bank-ai-tools" hidden>
+          <p id="bank-ai-note" class="hint">AI links words by meaning using your OpenRouter key. Sends words, definitions and synonyms; uses API credits.</p>
+          <button id="bank-ai-refresh" class="link-quiet" type="button">refresh AI order</button>
+        </div>
+        <div class="bank-order-feedback">
+          <p id="bank-order-status" class="add-status" role="status" hidden></p>
+          <button id="bank-sort-cancel" class="link-quiet" type="button" hidden>cancel sorting</button>
         </div>
         <form id="add-form" class="add-form" autocomplete="off">
           <input id="add-input" type="text" placeholder="add words, e.g. deontic modality" spellcheck="false" aria-label="Add one or more words" />
@@ -391,7 +389,9 @@
                 word plus the opening of whatever draft is in the essay view;
                 <em>passages to type</em> sends your bank's headwords and a length,
                 and never anything you have typed; <em>similar words</em> and
-                <em>vs</em> send the words alone.
+                <em>vs</em> send the words alone. <em>Related meanings</em> sends
+                headwords, dictionary senses and synonyms to compare meanings,
+                using an embedding model independently of the chat model below.
                 Two more happen inside an ordinary add, with no button pressed:
                 when no dictionary has a word you typed, that word alone is sent
                 to ask what you meant; and when an entry only names another word,
@@ -448,6 +448,20 @@
         </section>
       </section>
     </main>
+
+    <dialog id="export-dialog" class="about-dialog export-dialog" aria-labelledby="export-title" aria-describedby="export-description">
+      <h2 id="export-title">export word bank</h2>
+      <p id="export-description">Every saved meaning, definition, example, synonym, source and study detail. White A4 pages, dark text, and a little colour for the words.</p>
+      <p id="export-count" class="hint"></p>
+      <label class="export-order-label" for="export-order">order</label>
+      <select id="export-order"></select>
+      <p id="export-ai-note" class="hint" hidden>AI links related meanings using your OpenRouter key. Sends words, definitions and synonyms; uses API credits. An unchanged order is reused for this session. Add a key in settings → ai assist.</p>
+      <p id="export-status" class="add-status" role="status" hidden></p>
+      <div class="export-actions">
+        <button id="export-close" class="link-quiet" type="button">cancel</button>
+        <button id="export-save" class="button-primary" type="button">save PDF</button>
+      </div>
+    </dialog>
 
     <dialog id="about-dialog" class="about-dialog" aria-labelledby="about-title">
       <div class="about-head">

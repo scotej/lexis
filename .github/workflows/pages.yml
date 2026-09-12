@@ -31,6 +31,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
+      - name: install test dependencies
+        run: npm ci
       - name: test the shared core
         run: npm test
 
