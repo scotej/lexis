@@ -190,6 +190,18 @@ test("bank sorting rejects an unknown order", () => {
   assert.throws(() => bank.listWords(bank.emptyBank(), "surprise"), /unknown bank sort/);
 });
 
+test("length and last-practised orders use alphabetical ties and put unreviewed words last", () => {
+  const b = bank.emptyBank();
+  b.words = [entry('longest'), entry('cat'), entry('ant')];
+  b.words[0].srs.last = '2026-07-18';
+  b.words[2].srs.last = '2026-07-20';
+  const names = order => bank.listWords(b, order).map(w => w.word);
+  assert.deepEqual(names('length-shortest'), ['ant', 'cat', 'longest']);
+  assert.deepEqual(names('length-longest'), ['longest', 'ant', 'cat']);
+  assert.deepEqual(names('review-newest'), ['ant', 'longest', 'cat']);
+  assert.deepEqual(names('review-oldest'), ['longest', 'ant', 'cat']);
+});
+
 test("migrating a v1 bank dates its words from when they were added", () => {
   const migrated = bank.migrate({
     words: [{ word: "demise", added: "2026-07-01", srs: newSrs("2026-07-01"), senses: [] }],
