@@ -287,8 +287,21 @@ function watchForRewraps() {
       if (active) remeasure();
     });
   }
-  // Charter is a system font where it exists and a fallback where it doesn't;
-  // either way the swap lands after this module runs.
+  // The serif is a webfont now, not a system face, so the swap is asynchronous
+  // — and `unicode-range` means it arrives in pieces, a subset at a time, as
+  // the first character in each range is painted. `fonts.ready` is a single
+  // promise for the loads outstanding when it was read; a subset that starts
+  // loading afterwards — a zen typist reaching for an accent, or an accented
+  // character echoed back by "indicate typos: replace" — resolves nothing and
+  // leaves the caret measured against the fallback's metrics. `.tt-scroller`
+  // is a fixed height and a full-width box, so the ResizeObserver above never
+  // notices either.
+  // `ready` is kept behind the event for the one case the event cannot cover:
+  // a load that finished before this listener was attached. Both firing costs
+  // a second measurement of a passage that is already right.
+  document.fonts?.addEventListener?.("loadingdone", () => {
+    if (active) remeasure();
+  });
   document.fonts?.ready?.then(() => {
     if (active) remeasure();
   });
@@ -793,19 +806,6 @@ function onKeyDown(e) {
     return;
   }
 
-  // Past this point the keys are input, and a finished test takes none.
-  //
-  // The result screen keeps the keyboard on purpose — it is where the next
-  // test is started from — and the run it was scored from is still held, so
-  // the passage can be repeated. Everything above answers on that screen.
-  // Everything below used to as well: a stray character typed over a result
-  // reached `afterInput`, which looks at `run.status`, finds a run that is
-  // already done, and calls `finishTest` again. Filing the same test twice
-  // puts a duplicate in the record book, a duplicate in the last-ten average,
-  // and a second test's worth of credit on every bank word in the passage —
-  // and two or three idle keystrokes after a test is what everybody does.
-  if (run.status === "done" || run.status === "failed") return;
-
   if (settings.capsLockWarning) {
     const caps = e.getModifierState?.("CapsLock");
     $("view-typing")?.classList.toggle("tt-caps", Boolean(caps));
@@ -840,12 +840,13 @@ function onKeyDown(e) {
  * typist on a laptop; this does.
  */
 function afterInput() {
-  // Nothing to do for a run that is over. The keyboard handler already stops
-  // ordinary keys on the result screen, but it stops them by returning rather
-  // than by calling `preventDefault`, so the browser still puts the character
-  // into the field and the `input` listener still arrives here. Without this
-  // the finished passage is repainted behind the result, the caret is
-  // remeasured against it, and — with sound on — every key clicks, because an
+  // Nothing to do for a run that is over, and the result screen keeps the
+  // keyboard on purpose — it is where the next test is started from — so keys
+  // keep arriving here long after the last one that counted. The engine
+  // already declines to move a finished run, but everything below moves the
+  // *view*: without this the finished passage is repainted behind the result,
+  // the caret is remeasured against it, `finishTest` is asked to file the same
+  // test a second time, and — with sound on — every key clicks, because an
   // empty word reads as correctly typed.
   if (!run || scored) return;
   const i = run.index;
@@ -984,12 +985,21 @@ function paintWord(i) {
   // Underlining a bank word is the quiet reminder that this is a vocabulary
   // app: you are not just typing, you are meeting *demise* in a sentence.
   // Toggled rather than only ever added: the setting can go off, and the mark
-  // has to be able to come off with it on a node that already exists.
-  const bare = run.words[i]?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
-  node.classList.toggle("tt-word-bank", settings.markBankWords && bankWordSet.has(bare));
+  // has to be able to come off with it on a node that already exists. The two
+  // cheap tests come first, so a passage with no bank words in it — or a
+  // typist who turned the marks off — is not paying for a lowercase and a
+  // regex per word per keystroke.
+  const marked =
+    settings.markBankWords && bankWordSet.size > 0 && bankWordSet.has(bareWord(run.words[i]));
+  node.classList.toggle("tt-word-bank", marked);
 }
 
 let bankWordSet = new Set();
+
+/** A passage word reduced to the letters a bank headword could match. */
+function bareWord(word) {
+  return word?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
+}
 
 function refreshBankWordSet() {
   const words = current?.bankWords ?? [];
@@ -997,7 +1007,7 @@ function refreshBankWordSet() {
   bankWordSet = new Set();
   if (!words.length || !run) return;
   for (const word of run.words) {
-    const bare = word.toLowerCase().replace(/[^a-z'-]/g, "");
+    const bare = bareWord(word);
     if (bare && matcher.match(bare).size) bankWordSet.add(bare);
   }
 }
@@ -1323,10 +1333,11 @@ function metricNode(label, value = "") {
 
 function finishTest() {
   stopTicker();
-  // Once per run, whatever asks. The keyboard handler already declines to feed
-  // a finished run, but a phone's autocorrect and an IME arrive as `input`
-  // events rather than keystrokes, and they go through the same `afterInput`.
-  // A result is a thing that happened once; filing it is too.
+  // Once per run, whatever asks — the keyboard, the ticker, or zen's own
+  // "done". A result is a thing that happened once; filing it is too, and
+  // filing it twice puts a duplicate in the record book, a duplicate in the
+  // last-ten average, and a second test's worth of credit on every bank word
+  // in the passage.
   if (!run || scored) return;
   scored = true;
   const result = run.result();

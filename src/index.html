@@ -16,6 +16,26 @@
     <link rel="preconnect" href="https://api.dictionaryapi.dev" crossorigin />
     <link rel="preconnect" href="https://api.datamuse.com" crossorigin />
     <link rel="dns-prefetch" href="https://en.wiktionary.org" />
+    <!-- The two faces every screen starts in. The stylesheet only asks for
+         them once it has been parsed and something needs a glyph, which is a
+         paint in the fallback and a reflow of the whole app one file later;
+         `font-display: swap` makes that reflow visible rather than hidden.
+         Latin only: a preload bypasses `unicode-range`, so preloading the
+         accented subsets would download them for every English bank. -->
+    <link
+      rel="preload"
+      href="fonts/web/charis-sil-400-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="fonts/web/inter-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="styles.css" />
     <script type="module" src="main.js" defer></script>
   </head>

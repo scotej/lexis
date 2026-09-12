@@ -330,11 +330,13 @@
   content: attr(data-typed);
   position: absolute;
   left: 0;
-  /* Hung off the bottom of the word's own line box rather than pushed below
-     it. Set at `top: 100%` it began where the leading ended, which is where
-     the next line's ascenders begin — so at speed the record of the typo ran
-     straight through the word underneath it. */
-  top: auto;
+  /* Hung off the bottom of the word's own box rather than pushed below it.
+     Set at `top: 100%` it began where the leading ended, which is where the
+     next line's ascenders begin — so at speed the record of the typo ran
+     straight through the word underneath it. The anchor is the inline box the
+     font's own ascent and descent make, not the line box, which is why this
+     lands inside the leading rather than under it. The offset is in the small
+     text's own em, so it is a fraction of a pixel — a nudge, not a gap. */
   bottom: -0.06em;
   font-size: 0.44em;
   line-height: 1;
@@ -571,7 +573,14 @@
 .tt-chart {
   display: block;
   width: 100%;
-  height: 120px;
+  /* The box follows the drawing rather than the drawing being letterboxed
+     inside the box. At 120px fixed, a narrower window scaled the 640×120
+     viewBox down and centred it vertically in a box that had not shrunk, so
+     the rule below sat as much as twenty pixels clear of the trace it is
+     supposed to be the ground for — the same gap on a phone that `max-width`
+     just closed on a desktop. */
+  aspect-ratio: 640 / 120;
+  height: auto;
   overflow: visible;
 }
 

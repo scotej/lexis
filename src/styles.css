@@ -89,8 +89,13 @@
     U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
-/* Inter ships as one variable file per subset, so the whole weight axis is a
-   single download rather than one per weight this stylesheet happens to use. */
+/* Inter's upright faces are one variable file per subset, so the whole weight
+   axis is a single download rather than one per weight this stylesheet happens
+   to use. The italics are not: the files below are static Regulars (no `fvar`,
+   OS/2 weight 400), so they are declared at 400 and nothing else. Declaring
+   them `100 900` would have them claim a bold they do not carry — the browser
+   takes the descriptor at its word, skips synthesis, and sets bold italic sans
+   at regular weight. */
 @font-face {
   font-family: "Inter";
   font-style: normal;
@@ -116,7 +121,7 @@
 @font-face {
   font-family: "Inter";
   font-style: italic;
-  font-weight: 100 900;
+  font-weight: 400;
   font-display: swap;
   src: url("fonts/web/inter-italic-latin.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
@@ -127,7 +132,7 @@
 @font-face {
   font-family: "Inter";
   font-style: italic;
-  font-weight: 100 900;
+  font-weight: 400;
   font-display: swap;
   src: url("fonts/web/inter-italic-latin-ext.woff2") format("woff2");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,

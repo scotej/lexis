@@ -7,8 +7,12 @@ was set in a face the stylesheet was never drawn against.
 
 `charis-sil-*.woff2` is **Charis SIL** (regular, italic, bold), SIL's extended
 release of the Bitstream Charter design the `--serif` stack has always asked
-for first. `inter-*.woff2` is **Inter**, one variable file per subset covering
-the whole weight axis, carrying the chrome that used to fall to `system-ui`.
+for first. `inter-*.woff2` is **Inter**, carrying the chrome that used to fall
+to `system-ui`: the upright files are one variable file per subset covering the
+whole weight axis, the italics are static Regulars. `styles.css` declares the
+uprights `100 900` and the italics `400`, which is what the files actually
+hold — a face that claims a weight it does not carry is set at the wrong one
+rather than synthesised.
 
 Both are unmodified Google Fonts builds, subset exactly as Google serves them:
 `-latin` covers ASCII and the common punctuation, `-latin-ext` the accented
