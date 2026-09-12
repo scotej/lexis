@@ -185,7 +185,13 @@ function describeError(status, text, { strict = false } = {}) {
     case 401:
       return "OpenRouter rejected the key — it may have been revoked or mistyped.";
     case 402:
-      return "This OpenRouter key has run out of credits. Add credits at openrouter.ai/credits.";
+      // Two situations answer to 402 — a balance spent, and a key that never
+      // had one because it only ever bought free models — and only OpenRouter
+      // knows which. Its own words go first, because "add credits" is advice
+      // for the first and a misdiagnosis of the second.
+      return detail
+        ? `OpenRouter wouldn’t bill this request — ${detail}`
+        : "This OpenRouter key has run out of credits. Add credits at openrouter.ai/credits.";
     case 403:
       return detail || "The request was refused (moderation or key restrictions).";
     case 408:
@@ -207,9 +213,25 @@ function describeError(status, text, { strict = false } = {}) {
   }
 }
 
+/**
+ * A refusal OpenRouter itself issued, tagged with the status that caused it.
+ *
+ * The message is for the student and says everything they need; the number is
+ * for the one caller that has somewhere else to go. Related-meanings ordering
+ * asks for embeddings, every embedding model on OpenRouter is paid, and a key
+ * that only buys free models therefore gets 402 for a feature it could still
+ * have by another route — but it can only take that route if it can recognise
+ * the refusal, and "402" survives rewording where a message does not.
+ */
+function apiError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
 async function apiJSON(path, apiKey, init = {}, opts = {}) {
   const { ok, status, text } = await apiFetch(path, apiKey, init);
-  if (!ok) throw new Error(describeError(status, text, opts));
+  if (!ok) throw apiError(status, describeError(status, text, opts));
   try {
     return JSON.parse(text);
   } catch {
@@ -352,8 +374,9 @@ export function privacyRouting(settings) {
  * `messageText()` reads `content`, so a model's deliberation never reaches
  * the parser.
  */
-async function complete(settings, { system, prompt, temperature = 0.4 }) {
+async function complete(settings, { system, prompt, temperature = 0.4, signal }) {
   if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
+  signal?.throwIfAborted();
   const body = {
     model: normalizeModel(settings.model),
     temperature,
@@ -376,7 +399,7 @@ async function complete(settings, { system, prompt, temperature = 0.4 }) {
     apiJSON(
       "/chat/completions",
       settings.key,
-      { method: "POST", body: JSON.stringify(payload) },
+      { method: "POST", signal, body: JSON.stringify(payload) },
       { strict: Boolean(provider) }
     );
 
@@ -1073,6 +1096,95 @@ export async function aiNuance(settings, words) {
     throw new Error("The comparison came back empty. Try again.");
   }
   return { distinctions, guidance };
+}
+
+/* ---- feature: grouping a bank by theme ---- */
+
+/** How many words one grouping request carries. */
+const THEME_MAX_WORDS = 60;
+
+/**
+ * Which of these words belong together, for when vectors are out of reach.
+ *
+ * Related-meanings ordering is an embeddings job and stays one where it can
+ * be: a distance between every pair is exactly what "put like beside like"
+ * wants, and no amount of prose replaces it. But every embedding model
+ * OpenRouter carries is a paid one, and a key that has only ever bought free
+ * models cannot call a single one of them — so the feature was unreachable
+ * for those keys, and announced itself in the one way that reads as the
+ * student's own fault: "this key has run out of credits", about a model they
+ * never chose and a balance that was never spent.
+ *
+ * A chat model can still answer the question underneath, provided it is asked
+ * in the shape models are reliable at. Not "sort these hundred words", which
+ * invites a permutation with a word missing from the middle of it, but "say
+ * which of these belong together" — names come back, and they are matched
+ * against the bank here rather than trusted. A name the model invents, repeats
+ * or spells its own way costs nothing, and a word it forgets is the caller's
+ * to place, because the order is assembled from the bank and never from the
+ * reply.
+ */
+export async function aiGroupWordsByTheme(settings, entries, { signal, knownThemes = [] } = {}) {
+  const rows = (Array.isArray(entries) ? entries : [])
+    .map((entry) =>
+      typeof entry === "string"
+        ? { word: asString(entry), detail: "" }
+        : { word: asString(entry?.word), detail: asString(entry?.detail) }
+    )
+    .filter((row) => row.word);
+  if (!rows.length) return [];
+  if (rows.length > THEME_MAX_WORDS) {
+    throw new Error(`Group up to ${THEME_MAX_WORDS} words at a time.`);
+  }
+
+  // The words still looking for a group, under the folded spelling the match
+  // below uses — so the reply may say “Naïve” for an entry filed as “naive”.
+  const pending = new Map();
+  for (const row of rows) {
+    const key = canonWord(row.word);
+    if (key && !pending.has(key)) pending.set(key, row.word);
+  }
+
+  const reuse = asStringArray(knownThemes, 24);
+  const parsed = await chatJSON(settings, {
+    system: `${REGISTER} ${jsonOnlyInstruction('{groups: [{"theme": string, "words": string[]}]}')}`,
+    signal,
+    temperature: 0.2,
+    prompt: [
+      "Group these words by what they are about, so a reader meeting them in order stays in one area of meaning at a time.",
+      '"theme" is a short noun phrase — two or three words — naming what a group shares.',
+      "Put every word into exactly one group, spelled as it is given below, and add no word that is not in the list.",
+      "Aim for groups of three to eight. A word that fits nowhere takes a group of its own rather than a wrong home.",
+      reuse.length
+        ? `Earlier words were grouped under these themes — reuse any that fit rather than coining a near-duplicate: ${reuse.join("; ")}.`
+        : "",
+      "",
+      "WORDS:",
+      rows.map((row) => `- ${row.word}${row.detail ? `: ${row.detail}` : ""}`).join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  });
+
+  const groups = Array.isArray(parsed.groups) ? parsed.groups : Array.isArray(parsed) ? parsed : [];
+  const out = [];
+  for (const group of groups) {
+    const theme = asString(typeof group === "string" ? "" : group?.theme);
+    if (!theme) continue;
+    const members = [];
+    for (const name of asStringArray(group?.words, THEME_MAX_WORDS)) {
+      const key = canonWord(name);
+      const word = pending.get(key);
+      // Absent means invented, already placed, or simply not ours. All three
+      // are the same instruction: leave it out and keep going.
+      if (word === undefined) continue;
+      pending.delete(key);
+      members.push(word);
+    }
+    if (members.length) out.push({ theme, words: members });
+  }
+  if (!out.length) throw new Error("Nothing came back that grouped these words. Try again.");
+  return out;
 }
 
 /* ---- feature: spelling rescue ---- */

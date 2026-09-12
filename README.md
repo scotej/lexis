@@ -45,7 +45,16 @@ of your chosen chat model). Words, dictionary meanings and synonyms are sent
 in batches; a local comparison links the closest remaining meanings across
 the whole bank. All words are retained. This is an approximate semantic order,
 and neighbours can be related without being interchangeable synonyms.
-AI ordering uses API credits, shows progress, and can be cancelled. The order
+
+Every embedding model OpenRouter carries is paid, so a key that has only ever
+used free models is refused that request with a 402. Rather than report it as
+an exhausted balance — which it is not — lexis falls back to your chosen chat
+model, asks it which words belong together, and orders the bank by theme:
+groups named alphabetically, with anything the model passed over collected at
+the end. Every word still appears exactly once. A 402 that arrives partway
+through the embeddings is a balance that genuinely ran out, and says so.
+
+AI ordering shows progress and can be cancelled. The order
 is reused in memory for exports and repeat selections during the session;
 changing bank membership or dictionary content requires a new sort. Standard
 sorting and exporting an existing AI order need no AI request.

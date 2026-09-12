@@ -148,7 +148,7 @@
           <button id="bank-export" class="link-quiet" type="button" aria-haspopup="dialog">export PDF</button>
         </div>
         <div class="bank-ai-tools" id="bank-ai-tools" hidden>
-          <p id="bank-ai-note" class="hint">AI links words by meaning using your OpenRouter key. Sends words, definitions and synonyms; uses API credits.</p>
+          <p id="bank-ai-note" class="hint">AI links words by meaning using your OpenRouter key. Sends words, definitions and synonyms. Embedding models are paid; a key that holds only free models is grouped by your chat model instead.</p>
           <button id="bank-ai-refresh" class="link-quiet" type="button">refresh AI order</button>
         </div>
         <div class="bank-order-feedback">
@@ -411,7 +411,9 @@
                 and never anything you have typed; <em>similar words</em> and
                 <em>vs</em> send the words alone. <em>Related meanings</em> sends
                 headwords, dictionary senses and synonyms to compare meanings,
-                using an embedding model independently of the chat model below.
+                using an embedding model independently of the chat model below —
+                and, where the key cannot buy one, sending the same text to the
+                chat model instead to be grouped by theme.
                 Two more happen inside an ordinary add, with no button pressed:
                 when no dictionary has a word you typed, that word alone is sent
                 to ask what you meant; and when an entry only names another word,
@@ -475,7 +477,7 @@
       <p id="export-count" class="hint"></p>
       <label class="export-order-label" for="export-order">order</label>
       <select id="export-order"></select>
-      <p id="export-ai-note" class="hint" hidden>AI links related meanings using your OpenRouter key. Sends words, definitions and synonyms; uses API credits. An unchanged order is reused for this session. Add a key in settings → ai assist.</p>
+      <p id="export-ai-note" class="hint" hidden>AI links related meanings using your OpenRouter key. Sends words, definitions and synonyms. Embedding models are paid; a key that holds only free models is grouped by your chat model instead. An unchanged order is reused for this session. Add a key in settings → ai assist.</p>
       <p id="export-status" class="add-status" role="status" hidden></p>
       <div class="export-actions">
         <button id="export-close" class="link-quiet" type="button">cancel</button>
