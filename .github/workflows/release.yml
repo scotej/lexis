@@ -72,6 +72,9 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      - name: install test dependencies
+        run: npm ci
+
       - name: test the shared core
         run: npm test
 

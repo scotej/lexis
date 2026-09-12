@@ -219,12 +219,30 @@ main {
 
 .bank-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 16px;
   border-bottom: 1px solid var(--hairline);
   padding-bottom: 8px;
   margin-bottom: 22px;
 }
+
+.bank-ai-tools, .bank-order-feedback {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.bank-ai-tools { margin: -8px 0 18px; }
+.bank-ai-tools .hint { flex: 1 1 260px; margin: 0; }
+.bank-order-feedback .add-status { margin-top: 0; }
+.about-dialog.export-dialog { max-width: 520px; }
+.export-dialog .hint, .bank-ai-tools .hint { color: var(--faint); font-size: 12px; }
+.export-dialog h2 { font-family: var(--serif); font-size: 24px; margin-bottom: 14px; }
+.export-dialog p { line-height: 1.6; margin-bottom: 16px; }
+.export-order-label { display: block; margin-bottom: 6px; color: var(--faint); }
+#export-order { width: 100%; padding: 9px; font: inherit; background: var(--paper); color: var(--ink); border: 1px solid var(--hairline); border-radius: 3px; margin-bottom: 14px; }
+.export-actions { display: flex; justify-content: flex-end; align-items: center; gap: 20px; margin-top: 22px; }
 
 .guide-words {
   min-width: 0;
