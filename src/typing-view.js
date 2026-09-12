@@ -949,7 +949,6 @@ function paintWord(i) {
   node.replaceChildren(...parts);
   node.classList.toggle("tt-word-active", view.active);
   node.classList.toggle("tt-word-error", !blind && view.submitted && !view.correct);
-  node.classList.toggle("tt-word-done", view.submitted && view.correct);
 
   if (settings.indicateTypos === "below" && !blind) {
     const typedText = run.typed[i] ?? "";
@@ -962,10 +961,10 @@ function paintWord(i) {
 
   // Underlining a bank word is the quiet reminder that this is a vocabulary
   // app: you are not just typing, you are meeting *demise* in a sentence.
-  if (settings.markBankWords && bankWordSet.size) {
-    const bare = run.words[i]?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
-    node.classList.toggle("tt-word-bank", bankWordSet.has(bare));
-  }
+  // Toggled rather than only ever added: the setting can go off, and the mark
+  // has to be able to come off with it on a node that already exists.
+  const bare = run.words[i]?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
+  node.classList.toggle("tt-word-bank", settings.markBankWords && bankWordSet.has(bare));
 }
 
 let bankWordSet = new Set();
