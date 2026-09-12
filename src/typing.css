@@ -4,10 +4,26 @@
 
    It borrows nothing from the usual typing-test look: the passages are
    nineteenth-century prose, so they are set in the same Charter serif the bank
-   sets its headwords in, on the same paper, with the same one red pen for
-   everything that is wrong. Untyped text is the faint grey lexis uses for
-   things not yet done; typed-and-correct text is full ink. Reading the line
-   ahead and seeing how far you have come are then the same gesture. */
+   sets its headwords in, on the same paper. Untyped text is the faint grey
+   lexis uses for things not yet done; typed-and-correct text is full ink.
+   Reading the line ahead and seeing how far you have come are then the same
+   gesture.
+
+   How a mistake looks is borrowed, though, because monkeytype got it right and
+   fingers already know it. A mistake is said **once**, at the level you can
+   act on:
+
+     · the letter you got wrong turns red, and that is all it does;
+     · the word you left with something wrong in it takes one red rule
+       underneath, because at speed you scroll past the letter and only notice
+       the word.
+
+   What it deliberately is not is the same mistake marked three times over — a
+   red letter, underlined, inside an underlined word, with the letters you
+   actually typed printed underneath. Every one of those was true, and together
+   they read as an alarm rather than as a correction. Extra letters are dimmed
+   red and left legible rather than struck through, for the same reason: the
+   point is to show what happened, not to cross it out. */
 
 #view-typing {
   /* Wider than the reading views: a passage broken every six words is a test
@@ -54,7 +70,9 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  /* Wider than it was: the chips carry no pill of their own now, so the space
+     between them is the only thing separating one word from the next. */
+  gap: 2px 11px;
 }
 
 .tt-chips-label,
@@ -66,33 +84,45 @@
   margin-right: 4px;
 }
 
+/* A chip says what it is and whether it is on; it does not need to be a
+   filled black lozenge to do either. Eighteen of them across three rows were
+   the loudest thing on a page whose subject is a line of prose — so the chip
+   is text, and being chosen is full ink over a red rule, which is the same
+   thing the rail does to mark the view you are in. */
 .tt-chip {
-  padding: 3px 9px;
-  border-radius: 999px;
-  font-size: 12px;
+  padding: 3px 2px;
+  font-size: 12.5px;
   color: var(--faint);
   border: 1px solid transparent;
-  transition: color 120ms ease, background 120ms ease;
+  border-radius: 3px;
+  box-shadow: inset 0 -1px 0 0 transparent;
+  transition: color 120ms ease, box-shadow 120ms ease;
   white-space: nowrap;
 }
 
 .tt-chip:hover {
   color: var(--ink);
-  background: var(--wash);
 }
 
-.tt-chip-on {
-  color: var(--paper);
-  background: var(--ink);
-}
-
+.tt-chip-on,
 .tt-chip-on:hover {
-  color: var(--paper);
-  background: var(--ink);
+  color: var(--ink);
+  box-shadow: inset 0 -1px 0 0 var(--pen);
 }
 
+/* The one chip that is a button rather than a toggle keeps an outline, so it
+   reads as somewhere to go rather than as another thing to turn on. */
 .tt-chip-wide {
+  padding: 3px 10px;
+  border-radius: 999px;
   border-color: var(--hairline);
+  box-shadow: none;
+}
+
+.tt-chip-wide.tt-chip-on,
+.tt-chip-wide.tt-chip-on:hover {
+  border-color: var(--pen);
+  box-shadow: none;
 }
 
 .tt-bar-tools {
@@ -117,8 +147,29 @@
   vertical-align: baseline;
 }
 
+/* ---- the stage ---- */
+
+/* Meter, passage, credit and hint, given somewhere to sit.
+
+   The test used to start flush under the bar and leave the whole lower half of
+   the window empty: three lines of prose pinned to the top edge of a screen
+   with nothing else on it. Claiming the height and centring inside it puts the
+   passage where the eye already is, and keeps it there when a line wraps or a
+   credit runs to two. */
+.tt-stage {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: min(46vh, 360px);
+  padding-block: 6px;
+}
+
 /* ---- the meter above the passage ---- */
 
+/* Held to the same column as the passage. Ruled across the full 900px while
+   the text stopped at 65ch, the progress bar measured a line that was not
+   there — it ran a third of a page past the end of every sentence it was
+   reporting on. */
 .tt-meter {
   display: flex;
   flex-wrap: wrap;
@@ -126,6 +177,7 @@
   gap: 6px 20px;
   margin-bottom: 14px;
   min-height: 26px;
+  max-width: var(--tt-line-width);
 }
 
 .tt-metric {
@@ -175,8 +227,14 @@
   /* One line of the passage. Named, because three separate rules need the same
      number and the JS that scrolls the passage reads the resolved line-height
      off the words themselves — a height built from a different arithmetic is
-     how the passage and its scroll step drift apart. */
-  --tt-line: calc(var(--tt-font-size) * 1.65);
+     how the passage and its scroll step drift apart. Keep it in step with
+     `.tt-words`' own `line-height`.
+
+     1.85 rather than 1.65: the leading has to carry a word's error rule *and*
+     the small line of what was actually typed under it, and at 1.65 the two
+     landed on the ascenders of the line below. It reads better at this
+     setting anyway — a passage is prose, not a caption. */
+  --tt-line: calc(var(--tt-font-size) * 1.85);
   /* Three lines of it, so the eye has somewhere to go without the page
      jumping under the caret. */
   height: calc(var(--tt-line) * 3);
@@ -187,7 +245,8 @@
 .tt-words {
   font-family: var(--serif);
   font-size: var(--tt-font-size);
-  line-height: 1.65;
+  /* In step with `--tt-line` above — change both or neither. */
+  line-height: 1.85;
   color: var(--faint);
   transition: transform var(--tt-scroll-speed) ease;
   user-select: none;
@@ -200,9 +259,23 @@
   position: relative;
 }
 
+/* The two word-level rules share one geometry so they can never be told apart
+   by where they sit, only by what colour they are — and so a bank word you got
+   wrong shows one rule rather than two a pixel apart. Both are drawn with
+   `text-decoration` rather than a box-shadow: an underline on the word wins
+   over an underline the word inherits, which is how the error takes the rule
+   off the bank marker instead of fighting it, and neither adds a pixel of
+   height for the caret's measurement to trip over. */
+.tt-word-bank,
+.tt-word-error {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
 /* An underline that says "this is one of yours" without shouting it. */
 .tt-word-bank {
-  box-shadow: inset 0 -1px 0 0 var(--hairline);
+  text-decoration-color: var(--hairline);
 }
 
 .tt-c {
@@ -213,11 +286,11 @@
   color: var(--ink);
 }
 
+/* Red, and nothing else. The letter underlined itself, sat inside a word that
+   was also underlined, and repeated itself in miniature below — three marks
+   for one slip. The word keeps the rule; the letter keeps the colour. */
 .tt-incorrect {
   color: var(--pen);
-  text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
 }
 
 .tt-missed {
@@ -225,10 +298,12 @@
   opacity: 0.55;
 }
 
+/* Dimmed rather than struck through. A strikethrough on top of the word's own
+   rule put two lines through three letters, and said "delete this" about
+   something the typist can already see was never wanted. */
 .tt-extra {
   color: var(--pen);
-  opacity: 0.7;
-  text-decoration: line-through;
+  opacity: 0.6;
 }
 
 /* Highlight modes: letter follows the caret, word lifts the whole word. */
@@ -241,24 +316,34 @@
   opacity: 0.65;
 }
 
-/* A word left behind with something wrong in it. Marked at the word level as
-   well as the character level, because at speed you scroll past the letter
-   and only notice the word. */
+/* A word left behind with something wrong in it: the one mark the mistake
+   gets, at the level you notice at speed. Written after the bank rule so it
+   replaces it rather than doubling it. */
 .tt-word-error {
-  box-shadow: inset 0 -1px 0 0 var(--pen);
+  text-decoration-color: var(--pen);
 }
 
-/* Indicate typos "below": the letters actually typed, small, under the word. */
+/* Indicate typos "below": the letters actually typed, small, under the word.
+   Clear of the rule above it — it used to be set flush against the underline,
+   so the two ran together into one red smudge. */
 .tt-word-typo::after {
   content: attr(data-typed);
   position: absolute;
   left: 0;
-  top: 100%;
-  font-size: 0.5em;
+  /* Hung off the bottom of the word's own box rather than pushed below it.
+     Set at `top: 100%` it began where the leading ended, which is where the
+     next line's ascenders begin — so at speed the record of the typo ran
+     straight through the word underneath it. The anchor is the inline box the
+     font's own ascent and descent make, not the line box, which is why this
+     lands inside the leading rather than under it. The offset is in the small
+     text's own em, so it is a fraction of a pixel — a nudge, not a gap. */
+  bottom: -0.06em;
+  font-size: 0.44em;
   line-height: 1;
   color: var(--pen);
-  opacity: 0.8;
+  opacity: 0.7;
   letter-spacing: 0.02em;
+  white-space: pre;
 }
 
 /* Blind mode means blind: nothing on this screen says how it is going. */
@@ -474,13 +559,28 @@
   margin-top: 2px;
 }
 
+/* Ruled underneath, and no wider than the drawing inside it.
+   The SVG is 640 units across and scales to fit, so stretching the box to the
+   full column left the trace floating in the middle of a band of nothing with
+   no line to stand on — the one chart in lexis that did not look like the
+   others. Statistics rules its bars off the same way. */
 .tt-chart-wrap {
   margin: 26px 0 0;
+  max-width: 640px;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .tt-chart {
+  display: block;
   width: 100%;
-  height: 120px;
+  /* The box follows the drawing rather than the drawing being letterboxed
+     inside the box. At 120px fixed, a narrower window scaled the 640×120
+     viewBox down and centred it vertically in a box that had not shrunk, so
+     the rule below sat as much as twenty pixels clear of the trace it is
+     supposed to be the ground for — the same gap on a phone that `max-width`
+     just closed on a desktop. */
+  aspect-ratio: 640 / 120;
+  height: auto;
   overflow: visible;
 }
 

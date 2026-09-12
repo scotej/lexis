@@ -499,6 +499,9 @@ function renderCard() {
   area.append(stage);
 
   if (!queue.length) {
+    // Nothing left to turn over, so space must not still be reaching into the
+    // last card's closure — it belonged to a stage that has been replaced.
+    currentReveal = null;
     stage.append(
       el("p", "card-word", reviewed ? "done." : "nothing due."),
       el(
