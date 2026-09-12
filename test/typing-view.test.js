@@ -12,9 +12,10 @@ import assert from "node:assert/strict";
 
 const { lineOf } = await import("../src/typing-view.js");
 
-// A Charter glyph at the app's default 1.3rem: about 25px of ink in a 34.3px
-// line. The gap is the whole reason the old arithmetic went wrong.
-const LINE = 34.32;
+// A Charter glyph at the app's default 1.3rem: about 25px of ink in a 38.5px
+// line (20.8px at a line-height of 1.85). The gap between the two is the whole
+// reason the old arithmetic went wrong, and it is wider than it used to be.
+const LINE = 38.48;
 const GLYPH = 25;
 const TOP_OF_LINE = (n) => n * LINE + (LINE - GLYPH) / 2;
 

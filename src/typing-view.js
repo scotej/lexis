@@ -840,7 +840,14 @@ function onKeyDown(e) {
  * typist on a laptop; this does.
  */
 function afterInput() {
-  if (!run) return;
+  // Nothing to do for a run that is over. The keyboard handler already stops
+  // ordinary keys on the result screen, but it stops them by returning rather
+  // than by calling `preventDefault`, so the browser still puts the character
+  // into the field and the `input` listener still arrives here. Without this
+  // the finished passage is repainted behind the result, the caret is
+  // remeasured against it, and — with sound on — every key clicks, because an
+  // empty word reads as correctly typed.
+  if (!run || scored) return;
   const i = run.index;
   paintWord(i - 1);
   paintWord(i);
@@ -1118,7 +1125,9 @@ function lineHeightOf(container) {
   // "normal" resolves to the string, not a number, on a container with no
   // explicit line-height. The stylesheet sets one, but a stylesheet that
   // failed to load should still leave a caret roughly where it belongs.
-  const value = Number.isFinite(resolved) && resolved > 0 ? resolved : settings.fontSize * 16 * 1.65;
+  // The 1.85 is `.tt-words`' own line-height, and `--tt-line` in typing.css is
+  // the same number a third time. Change all three or none.
+  const value = Number.isFinite(resolved) && resolved > 0 ? resolved : settings.fontSize * 16 * 1.85;
   lineHeightCache = { key, value };
   return value;
 }
