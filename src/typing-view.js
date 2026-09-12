@@ -117,6 +117,7 @@ let pool = createQuotePool([]);
 let matchCount = null; // how many passages the current filters allow
 
 let run = null;
+let scored = false; // has this run's result been filed in the record book
 let current = null; // the passage being typed: { text, title, author, origin, bankWords }
 let repeatOf = null; // a passage held back so "repeat" can serve it again
 
@@ -682,6 +683,7 @@ function nextTest() {
   hideNotice();
 
   run = buildRun();
+  scored = false;
   if (!run) {
     renderEmptyPool();
     return;
@@ -790,6 +792,19 @@ function onKeyDown(e) {
     }
     return;
   }
+
+  // Past this point the keys are input, and a finished test takes none.
+  //
+  // The result screen keeps the keyboard on purpose — it is where the next
+  // test is started from — and the run it was scored from is still held, so
+  // the passage can be repeated. Everything above answers on that screen.
+  // Everything below used to as well: a stray character typed over a result
+  // reached `afterInput`, which looks at `run.status`, finds a run that is
+  // already done, and calls `finishTest` again. Filing the same test twice
+  // puts a duplicate in the record book, a duplicate in the last-ten average,
+  // and a second test's worth of credit on every bank word in the passage —
+  // and two or three idle keystrokes after a test is what everybody does.
+  if (run.status === "done" || run.status === "failed") return;
 
   if (settings.capsLockWarning) {
     const caps = e.getModifierState?.("CapsLock");
@@ -1299,7 +1314,12 @@ function metricNode(label, value = "") {
 
 function finishTest() {
   stopTicker();
-  if (!run) return;
+  // Once per run, whatever asks. The keyboard handler already declines to feed
+  // a finished run, but a phone's autocorrect and an IME arrive as `input`
+  // events rather than keystrokes, and they go through the same `afterInput`.
+  // A result is a thing that happened once; filing it is too.
+  if (!run || scored) return;
+  scored = true;
   const result = run.result();
   const key = testKey(settings);
   const label = describeTest(settings);
