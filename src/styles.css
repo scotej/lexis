@@ -2,6 +2,139 @@
    Palette: paper, ink, and one marking-pen red. Serif carries the words;
    a quiet sans carries the chrome. */
 
+/* ---- the two typefaces, carried rather than hoped for ----
+
+   The stack used to open with Charter and fall through Cambria and Georgia to
+   the generic `serif`. None of the three ships with Linux, and on a machine
+   with only the DejaVu family installed every headword, definition and typing
+   passage was set in DejaVu Serif — a wide, low-contrast face nothing in this
+   stylesheet was drawn against. The chrome had the same problem one step
+   removed: `system-ui` is whatever the desktop says it is.
+
+   So both faces travel with the app. Charis SIL *is* Charter — SIL's extended
+   release of the same Bitstream design — so the intent the stack always
+   described is now what renders, on every platform and in the desktop build
+   as well as the browser. Inter is the quiet sans the chrome was asking for.
+
+   Both are SIL Open Font License 1.1 (licences beside the files). Subset by
+   `unicode-range` the way Google Fonts serves them, so an English bank fetches
+   only the latin files and the accented and IPA ranges are paid for only by
+   the entries that use them. `swap` because a definition you can read in a
+   fallback beats an empty page; the typing view remeasures on
+   `document.fonts.ready`, so the caret follows the swap. */
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-400italic-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-400italic-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-700-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Charis SIL";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/web/charis-sil-700-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Inter ships as one variable file per subset, so the whole weight axis is a
+   single download rather than one per weight this stylesheet happens to use. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/web/inter-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/web/inter-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/web/inter-italic-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/web/inter-italic-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
 :root {
   --paper: #fcfcfa;
   --ink: #1c1b1a;
@@ -9,8 +142,10 @@
   --hairline: #e4e1db;
   --wash: #f4f3ef;
   --pen: #b42318;
-  --serif: Charter, "Bitstream Charter", Cambria, Georgia, serif;
-  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* The bundled faces lead; the old stack stays behind them so a build that
+     somehow cannot serve the files still lands on the nearest thing. */
+  --serif: "Charis SIL", Charter, "Bitstream Charter", Cambria, Georgia, serif;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
