@@ -87,6 +87,13 @@ its settings is here: difficulty, stop-on-error, confidence and freedom modes,
 strict space, lazy mode, caret styles, tape mode, blind mode, minimum-speed
 floors, live wpm.
 
+A mistake is marked once, where monkeytype marks it. The letter you got wrong
+turns red, and a word you left with something wrong in it takes a single red
+rule underneath — the one you actually notice at speed, once you have scrolled
+past the letter. The passages themselves are set as prose, not as a grid: your
+own bank words carry a quiet grey rule of their own, and a red one replaces it
+if you mistype one.
+
 What it adds is the filter only a word bank can offer: **only quotes using a
 word from my bank** — or from today's list, or from what is due for review.
 Meeting *demise* in a line of Dickens, at speed, is a different kind of
@@ -453,6 +460,15 @@ themselves — length, kind, and source — because supply is wildly uneven (the
 are 95,000 short quotes available and 6,000 long ones), rejects anything that
 is not typeable, not English, not a whole sentence, or not fit for a school
 screen, and caps how much any one work may contribute.
+
+Both typefaces travel with the app, in `src/fonts/web/`: Charis SIL for the
+words and Inter for the chrome, SIL Open Font License 1.1, subset by
+`unicode-range` exactly as Google Fonts serves them. They are there rather
+than named and hoped for because the old stack — Charter, Cambria, Georgia,
+`system-ui` — resolves to none of those on a Linux machine, and every headword
+and typing passage was being set in whatever serif the desktop happened to
+have. Nothing is fetched from a CDN, and an English bank downloads only the
+two latin files.
 
 The frontend is plain HTML/CSS/JS — no framework, no bundler, so "building"
 the web app is copying `src/`. The Rust backend (Tauri 2) is now a thin shell:

@@ -267,11 +267,15 @@ button {
   margin-left: 4px;
 }
 
+/* The key that opens the panel, not a count of anything.
+   It was raised like the counts beside it, and a solidus set as a superscript
+   beside the word "lookup" reads as a stray mark on the page rather than as a
+   key you can press. On the baseline, spaced, it reads as what it is. */
 .rail-hint {
   color: var(--faint);
-  font-size: 11px;
-  vertical-align: super;
-  margin-left: 2px;
+  font-size: 12px;
+  margin-left: 7px;
+  opacity: 0.75;
 }
 
 .update-line {
