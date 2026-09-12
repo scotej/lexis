@@ -117,6 +117,7 @@ let pool = createQuotePool([]);
 let matchCount = null; // how many passages the current filters allow
 
 let run = null;
+let scored = false; // has this run's result been filed in the record book
 let current = null; // the passage being typed: { text, title, author, origin, bankWords }
 let repeatOf = null; // a passage held back so "repeat" can serve it again
 
@@ -286,8 +287,21 @@ function watchForRewraps() {
       if (active) remeasure();
     });
   }
-  // Charter is a system font where it exists and a fallback where it doesn't;
-  // either way the swap lands after this module runs.
+  // The serif is a webfont now, not a system face, so the swap is asynchronous
+  // — and `unicode-range` means it arrives in pieces, a subset at a time, as
+  // the first character in each range is painted. `fonts.ready` is a single
+  // promise for the loads outstanding when it was read; a subset that starts
+  // loading afterwards — a zen typist reaching for an accent, or an accented
+  // character echoed back by "indicate typos: replace" — resolves nothing and
+  // leaves the caret measured against the fallback's metrics. `.tt-scroller`
+  // is a fixed height and a full-width box, so the ResizeObserver above never
+  // notices either.
+  // `ready` is kept behind the event for the one case the event cannot cover:
+  // a load that finished before this listener was attached. Both firing costs
+  // a second measurement of a passage that is already right.
+  document.fonts?.addEventListener?.("loadingdone", () => {
+    if (active) remeasure();
+  });
   document.fonts?.ready?.then(() => {
     if (active) remeasure();
   });
@@ -682,6 +696,7 @@ function nextTest() {
   hideNotice();
 
   run = buildRun();
+  scored = false;
   if (!run) {
     renderEmptyPool();
     return;
@@ -825,7 +840,15 @@ function onKeyDown(e) {
  * typist on a laptop; this does.
  */
 function afterInput() {
-  if (!run) return;
+  // Nothing to do for a run that is over, and the result screen keeps the
+  // keyboard on purpose — it is where the next test is started from — so keys
+  // keep arriving here long after the last one that counted. The engine
+  // already declines to move a finished run, but everything below moves the
+  // *view*: without this the finished passage is repainted behind the result,
+  // the caret is remeasured against it, `finishTest` is asked to file the same
+  // test a second time, and — with sound on — every key clicks, because an
+  // empty word reads as correctly typed.
+  if (!run || scored) return;
   const i = run.index;
   paintWord(i - 1);
   paintWord(i);
@@ -949,7 +972,6 @@ function paintWord(i) {
   node.replaceChildren(...parts);
   node.classList.toggle("tt-word-active", view.active);
   node.classList.toggle("tt-word-error", !blind && view.submitted && !view.correct);
-  node.classList.toggle("tt-word-done", view.submitted && view.correct);
 
   if (settings.indicateTypos === "below" && !blind) {
     const typedText = run.typed[i] ?? "";
@@ -962,13 +984,22 @@ function paintWord(i) {
 
   // Underlining a bank word is the quiet reminder that this is a vocabulary
   // app: you are not just typing, you are meeting *demise* in a sentence.
-  if (settings.markBankWords && bankWordSet.size) {
-    const bare = run.words[i]?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
-    node.classList.toggle("tt-word-bank", bankWordSet.has(bare));
-  }
+  // Toggled rather than only ever added: the setting can go off, and the mark
+  // has to be able to come off with it on a node that already exists. The two
+  // cheap tests come first, so a passage with no bank words in it — or a
+  // typist who turned the marks off — is not paying for a lowercase and a
+  // regex per word per keystroke.
+  const marked =
+    settings.markBankWords && bankWordSet.size > 0 && bankWordSet.has(bareWord(run.words[i]));
+  node.classList.toggle("tt-word-bank", marked);
 }
 
 let bankWordSet = new Set();
+
+/** A passage word reduced to the letters a bank headword could match. */
+function bareWord(word) {
+  return word?.toLowerCase().replace(/[^a-z'-]/g, "") ?? "";
+}
 
 function refreshBankWordSet() {
   const words = current?.bankWords ?? [];
@@ -976,7 +1007,7 @@ function refreshBankWordSet() {
   bankWordSet = new Set();
   if (!words.length || !run) return;
   for (const word of run.words) {
-    const bare = word.toLowerCase().replace(/[^a-z'-]/g, "");
+    const bare = bareWord(word);
     if (bare && matcher.match(bare).size) bankWordSet.add(bare);
   }
 }
@@ -1104,7 +1135,9 @@ function lineHeightOf(container) {
   // "normal" resolves to the string, not a number, on a container with no
   // explicit line-height. The stylesheet sets one, but a stylesheet that
   // failed to load should still leave a caret roughly where it belongs.
-  const value = Number.isFinite(resolved) && resolved > 0 ? resolved : settings.fontSize * 16 * 1.65;
+  // The 1.85 is `.tt-words`' own line-height, and `--tt-line` in typing.css is
+  // the same number a third time. Change all three or none.
+  const value = Number.isFinite(resolved) && resolved > 0 ? resolved : settings.fontSize * 16 * 1.85;
   lineHeightCache = { key, value };
   return value;
 }
@@ -1300,7 +1333,13 @@ function metricNode(label, value = "") {
 
 function finishTest() {
   stopTicker();
-  if (!run) return;
+  // Once per run, whatever asks — the keyboard, the ticker, or zen's own
+  // "done". A result is a thing that happened once; filing it is too, and
+  // filing it twice puts a duplicate in the record book, a duplicate in the
+  // last-ten average, and a second test's worth of credit on every bank word
+  // in the passage.
+  if (!run || scored) return;
+  scored = true;
   const result = run.result();
   const key = testKey(settings);
   const label = describeTest(settings);
