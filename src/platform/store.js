@@ -99,7 +99,13 @@ function localStorageBackend() {
       }
     },
     async set(k, v) {
-      globalThis.localStorage?.setItem(k, JSON.stringify(v));
+      // An origin can have neither IndexedDB nor localStorage (for example a
+      // restricted browser context). A successful-looking no-op here would
+      // let the app accept a vault or bank edit that vanishes on reload.
+      if (!globalThis.localStorage) {
+        throw new Error("Browser storage is unavailable; changes cannot be saved.");
+      }
+      globalThis.localStorage.setItem(k, JSON.stringify(v));
     },
     async remove(k) {
       globalThis.localStorage?.removeItem(k);

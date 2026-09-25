@@ -131,6 +131,9 @@ function switchView(name) {
   // visibly on the typing test, whose whole screen is one window high and
   // which was simply not there when you pressed “type”.
   mainColumn.scrollTop = 0;
+  // On narrow screens the document scrolls instead of the main column.
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
@@ -444,13 +447,19 @@ function drawToday(view) {
     const tick = el("button", "tick");
     tick.setAttribute("aria-label", `mark ${item.word} as used`);
     tick.setAttribute("aria-pressed", String(item.ticked));
-    tick.addEventListener("click", () =>
+    tick.addEventListener("click", () => {
+      tick.disabled = true;
       mutate(async () => {
-        await app.tickWord(item.word, !item.ticked);
-        renderToday();
-        refreshCounts();
-      })
-    );
+        try {
+          await app.tickWord(item.word, !item.ticked);
+          await renderToday();
+          await refreshCounts();
+        } finally {
+          // A failed save keeps the original row on screen for a retry.
+          if (tick.isConnected) tick.disabled = false;
+        }
+      });
+    });
     row.append(tick, el("span", "today-word", item.word), el("span", "today-def", item.def));
     list.append(row);
   });
@@ -485,8 +494,12 @@ $("today-more").addEventListener("click", async (event) => {
 
 let queue = [];
 let reviewed = 0;
+let reviewSaving = false;
 
 function startReview() {
+  // Keep the pending card and its disabled buttons when navigation returns
+  // here before a save finishes. Rebuilding it would accept a second grade.
+  if (reviewSaving) return;
   queue = app.dueWords();
   reviewed = 0;
   renderCard();
@@ -547,12 +560,22 @@ function renderCard() {
       const btn = el("button", cls, g);
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
+        if (reviewSaving) return;
+        reviewSaving = true;
+        grades.querySelectorAll("button").forEach((choice) => { choice.disabled = true; });
         mutate(async () => {
-          await app.gradeWord(word.word, g);
-          queue.shift();
-          if (g === "again") queue.push(word); // Anki-style: lapses return this session
-          reviewed += 1;
-          renderCard();
+          try {
+            await app.gradeWord(word.word, g);
+            queue.shift();
+            if (g === "again") queue.push(word); // Anki-style: lapses return this session
+            reviewed += 1;
+            renderCard();
+          } catch (err) {
+            grades.querySelectorAll("button").forEach((choice) => { choice.disabled = false; });
+            throw err;
+          } finally {
+            reviewSaving = false;
+          }
         });
       });
       grades.append(btn);
@@ -822,6 +845,14 @@ const lookupStatus = $("lookup-status");
 const lookupResult = $("lookup-result");
 let lookupSeq = 0; // a stale response must not overwrite a newer one
 
+lookupInput.addEventListener("input", () => {
+  // Changing the query withdraws the old result and any request still in flight.
+  lookupSeq++;
+  lookupResult.replaceChildren();
+  lookupStatus.hidden = true;
+  lookupStatus.classList.remove("error");
+});
+
 function openLookup() {
   // Same guard as the rail: on the web the gate may still be up.
   if (!app) return;
@@ -899,6 +930,7 @@ function renderLookupResult(word, dict) {
   } else {
     const add = el("button", "link-quiet", "add to bank");
     add.addEventListener("click", async () => {
+      const seq = lookupSeq;
       add.disabled = true;
       lookupStatus.hidden = false;
       lookupStatus.classList.remove("error");
@@ -910,12 +942,13 @@ function renderLookupResult(word, dict) {
         // on screen.
         const result = await app.addWord(word, {
           onProgress: (text) => {
-            lookupStatus.textContent = text;
+            if (seq === lookupSeq) lookupStatus.textContent = text;
           },
         });
         const stored = result.word;
         expandedWords.add(stored);
         await renderBank();
+        if (seq !== lookupSeq) return;
         lookupStatus.textContent = [
           stored === word
             ? `“${word}” is in your bank now`
@@ -926,6 +959,7 @@ function renderLookupResult(word, dict) {
         ].join(" · ");
         add.replaceWith(el("span", null, "in your bank"));
       } catch (err) {
+        if (seq !== lookupSeq) return;
         lookupStatus.textContent = String(err.message ?? err);
         lookupStatus.classList.add("error");
         add.disabled = false;
@@ -2460,8 +2494,8 @@ $("gate-setup").addEventListener("submit", async (e) => {
 
 /* ---- boot ---- */
 
-function wireApp() {
-  app = createApp(
+async function wireApp() {
+  const loadedApp = createApp(
     platform.storage,
     () => {
       sync?.schedule();
@@ -2494,6 +2528,10 @@ function wireApp() {
       },
     }
   );
+  // Navigation uses the presence of app as its readiness guard. Do not
+  // publish an empty service while loading, or after a failed disk read.
+  await loadedApp.init();
+  app = loadedApp;
   initTypingView({ app, getAiSettings: () => aiSettings, aiReady });
   sync = createSyncController({
     app,
@@ -2523,9 +2561,8 @@ function wireApp() {
 
 async function startWeb(key, config) {
   platform.setKey(key);
+  await wireApp();
   hideGate();
-  wireApp();
-  await app.init();
   await startSync(key, config);
   essayText.value = loadEssayDraft();
   updateEssayCount();
@@ -2559,8 +2596,7 @@ async function requestPersistence() {
   }
 }
 async function startDesktop() {
-  wireApp();
-  await app.init();
+  await wireApp();
   essayText.value = loadEssayDraft();
   updateEssayCount();
   await initAi(); // the device key comes from Rust; before the bank is painted
@@ -2670,4 +2706,19 @@ async function boot() {
   globalThis.addEventListener("online", () => sync?.now());
 }
 
-boot();
+boot().catch((err) => {
+  console.error(err);
+  sync?.disable();
+  app = null;
+  document.querySelector(".rail").inert = true;
+  mainColumn.inert = true;
+  // A failed load must be visible before any app action can save over the
+  // unreadable file. Keep the error on the gate, above the inactive app.
+  const card = el("div", "gate-card");
+  card.append(
+    el("h1", "wordmark gate-mark", "lexis."),
+    el("p", "gate-error", `Couldn’t open lexis: ${String(err.message ?? err)}`)
+  );
+  $("gate").replaceChildren(card);
+  $("gate").hidden = false;
+});

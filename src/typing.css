@@ -720,7 +720,12 @@
   }
 
   .tt-result-head {
+    flex-wrap: wrap;
     gap: 28px;
+  }
+
+  .tt-actions {
+    flex-wrap: wrap;
   }
 
   .tt-big-value {

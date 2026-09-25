@@ -131,6 +131,25 @@ beforeEach(() => {
 
 // --- tests -------------------------------------------------------------
 
+test("cancelling an active request aborts it without retrying", async () => {
+  const { config, key } = await setup();
+  const abort = new AbortController();
+  let started;
+  const pendingRequest = new Promise((resolve) => { started = resolve; });
+  let requests = 0;
+  globalThis.fetch = (url, init) => new Promise((resolve, reject) => {
+    requests++;
+    init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    started();
+  });
+  const pending = syncOnce({ config, key, localBank: bank([word("demise")]), signal: abort.signal });
+  const cancelled = assert.rejects(pending, { name: "AbortError" });
+  await pendingRequest;
+  abort.abort();
+  await cancelled;
+  assert.equal(requests, 1, "intentional cancellation never enters the retry ladder");
+});
+
 test("a dropped connection is retried and the sync still succeeds", async () => {
   const { config, key } = await setup();
 
