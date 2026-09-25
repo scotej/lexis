@@ -494,8 +494,12 @@ $("today-more").addEventListener("click", async (event) => {
 
 let queue = [];
 let reviewed = 0;
+let reviewSaving = false;
 
 function startReview() {
+  // Keep the pending card and its disabled buttons when navigation returns
+  // here before a save finishes. Rebuilding it would accept a second grade.
+  if (reviewSaving) return;
   queue = app.dueWords();
   reviewed = 0;
   renderCard();
@@ -547,7 +551,6 @@ function renderCard() {
       back.append(syn);
     }
     const grades = el("div", "grade-row");
-    let grading = false;
     [
       ["again", "grade grade-again"],
       ["hard", "grade"],
@@ -557,8 +560,8 @@ function renderCard() {
       const btn = el("button", cls, g);
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (grading) return;
-        grading = true;
+        if (reviewSaving) return;
+        reviewSaving = true;
         grades.querySelectorAll("button").forEach((choice) => { choice.disabled = true; });
         mutate(async () => {
           try {
@@ -568,9 +571,10 @@ function renderCard() {
             reviewed += 1;
             renderCard();
           } catch (err) {
-            grading = false;
             grades.querySelectorAll("button").forEach((choice) => { choice.disabled = false; });
             throw err;
+          } finally {
+            reviewSaving = false;
           }
         });
       });
@@ -2490,8 +2494,8 @@ $("gate-setup").addEventListener("submit", async (e) => {
 
 /* ---- boot ---- */
 
-function wireApp() {
-  app = createApp(
+async function wireApp() {
+  const loadedApp = createApp(
     platform.storage,
     () => {
       sync?.schedule();
@@ -2524,6 +2528,10 @@ function wireApp() {
       },
     }
   );
+  // Navigation uses the presence of app as its readiness guard. Do not
+  // publish an empty service while loading, or after a failed disk read.
+  await loadedApp.init();
+  app = loadedApp;
   initTypingView({ app, getAiSettings: () => aiSettings, aiReady });
   sync = createSyncController({
     app,
@@ -2553,9 +2561,8 @@ function wireApp() {
 
 async function startWeb(key, config) {
   platform.setKey(key);
+  await wireApp();
   hideGate();
-  wireApp();
-  await app.init();
   await startSync(key, config);
   essayText.value = loadEssayDraft();
   updateEssayCount();
@@ -2589,8 +2596,7 @@ async function requestPersistence() {
   }
 }
 async function startDesktop() {
-  wireApp();
-  await app.init();
+  await wireApp();
   essayText.value = loadEssayDraft();
   updateEssayCount();
   await initAi(); // the device key comes from Rust; before the bank is painted
@@ -2702,6 +2708,10 @@ async function boot() {
 
 boot().catch((err) => {
   console.error(err);
+  sync?.disable();
+  app = null;
+  document.querySelector(".rail").inert = true;
+  mainColumn.inert = true;
   // A failed load must be visible before any app action can save over the
   // unreadable file. Keep the error on the gate, above the inactive app.
   const card = el("div", "gate-card");

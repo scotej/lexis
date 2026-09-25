@@ -291,14 +291,17 @@ export function createMirror({ fs, device, salt }) {
      * Writes this device's copy, unless it would be byte-for-byte the work we
      * already did. Returns whether anything was written.
      */
-    async push(key, bank, now = Date.now()) {
+    async push(key, bank, now = Date.now(), { signal } = {}) {
       // A pass already in flight when the folder is switched off would
       // otherwise recreate the very file the user just removed: `reconcile`
       // captured this object before `disable()` nulled the caller's reference.
       if (stopped) return false;
+      signal?.throwIfAborted();
       const shape = stable(bank);
       if (shape === lastPushed) return false;
       const envelope = await sealMirror(key, salt, bank, device, now);
+      if (stopped) return false;
+      signal?.throwIfAborted();
       await fs.write(peerFileName(device), JSON.stringify(envelope, null, 2));
       lastPushed = shape;
       lastWrittenAt = now;
