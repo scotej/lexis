@@ -232,6 +232,18 @@ function rankedWordNames(bank) {
   return [...bank.words].sort(compareSchedule).map((w) => w.word);
 }
 
+/** Cheap read-only check for the common case where opening Today needs no save. */
+export function todayListNeedsUpdate(bank, date) {
+  const list = bank.today;
+  if (!list || list.date !== date) return true;
+  const present = new Set(bank.words.map((word) => word.word));
+  if (list.words.some((word) => !present.has(word))) return true;
+  if (list.ticked.some((word) => !present.has(word))) return true;
+  if (list.words.length >= dailyTarget(bank)) return false;
+  const selected = new Set(list.words);
+  return bank.words.some((word) => !selected.has(word.word));
+}
+
 /**
  * Builds today's checklist if it's missing or stale.
  *
@@ -370,32 +382,36 @@ function cursorAfterCurrent(ranked, current) {
 
 export function todayView(bank) {
   const t = bank.today ?? { date: todayISO(), words: [], ticked: [] };
+  const words = new Map(bank.words.map((word) => [word.word, word]));
+  const selected = new Set(t.words);
+  const ticked = new Set(t.ticked);
+  const target = dailyTarget(bank);
   const items = t.words
-    .map((w) => find(bank, w))
+    .map((w) => words.get(w))
     .filter(Boolean)
     .map((w) => ({
       word: w.word,
       pos: w.senses[0]?.pos ?? "",
       def: w.senses[0]?.def ?? "",
-      ticked: t.ticked.includes(w.word),
+      ticked: ticked.has(w.word),
     }));
-  const completedToday = t.ticked.filter((word) => Boolean(find(bank, word))).length;
+  const completedToday = t.ticked.filter((word) => words.has(word)).length;
   const nextBatchSize = Math.min(
-    dailyTarget(bank),
-    bank.words.filter((word) => !t.ticked.includes(word.word)).length
+    target,
+    bank.words.filter((word) => !ticked.has(word.word)).length
   );
   const remaining = items.filter((i) => !i.ticked).length;
   return {
     date: t.date,
     items,
     remaining,
-    target: dailyTarget(bank),
+    target,
     completed_today: completedToday,
     next_batch_size: nextBatchSize,
     can_expand: remaining === 0 && nextBatchSize > 0,
     can_refresh:
-      t.words.length > dailyTarget(bank) ||
-      bank.words.some((word) => !t.words.includes(word.word)),
+      t.words.length > target ||
+      bank.words.some((word) => !selected.has(word.word)),
   };
 }
 

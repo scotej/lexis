@@ -241,6 +241,46 @@ test("a reset throws away work in flight for the settings that changed", async (
   assert.equal(queue.state().ready, 0, "passages for the old bank must not land");
 });
 
+test("an old batch cannot clear the newer batch's in-flight state", async () => {
+  const pending = [];
+  const queue = createPrefetcher({
+    produce: () => new Promise((resolve) => pending.push(resolve)),
+    size: 2,
+  });
+  queue.prime();
+  await settle();
+  queue.reset();
+  queue.prime();
+  await settle();
+
+  pending[0](["stale"]);
+  await settle();
+  assert.equal(queue.state().filling, true, "the replacement request is still running");
+  queue.prime();
+  await settle();
+  assert.equal(pending.length, 2, "a third request must not start over the replacement");
+
+  pending[1](["fresh one", "fresh two"]);
+  await settle();
+  assert.deepEqual(queue.peek(), ["fresh one", "fresh two"]);
+});
+
+test("taking a falsy item still announces the changed queue", async () => {
+  const ready = [];
+  const queue = createPrefetcher({
+    produce: () => [0, "", false, 42],
+    size: 4,
+    lowWater: 0,
+    onChange: (state) => ready.push(state.ready),
+  });
+  queue.prime();
+  await settle();
+  assert.equal(queue.take(), 0);
+  assert.equal(queue.take(), "");
+  assert.equal(queue.take(), false);
+  assert.deepEqual(ready.slice(-3), [3, 2, 1]);
+});
+
 test("a stopped queue does nothing further", async () => {
   const clock = fakeClock();
   let attempts = 0;

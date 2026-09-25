@@ -74,15 +74,19 @@ export function createDesktopPlatform() {
     storage: {
       async load() {
         const json = await invoke("load_bank");
-        if (!json) return null;
+        if (json == null) return null;
+        let bank;
         try {
-          return JSON.parse(json);
+          bank = JSON.parse(json);
         } catch {
-          // A corrupt file shouldn't wedge the app; start clean rather than
-          // refusing to open. The old file stays on disk until the next save.
-          console.error("bank.json is not valid JSON — starting empty");
-          return null;
+          // Treating a damaged file as an empty bank would let the first edit
+          // overwrite it. Leave the file available for repair or recovery.
+          throw new Error("bank.json is not valid JSON; the file was left untouched.");
         }
+        if (!bank || typeof bank !== "object" || !Array.isArray(bank.words)) {
+          throw new Error("bank.json has no valid words list; the file was left untouched.");
+        }
+        return bank;
       },
       async save(bank) {
         await invoke("save_bank", { json: JSON.stringify(bank, null, 2) });

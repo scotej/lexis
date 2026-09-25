@@ -532,6 +532,31 @@ test("a failed save leaves no in-memory partial multi-word addition", async () =
   assert.equal(storage.saves, 0);
 });
 
+test("failed saves leave deletion, Today, tick and grade state unchanged", async () => {
+  const actions = [
+    ["deletion", (app) => app.deleteWord("alpha")],
+    ["Today list", (app) => app.todayList()],
+    ["tick", (app) => app.tickWord("alpha", true)],
+    ["grade", (app) => app.gradeWord("alpha", "good")],
+  ];
+  for (const [name, action] of actions) {
+    const storage = new MemoryStorage(essayBank());
+    let changes = 0;
+    const app = createApp(storage, () => changes++);
+    await app.init();
+    const before = structuredClone(app.getBank());
+    storage.failNext = true;
+
+    await assert.rejects(() => action(app), /save failed/, name);
+    assert.deepEqual(app.getBank(), before, `${name} must not change memory after a failed save`);
+    assert.equal(changes, 0, `${name} must not report an unsaved change`);
+
+    await action(app);
+    assert.notDeepEqual(app.getBank(), before, `${name} can still be retried`);
+    assert.equal(storage.saves, 1, `${name} saved once on retry`);
+  }
+});
+
 test("overlapping add requests preserve request order without blocking unrelated mutations", async () => {
   const initial = bankModel.emptyBank();
   initial.words.push(entry("alpha", todayISO()));
