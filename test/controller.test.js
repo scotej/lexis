@@ -215,3 +215,206 @@ test("a fatal error is not put on the fast-retry ladder", async () => {
     controller.disable();
   }
 });
+
+test("a pass finishing after disable cannot apply its old result", async () => {
+  const { key, salt } = await createVault({ password: PASSWORD, ...CONFIG });
+  const config = { ...CONFIG, salt };
+  const app = fakeApp(bank([]));
+  let merges = 0;
+  const merge = app.mergeBank;
+  app.mergeBank = async (next) => {
+    merges++;
+    return merge(next);
+  };
+  const statuses = [];
+  const controller = createSyncController({ app, onStatus: (s) => statuses.push(s) });
+  let releaseRead;
+  let readStarted;
+  let writes = 0;
+  const started = new Promise((resolve) => (readStarted = resolve));
+  globalThis.fetch = (url, init) => {
+    if (init?.method === "PUT") writes++;
+    if (new URL(url).pathname === `${repoRoot}/contents/${PATH}` && !releaseRead) {
+      return new Promise((resolve) => {
+        releaseRead = () => resolve(baseFetch(url, init));
+        readStarted();
+      });
+    }
+    return baseFetch(url, init);
+  };
+
+  try {
+    controller.enable(key, config);
+    const inFlight = controller.now();
+    await started;
+    controller.disable();
+    releaseRead();
+    await inFlight;
+
+    assert.equal(merges, 0, "the disabled account's bank was not applied");
+    assert.equal(writes, 0, "disconnect must prevent a pending read from starting a write");
+    assert.equal(statuses.at(-1).text, "sync off", "late status did not overwrite disable");
+  } finally {
+    controller.disable();
+  }
+});
+
+test("switching sync while a pass is pending queues a pass for the new settings", async () => {
+  const { key, salt } = await createVault({ password: PASSWORD, ...CONFIG });
+  const config = { ...CONFIG, salt };
+  const app = fakeApp(bank([]));
+  let merges = 0;
+  const merge = app.mergeBank;
+  app.mergeBank = async (next) => {
+    merges++;
+    return merge(next);
+  };
+  const controller = createSyncController({ app });
+  let releaseRead;
+  let readStarted;
+  let reads = 0;
+  const tokens = [];
+  const started = new Promise((resolve) => (readStarted = resolve));
+  globalThis.fetch = (url, init) => {
+    if (new URL(url).pathname === `${repoRoot}/contents/${PATH}`) {
+      reads++;
+      tokens.push(init.headers.Authorization);
+      if (reads === 1) {
+        return new Promise((resolve) => {
+          releaseRead = () => resolve(baseFetch(url, init));
+          readStarted();
+        });
+      }
+    }
+    return baseFetch(url, init);
+  };
+
+  try {
+    controller.enable(key, config);
+    const inFlight = controller.now();
+    await started;
+    controller.enable(key, { ...config, token: "github_pat_replacement" });
+    releaseRead();
+    await inFlight;
+
+    assert.ok(reads >= 2, "a fresh read followed the pending pass");
+    assert.ok(tokens.includes("Bearer github_pat_replacement"), "the fresh pass used the replacement settings");
+    assert.equal(merges, 1, "only the replacement pass applied to the bank");
+  } finally {
+    controller.disable();
+  }
+});
+
+test("turning off a folder supersedes a pass that read from it", async () => {
+  const { key, salt } = await createVault({ password: PASSWORD, ...CONFIG });
+  const config = { ...CONFIG, salt };
+  const app = fakeApp(bank([]));
+  let merges = 0;
+  const merge = app.mergeBank;
+  app.mergeBank = async (next) => {
+    merges++;
+    return merge(next);
+  };
+  const oldMirror = {
+    async pull() { return { peers: [], conflicts: [], stale: [], unreadable: [] }; },
+    async push() { return false; },
+    stop() {},
+  };
+  const controller = createSyncController({ app });
+  let releaseRead;
+  let readStarted;
+  let reads = 0;
+  const started = new Promise((resolve) => (readStarted = resolve));
+  globalThis.fetch = (url, init) => {
+    if (new URL(url).pathname === `${repoRoot}/contents/${PATH}`) {
+      reads++;
+      if (reads === 1) {
+        return new Promise((resolve) => {
+          releaseRead = () => resolve(baseFetch(url, init));
+          readStarted();
+        });
+      }
+    }
+    return baseFetch(url, init);
+  };
+
+  try {
+    controller.enable(key, config, oldMirror);
+    const inFlight = controller.now();
+    await started;
+    controller.setMirror(null);
+    releaseRead();
+    await inFlight;
+
+    assert.ok(reads >= 2, "a new pass ran without the retired folder");
+    assert.equal(merges, 1, "the old folder pass did not apply");
+  } finally {
+    controller.disable();
+  }
+});
+
+
+test("disconnect cancels a merge waiting behind a local save", async () => {
+  const { createApp } = await import("../src/core/app.js");
+  const { createVault } = await import("../src/core/vault.js");
+  const { key, salt } = await createVault({ password: PASSWORD, ...CONFIG });
+  let saved = bank([word("local")]);
+  let releaseSave;
+  let saveStarted;
+  const saving = new Promise((resolve) => { saveStarted = resolve; });
+  const saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  let deferSave = false;
+  const app = createApp({
+    load: async () => structuredClone(saved),
+    save: async (next) => {
+      if (deferSave) { saveStarted(); await saveGate; }
+      saved = structuredClone(next);
+    },
+  });
+  await app.init();
+  let releasePull;
+  let pullStarted;
+  const pulling = new Promise((resolve) => { pullStarted = resolve; });
+  const pullGate = new Promise((resolve) => { releasePull = resolve; });
+  const mirror = {
+    async pull() {
+      pullStarted();
+      await pullGate;
+      return { peers: [{ bank: bank([word("remote")]) }], conflicts: [], stale: [], unreadable: [] };
+    },
+    async push() { return true; },
+    stop() {},
+  };
+  let mergeQueued;
+  const queued = new Promise((resolve) => { mergeQueued = resolve; });
+  const originalMerge = app.mergeBank;
+  app.mergeBank = (...args) => {
+    const result = originalMerge(...args);
+    mergeQueued();
+    return result;
+  };
+  const controller = createSyncController({ app });
+  let edit;
+  let syncing;
+  try {
+    controller.enable(key, { ...CONFIG, salt }, mirror);
+    syncing = controller.now();
+    await pulling;
+    deferSave = true;
+    edit = app.gradeWord("local", "good");
+    await saving;
+    releasePull();
+    await queued;
+    controller.disable();
+    releaseSave();
+    await Promise.all([edit, syncing]);
+    assert.deepEqual(app.listWords().map((entry) => entry.word), ["local"]);
+    assert.deepEqual(saved.words.map((entry) => entry.word), ["local"]);
+    assert.equal(saved.words[0].srs.reps, 1, "the user's pending grade still commits");
+  } finally {
+    controller.disable();
+    releasePull();
+    releaseSave();
+    await Promise.all([edit, syncing]);
+  }
+});

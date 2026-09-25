@@ -136,14 +136,16 @@ async function fetchWithTimeout(url, init) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), net.timeoutMs);
   const outer = init.signal;
+  const abort = () => ctrl.abort();
   if (outer) {
     if (outer.aborted) ctrl.abort();
-    else outer.addEventListener("abort", () => ctrl.abort(), { once: true });
+    else outer.addEventListener("abort", abort, { once: true });
   }
   try {
     return await fetch(url, { ...init, signal: ctrl.signal });
   } finally {
     clearTimeout(timer);
+    outer?.removeEventListener("abort", abort);
   }
 }
 
@@ -159,11 +161,13 @@ async function ghFetch(url, token, init = {}) {
   const merged = { ...init, headers: { ...headers(token), ...(init.headers ?? {}) } };
 
   for (let attempt = 1; attempt <= net.retries; attempt++) {
+    init.signal?.throwIfAborted();
     const last = attempt >= net.retries;
     let resp;
     try {
       resp = await fetchWithTimeout(url, merged);
     } catch (err) {
+      init.signal?.throwIfAborted();
       // fetch() rejects with TypeError on a network drop and AbortError when
       // our timeout fires; both mean "try again in a moment".
       if (last) {
@@ -178,6 +182,7 @@ async function ghFetch(url, token, init = {}) {
       continue;
     }
 
+    init.signal?.throwIfAborted();
     if (isRetryableStatus(resp.status) || isRateLimited(resp)) {
       const message = isRateLimited(resp)
         ? "GitHub is rate-limiting requests on this network."
@@ -197,11 +202,11 @@ async function ghFetch(url, token, init = {}) {
 }
 
 /** Reads the remote envelope. Returns `null` content when the file doesn't exist yet. */
-export async function fetchRemote({ token, owner, repo, path }) {
+export async function fetchRemote({ token, owner, repo, path }, { signal } = {}) {
   const url = `${API}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
   // `cache: no-store` matters: a stale 200 from the HTTP cache would make us
   // write against an old SHA and 409 forever.
-  const resp = await ghFetch(url, token, { cache: "no-store" });
+  const resp = await ghFetch(url, token, { cache: "no-store", signal });
   if (resp.status === 404) return { envelope: null, sha: null };
   if (!resp.ok) throw new Error(describeError(resp.status, await resp.text().catch(() => "")));
   const json = await resp.json();
@@ -212,7 +217,7 @@ export async function fetchRemote({ token, owner, repo, path }) {
   // threshold. The blob endpoint has no such limit.
   let raw = json.content ?? "";
   if (json.encoding !== "base64" || !raw.trim()) {
-    raw = await fetchBlob(json.git_url, token);
+    raw = await fetchBlob(json.git_url, token, signal);
   }
 
   let envelope = null;
@@ -224,9 +229,9 @@ export async function fetchRemote({ token, owner, repo, path }) {
   return { envelope, sha: json.sha };
 }
 
-async function fetchBlob(gitUrl, token) {
+async function fetchBlob(gitUrl, token, signal) {
   if (!gitUrl) throw new Error("The synced file is too large to read and has no blob link.");
-  const resp = await ghFetch(gitUrl, token, { cache: "no-store" });
+  const resp = await ghFetch(gitUrl, token, { cache: "no-store", signal });
   if (!resp.ok) throw new Error(describeError(resp.status, await resp.text().catch(() => "")));
   const blob = await resp.json();
   if (blob.encoding !== "base64") {
@@ -235,7 +240,7 @@ async function fetchBlob(gitUrl, token) {
   return blob.content ?? "";
 }
 
-async function putRemote({ token, owner, repo, path }, envelope, sha, message) {
+async function putRemote({ token, owner, repo, path }, envelope, sha, message, { signal } = {}) {
   const url = `${API}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
   const body = {
     message,
@@ -244,6 +249,7 @@ async function putRemote({ token, owner, repo, path }, envelope, sha, message) {
   if (sha) body.sha = sha;
   const resp = await ghFetch(url, token, {
     method: "PUT",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -331,14 +337,17 @@ export async function syncOnce({
   localBank,
   onStatus = () => {},
   onRemote = () => {},
+  signal,
 }) {
   const MAX_ATTEMPTS = 3;
   let lastMerged = migrate(localBank);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    signal?.throwIfAborted();
     onStatus(attempt === 1 ? "syncing…" : `retrying (${attempt})…`);
 
-    const { envelope, sha } = await fetchRemote(config);
+    const { envelope, sha } = await fetchRemote(config, { signal });
+    signal?.throwIfAborted();
 
     let remoteBank = null;
     if (envelope) {
@@ -355,6 +364,7 @@ export async function syncOnce({
       }
     }
 
+    signal?.throwIfAborted();
     if (remoteBank) onRemote(remoteBank, lastMerged);
 
     const merged = remoteBank
@@ -374,12 +384,15 @@ export async function syncOnce({
 
     const salt = envelope?.kdf?.salt ?? config.salt;
     const payload = await encryptJSON(key, merged);
+    signal?.throwIfAborted();
     const result = await putRemote(
       config,
       makeEnvelope(salt, payload),
       sha,
-      `lexis: sync ${merged.words.length} word${merged.words.length === 1 ? "" : "s"}`
+      `lexis: sync ${merged.words.length} word${merged.words.length === 1 ? "" : "s"}`,
+      { signal }
     );
+    signal?.throwIfAborted();
 
     if (!result.conflict) {
       onStatus("synced");

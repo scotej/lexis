@@ -528,6 +528,27 @@ test("a retired channel refuses to write, so switching the folder off sticks", a
   assert.deepEqual(await me.retire(["bank.bbbb.lexis.sync-conflict-1-2-3.json"]), []);
 });
 
+test("stopping a folder while encryption is pending prevents its write", async () => {
+  const folder = memoryFolder();
+  const me = createMirror({ fs: folder.fs, device: "aaaa", salt: SALT });
+  const pending = me.push(KEY, bank([word("demise")]));
+  me.stop();
+  assert.equal(await pending, false);
+  assert.deepEqual(names(folder), []);
+});
+
+test("cancelling one pass does not retire a folder reused by the next pass", async () => {
+  const folder = memoryFolder();
+  const me = createMirror({ fs: folder.fs, device: "aaaa", salt: SALT });
+  const abort = new AbortController();
+  const pending = me.push(KEY, bank([word("demise")]), undefined, { signal: abort.signal });
+  abort.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.deepEqual(names(folder), []);
+  assert.equal(await me.push(KEY, bank([word("elegy")])), true);
+  assert.deepEqual(names(folder), [peerFileName("aaaa")]);
+});
+
 /* ---- carrying the same envelope by hand ---- */
 
 const { absorbImports, IMPORTED } = await import("../src/core/reconcile.js");
