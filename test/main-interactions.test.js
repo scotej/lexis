@@ -81,6 +81,12 @@ test("a review card accepts one grade while saving, and lookup drops a stale ans
   let failSave;
   blockSave = new Promise((resolve, reject) => { failSave = reject; });
   grades[2].click(); // good
+  // Revisiting Review during the save must not create another live copy.
+  document.querySelector('[data-view="bank"]').click();
+  document.querySelector('[data-view="review"]').click();
+  document.querySelector(".review-stage").click();
+  const revisited = [...document.querySelectorAll(".grade-row button")];
+  const reentryBlocked = revisited.every((button) => button.disabled);
   grades[3].click(); // a second click before the first save finishes
   await until(() => saveCalls === 1);
   assert.ok(grades.every((button) => button.disabled));
@@ -93,6 +99,7 @@ test("a review card accepts one grade while saving, and lookup drops a stale ans
   assert.equal(saveCalls, 2);
   assert.equal(stored.words[0].srs.reps, 1);
   assert.equal(Object.keys(stored.words[0].review_events).length, 1);
+  assert.ok(reentryBlocked, "returning to Review must keep the pending card disabled");
 
   document.getElementById("rail-lookup").click();
   const input = document.getElementById("lookup-input");

@@ -442,8 +442,11 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     },
 
     /** Merges a completed network sync against the latest queued local state. */
-    async mergeBank(next) {
+    async mergeBank(next, { signal } = {}) {
       return enqueueMutation(async () => {
+        // A sync can be cancelled while waiting behind a local write.
+        // Recheck inside the queue, before any of its data reaches storage.
+        signal?.throwIfAborted();
         const merged = mergeBanks(bank, next);
         await storage.save(merged);
         bank = merged;

@@ -49,6 +49,7 @@ export function createSyncController({
   let backoff = 0;
   let lastError = null;
   let generation = 0;
+  let activePass = null;
 
   function status(text, kind = "idle") {
     onStatus({ text, kind, enabled: Boolean(key) });
@@ -86,6 +87,9 @@ export function createSyncController({
     const passKey = key;
     const passConfig = config;
     const passMirror = mirror;
+    const abort = new AbortController();
+    activePass = abort;
+    const { signal } = abort;
     let outcome = null;
     try {
       const localBank = await app.getBankSnapshot();
@@ -95,6 +99,7 @@ export function createSyncController({
         key: passKey,
         localBank,
         mirror: passMirror,
+        signal,
         onStatus: (t) => {
           if (mine === generation) status(t, "busy");
         },
@@ -108,7 +113,8 @@ export function createSyncController({
       // means a word added mid-flight isn't discarded by the swap. The merge is
       // idempotent, so this costs nothing when nothing changed; any edit it
       // picks up has already queued its own push via schedule().
-      const bank = await app.mergeBank(outcome.bank);
+      const bank = await app.mergeBank(outcome.bank, { signal });
+      if (mine !== generation) return;
 
       // Only now — with the merged bank saved locally *and* written back to
       // our own file in the folder — is a Syncthing conflict copy safe to
@@ -149,6 +155,8 @@ export function createSyncController({
         // fast won't help, so leave it to the poll or the user.
         status(String(err.message ?? err), "error");
       }
+    } finally {
+      if (activePass === abort) activePass = null;
     }
   }
 
@@ -212,6 +220,7 @@ export function createSyncController({
 
     enable(k, cfg, m = null) {
       generation++;
+      activePass?.abort();
       key = k;
       config = cfg;
       if (mirror && mirror !== m) mirror.stop();
@@ -227,7 +236,10 @@ export function createSyncController({
 
     /** Turns the folder on or off without disturbing the GitHub channel. */
     setMirror(m) {
-      if (mirror !== m) generation++;
+      if (mirror !== m) {
+        generation++;
+        activePass?.abort();
+      }
       // Retire the outgoing channel so a pass still in flight cannot write to
       // a folder the user has just left.
       if (mirror && mirror !== m) mirror.stop();
@@ -238,6 +250,7 @@ export function createSyncController({
 
     disable() {
       generation++;
+      activePass?.abort();
       key = null;
       config = null;
       mirror?.stop();

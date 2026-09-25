@@ -51,7 +51,8 @@ export const IMPORTED = "an imported file";
  * `bank`. The caller removes them *after* saving `bank` durably — never
  * before, so the data always exists somewhere else first.
  */
-export async function reconcile({ config, key, localBank, mirror, onStatus = () => {} }) {
+export async function reconcile({ config, key, localBank, mirror, signal, onStatus = () => {} }) {
+  signal?.throwIfAborted();
   let bank = migrate(localBank);
   const conflicts = [];
   const notes = [];
@@ -63,6 +64,7 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
     onStatus("reading the folder…");
     try {
       const { peers, conflicts: copies, stale, unreadable } = await mirror.pull(key);
+      signal?.throwIfAborted();
 
       for (const peer of peers) {
         conflicts.push(...detectConflicts(bank, peer.bank, { mine: HERE, theirs: FOLDER }));
@@ -88,6 +90,7 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
       }
       for (const u of unreadable) notes.push(`${u.name} could not be read (${u.reason}).`);
     } catch (err) {
+      signal?.throwIfAborted();
       mirrorError = err;
       notes.push(`The Syncthing folder could not be read (${String(err?.message ?? err)}).`);
     }
@@ -100,6 +103,7 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
       config,
       key,
       localBank: bank,
+      signal,
       onStatus,
       onRemote: (remoteBank, mineBank) => {
         conflicts.push(...detectConflicts(mineBank, remoteBank, { mine: HERE, theirs: GITHUB }));
@@ -108,15 +112,18 @@ export async function reconcile({ config, key, localBank, mirror, onStatus = () 
     bank = result.bank;
     pushed = result.pushed;
   } catch (err) {
+    signal?.throwIfAborted();
     // Held, not thrown: the folder still needs writing, and the caller still
     // needs the merged bank. The controller rethrows this once both are done.
     error = err;
   }
 
+  signal?.throwIfAborted();
   if (mirror) {
     try {
-      mirrored = await mirror.push(key, bank);
+      mirrored = await mirror.push(key, bank, undefined, { signal });
     } catch (err) {
+      signal?.throwIfAborted();
       mirrorError ??= err;
       notes.push(`The Syncthing folder could not be written (${String(err?.message ?? err)}).`);
       retire.length = 0; // nothing was made durable there; keep the copies
