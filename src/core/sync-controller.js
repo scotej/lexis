@@ -48,6 +48,7 @@ export function createSyncController({
   let retryTimer = null;
   let backoff = 0;
   let lastError = null;
+  let generation = 0;
 
   function status(text, kind = "idle") {
     onStatus({ text, kind, enabled: Boolean(key) });
@@ -81,16 +82,26 @@ export function createSyncController({
   }
 
   async function pass() {
+    const mine = generation;
+    const passKey = key;
+    const passConfig = config;
+    const passMirror = mirror;
     let outcome = null;
     try {
       const localBank = await app.getBankSnapshot();
+      if (mine !== generation) return;
       outcome = await reconcile({
-        config,
-        key,
+        config: passConfig,
+        key: passKey,
         localBank,
-        mirror,
-        onStatus: (t) => status(t, "busy"),
+        mirror: passMirror,
+        onStatus: (t) => {
+          if (mine === generation) status(t, "busy");
+        },
       });
+      // A disabled or reconfigured sync may finish its network request later.
+      // Its result must not enter the current bank or overwrite the new status.
+      if (mine !== generation) return;
 
       // A sync takes a second or two, and the user keeps working during it.
       // Merging the result against the *current* bank rather than assigning it
@@ -102,7 +113,8 @@ export function createSyncController({
       // Only now — with the merged bank saved locally *and* written back to
       // our own file in the folder — is a Syncthing conflict copy safe to
       // remove. Two durable copies before the third goes.
-      if (mirror && outcome.retire.length) await mirror.retire(outcome.retire);
+      if (passMirror && outcome.retire.length) await passMirror.retire(outcome.retire);
+      if (mine !== generation) return;
 
       if (outcome.conflicts.length) onConflicts(outcome.conflicts);
       onNotes(outcome.notes);
@@ -118,6 +130,7 @@ export function createSyncController({
       backoff = 0;
       status(syncedLabel(outcome), "ok");
     } catch (err) {
+      if (mine !== generation) return;
       lastError = err;
       if (offline(err)) {
         // A transient network problem — schedule our own quick, backing-off
@@ -198,6 +211,7 @@ export function createSyncController({
     },
 
     enable(k, cfg, m = null) {
+      generation++;
       key = k;
       config = cfg;
       if (mirror && mirror !== m) mirror.stop();
@@ -208,18 +222,22 @@ export function createSyncController({
       clearInterval(poll);
       poll = setInterval(() => run(), POLL_MS);
       watchMirror();
+      if (running) queued = true;
     },
 
     /** Turns the folder on or off without disturbing the GitHub channel. */
     setMirror(m) {
+      if (mirror !== m) generation++;
       // Retire the outgoing channel so a pass still in flight cannot write to
       // a folder the user has just left.
       if (mirror && mirror !== m) mirror.stop();
       mirror = m;
       watchMirror();
+      if (running) queued = true;
     },
 
     disable() {
+      generation++;
       key = null;
       config = null;
       mirror?.stop();

@@ -92,8 +92,8 @@ export function createPrefetcher({
     inFlight = Promise.resolve()
       .then(() => produce(want))
       .then((batch) => {
-        inFlight = null;
         if (stopped || mine !== generation) return;
+        inFlight = null;
         // Only a missing item is dropped. Filtering on truthiness instead would
         // silently discard a legitimate 0 or "" and then report the batch as
         // short — a queue this generic has no business deciding which values
@@ -118,8 +118,8 @@ export function createPrefetcher({
         if (queue.length < size && !error) fill();
       })
       .catch((err) => {
-        inFlight = null;
         if (stopped || mine !== generation) return;
+        inFlight = null;
         failures++;
         error = err instanceof Error ? err : new Error(String(err));
         scheduleRetry();
@@ -135,10 +135,10 @@ export function createPrefetcher({
     /** The next ready item, or null. Taking one is what triggers the top-up. */
     take() {
       const item = queue.shift() ?? null;
-      if (item) announce();
+      if (item !== null) announce();
       // Clear a backoff on a successful take: the queue is being used, which is
       // the moment to try again rather than sit out the rest of a two-minute wait.
-      if (item && error && queue.length <= lowWater) {
+      if (item !== null && error && queue.length <= lowWater) {
         failures = Math.max(0, failures - 1);
         cancelRetry();
       }

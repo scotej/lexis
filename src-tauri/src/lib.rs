@@ -12,7 +12,7 @@ use tauri::{Emitter, Manager};
 #[tauri::command]
 fn load_bank(state: tauri::State<'_, Mutex<Store>>) -> Result<Option<String>, String> {
     let store = state.lock().map_err(|e| e.to_string())?;
-    Ok(store.load())
+    store.load()
 }
 
 #[tauri::command]

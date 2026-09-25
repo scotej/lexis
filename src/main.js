@@ -131,6 +131,9 @@ function switchView(name) {
   // visibly on the typing test, whose whole screen is one window high and
   // which was simply not there when you pressed “type”.
   mainColumn.scrollTop = 0;
+  // On narrow screens the document scrolls instead of the main column.
+  document.documentElement.scrollTop = 0;
+  document.body.scrollTop = 0;
   if (name === "bank") renderBank();
   if (name === "today") renderToday();
   if (name === "review") startReview();
@@ -444,13 +447,19 @@ function drawToday(view) {
     const tick = el("button", "tick");
     tick.setAttribute("aria-label", `mark ${item.word} as used`);
     tick.setAttribute("aria-pressed", String(item.ticked));
-    tick.addEventListener("click", () =>
+    tick.addEventListener("click", () => {
+      tick.disabled = true;
       mutate(async () => {
-        await app.tickWord(item.word, !item.ticked);
-        renderToday();
-        refreshCounts();
-      })
-    );
+        try {
+          await app.tickWord(item.word, !item.ticked);
+          await renderToday();
+          await refreshCounts();
+        } finally {
+          // A failed save keeps the original row on screen for a retry.
+          if (tick.isConnected) tick.disabled = false;
+        }
+      });
+    });
     row.append(tick, el("span", "today-word", item.word), el("span", "today-def", item.def));
     list.append(row);
   });
@@ -538,6 +547,7 @@ function renderCard() {
       back.append(syn);
     }
     const grades = el("div", "grade-row");
+    let grading = false;
     [
       ["again", "grade grade-again"],
       ["hard", "grade"],
@@ -547,12 +557,21 @@ function renderCard() {
       const btn = el("button", cls, g);
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
+        if (grading) return;
+        grading = true;
+        grades.querySelectorAll("button").forEach((choice) => { choice.disabled = true; });
         mutate(async () => {
-          await app.gradeWord(word.word, g);
-          queue.shift();
-          if (g === "again") queue.push(word); // Anki-style: lapses return this session
-          reviewed += 1;
-          renderCard();
+          try {
+            await app.gradeWord(word.word, g);
+            queue.shift();
+            if (g === "again") queue.push(word); // Anki-style: lapses return this session
+            reviewed += 1;
+            renderCard();
+          } catch (err) {
+            grading = false;
+            grades.querySelectorAll("button").forEach((choice) => { choice.disabled = false; });
+            throw err;
+          }
         });
       });
       grades.append(btn);
@@ -822,6 +841,14 @@ const lookupStatus = $("lookup-status");
 const lookupResult = $("lookup-result");
 let lookupSeq = 0; // a stale response must not overwrite a newer one
 
+lookupInput.addEventListener("input", () => {
+  // Changing the query withdraws the old result and any request still in flight.
+  lookupSeq++;
+  lookupResult.replaceChildren();
+  lookupStatus.hidden = true;
+  lookupStatus.classList.remove("error");
+});
+
 function openLookup() {
   // Same guard as the rail: on the web the gate may still be up.
   if (!app) return;
@@ -899,6 +926,7 @@ function renderLookupResult(word, dict) {
   } else {
     const add = el("button", "link-quiet", "add to bank");
     add.addEventListener("click", async () => {
+      const seq = lookupSeq;
       add.disabled = true;
       lookupStatus.hidden = false;
       lookupStatus.classList.remove("error");
@@ -910,12 +938,13 @@ function renderLookupResult(word, dict) {
         // on screen.
         const result = await app.addWord(word, {
           onProgress: (text) => {
-            lookupStatus.textContent = text;
+            if (seq === lookupSeq) lookupStatus.textContent = text;
           },
         });
         const stored = result.word;
         expandedWords.add(stored);
         await renderBank();
+        if (seq !== lookupSeq) return;
         lookupStatus.textContent = [
           stored === word
             ? `“${word}” is in your bank now`
@@ -926,6 +955,7 @@ function renderLookupResult(word, dict) {
         ].join(" · ");
         add.replaceWith(el("span", null, "in your bank"));
       } catch (err) {
+        if (seq !== lookupSeq) return;
         lookupStatus.textContent = String(err.message ?? err);
         lookupStatus.classList.add("error");
         add.disabled = false;
@@ -2670,4 +2700,15 @@ async function boot() {
   globalThis.addEventListener("online", () => sync?.now());
 }
 
-boot();
+boot().catch((err) => {
+  console.error(err);
+  // A failed load must be visible before any app action can save over the
+  // unreadable file. Keep the error on the gate, above the inactive app.
+  const card = el("div", "gate-card");
+  card.append(
+    el("h1", "wordmark gate-mark", "lexis."),
+    el("p", "gate-error", `Couldn’t open lexis: ${String(err.message ?? err)}`)
+  );
+  $("gate").replaceChildren(card);
+  $("gate").hidden = false;
+});

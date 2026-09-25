@@ -105,11 +105,6 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     return result;
   }
 
-  async function persist() {
-    await storage.save(bank);
-    onChange(bank);
-  }
-
   /** Save a candidate first, then expose it in memory only after success. */
   async function persistReplacement(next) {
     await storage.save(next);
@@ -674,10 +669,11 @@ export function createApp(storage, onChange = () => {}, services = {}) {
       // request order, not eventual save timing, decides which operation wins.
       markDeleteRequested(word);
       return enqueueMutation(async () => {
-        const entry = bankModel.find(bank, word);
-        if (entry) bank.activity_archive = archiveWordHistory(bank.activity_archive, entry);
-        bankModel.removeWord(bank, word);
-        await persist();
+        const next = cloneBank();
+        const entry = bankModel.find(next, word);
+        if (entry) next.activity_archive = archiveWordHistory(next.activity_archive, entry);
+        bankModel.removeWord(next, word);
+        await persistReplacement(next);
       });
     },
 
@@ -686,7 +682,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
         return enqueueMutation(async () => {
           // Only write when the list genuinely changed; this is called on every
           // count refresh, and persisting unconditionally would queue a sync.
-          if (bankModel.ensureTodayList(bank, todayISO())) await persist();
+          const today = todayISO();
+          if (!bankModel.todayListNeedsUpdate(bank, today)) return bankModel.todayView(bank);
+          const next = cloneBank();
+          if (bankModel.ensureTodayList(next, today)) await persistReplacement(next);
           return bankModel.todayView(bank);
         });
       }
@@ -774,11 +773,12 @@ export function createApp(storage, onChange = () => {}, services = {}) {
 
     async tickWord(word, ticked) {
       return enqueueMutation(async () => {
-        const before = reviewEventCount(bankModel.find(bank, word));
-        const view = bankModel.tick(bank, word, ticked, todayISO());
-        const entry = bankModel.find(bank, word);
+        const next = cloneBank();
+        const before = reviewEventCount(bankModel.find(next, word));
+        const view = bankModel.tick(next, word, ticked, todayISO());
+        const entry = bankModel.find(next, word);
         if (entry && reviewEventCount(entry) > before) markReviewHistoryCurrent(entry);
-        await persist();
+        await persistReplacement(next);
         return view;
       });
     },
@@ -790,9 +790,10 @@ export function createApp(storage, onChange = () => {}, services = {}) {
     async gradeWord(word, grade) {
       if (!isGrade(grade)) throw new Error("unknown grade");
       return enqueueMutation(async () => {
-        const entry = bankModel.grade(bank, word, grade, todayISO());
+        const next = cloneBank();
+        const entry = bankModel.grade(next, word, grade, todayISO());
         markReviewHistoryCurrent(entry);
-        await persist();
+        await persistReplacement(next);
         return entry;
       });
     },

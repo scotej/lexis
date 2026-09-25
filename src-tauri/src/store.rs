@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 /// The bank on disk: one JSON file in the app data directory.
@@ -16,8 +17,19 @@ impl Store {
         Store { path: dir.join("bank.json") }
     }
 
-    pub fn load(&self) -> Option<String> {
-        fs::read_to_string(&self.path).ok()
+    pub fn load(&self) -> Result<Option<String>, String> {
+        match fs::read_to_string(&self.path) {
+            Ok(json) => Ok(Some(json)),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                // A dangling symlink also reads as NotFound. It is not a first
+                // run: treating it as empty would replace the existing path.
+                match fs::symlink_metadata(&self.path) {
+                    Err(meta_err) if meta_err.kind() == ErrorKind::NotFound => Ok(None),
+                    _ => Err(format!("Could not read bank.json: {err}")),
+                }
+            }
+            Err(err) => Err(format!("Could not read bank.json: {err}")),
+        }
     }
 
     /// Writes via a temporary file and a rename, so an interrupted save (a
@@ -52,7 +64,7 @@ mod tests {
     #[test]
     fn load_returns_none_before_anything_is_saved() {
         let store = Store::new(tmpdir("empty"));
-        assert!(store.load().is_none());
+        assert!(store.load().unwrap().is_none());
     }
 
     #[test]
@@ -60,7 +72,15 @@ mod tests {
         let store = Store::new(tmpdir("roundtrip"));
         let json = r#"{"version":2,"words":[],"deleted":[]}"#;
         store.save(json).unwrap();
-        assert_eq!(store.load().unwrap(), json);
+        assert_eq!(store.load().unwrap().as_deref(), Some(json));
+    }
+
+    #[test]
+    fn unreadable_bank_is_an_error_instead_of_an_empty_first_run() {
+        let store = Store::new(tmpdir("unreadable"));
+        fs::write(store.path(), [0xff]).unwrap();
+        assert!(store.load().unwrap_err().contains("Could not read bank.json"));
+        assert_eq!(fs::read(store.path()).unwrap(), [0xff]);
     }
 
     #[test]
