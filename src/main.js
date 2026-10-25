@@ -5,6 +5,7 @@
 
 import { createApp } from "./core/app.js";
 import { installBankTools } from "./bank-tools.js";
+import { installBankSearch } from "./bank-search.js";
 import { preloadBankPdf } from "./core/pdf.js";
 import { fetchDefinition } from "./core/dict.js";
 import { createSyncController } from "./core/sync-controller.js";
@@ -286,12 +287,16 @@ const bankTools = installBankTools({
   onChange: () => { if (app) renderBank(); },
   savePdf: (bytes, filename) => platform.savePdf(bytes, filename),
 });
+const bankSearch = installBankSearch({
+  onChange: () => { if (app) renderBank(); },
+});
 // Warm local PDF assets while the app starts so its first export can work
 // after disconnecting. A failed preload is retried by the export action.
 preloadBankPdf().catch(() => {});
 
 async function renderBank() {
   const words = bankTools.displayWords();
+  const matches = bankSearch.filterWords(words);
   const liveWords = new Set(words.map((word) => word.word));
   for (const word of expandedWords) {
     if (!liveWords.has(word)) expandedWords.delete(word);
@@ -305,12 +310,13 @@ async function renderBank() {
   }
   const list = $("word-list");
   list.replaceChildren();
-  words.forEach((w) => list.append(entryNode(w)));
+  matches.forEach((w) => list.append(entryNode(w)));
   $("bank-empty").hidden = words.length > 0;
 
   const guide = $("guide-words");
-  if (words.length >= 2) {
-    const alpha = app.listWords("word-asc").map((w) => w.word);
+  if (matches.length >= 2) {
+    const names = new Set(matches.map((word) => word.word));
+    const alpha = app.listWords("word-asc").filter((w) => names.has(w.word)).map((w) => w.word);
     guide.textContent = `${alpha[0]} — ${alpha[alpha.length - 1]}`;
     guide.hidden = false;
   } else {
