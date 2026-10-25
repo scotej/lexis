@@ -426,6 +426,36 @@ main {
   margin-bottom: 6px;
 }
 
+.bank-search-tools {
+  margin-top: 20px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.bank-search-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 4px;
+}
+
+#bank-search {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 7px 0;
+  font: inherit;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  user-select: text;
+}
+
+#bank-search::placeholder { color: var(--faint); }
+#bank-search:focus { outline: none; border-bottom-color: var(--ink); }
+
 #add-input {
   width: 100%;
   font-family: var(--serif);

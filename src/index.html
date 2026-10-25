@@ -159,6 +159,14 @@
           <input id="add-input" type="text" placeholder="add words, e.g. deontic modality" spellcheck="false" aria-label="Add one or more words" />
         </form>
         <p id="add-status" class="add-status" role="status" hidden></p>
+        <div id="bank-search-tools" class="bank-search-tools" hidden>
+          <label for="bank-search">search bank</label>
+          <div class="bank-search-row">
+            <input id="bank-search" type="search" placeholder="words starting with…" autocomplete="off" spellcheck="false" aria-controls="word-list" aria-describedby="bank-search-status" />
+            <button id="bank-search-clear" class="link-quiet" type="button" hidden>clear search</button>
+          </div>
+          <p id="bank-search-status" class="add-status" role="status" hidden></p>
+        </div>
         <div id="word-list" class="word-list"></div>
         <p id="bank-empty" class="empty" hidden>
           No words yet. Add one or more above — lexis fetches each dictionary definition and suggests
