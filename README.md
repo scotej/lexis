@@ -24,7 +24,9 @@ could not find rather than throwing the whole list away with them. A word
 whose entry does nothing but name another word as the correct spelling is
 added under that word instead, and the line under the box says so. As the bank grows, sort it
 by date added, alphabetically, by due date, or by how much you've practised or
-used a word in essays.
+used a word in essays. **search bank** filters saved headwords as you type:
+`pr` shows words starting with `pr`, such as *pragmatic*. Matching ignores
+case; clear the search (or press `esc` in the box) to see the whole bank again.
 
 **PDF export.** In **bank**, choose **export PDF** to save every word and its
 complete stored entry: all meanings, definitions, examples, pronunciation,
