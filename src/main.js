@@ -8,6 +8,7 @@ import { installBankTools } from "./bank-tools.js";
 import { installBankSearch } from "./bank-search.js";
 import { preloadBankPdf } from "./core/pdf.js";
 import { fetchDefinition } from "./core/dict.js";
+import { installWordUpgrades } from "./word-upgrades.js";
 import { createSyncController } from "./core/sync-controller.js";
 import { absorbImports } from "./core/reconcile.js";
 import { isDesktop, createDesktopPlatform } from "./platform/desktop.js";
@@ -1004,6 +1005,15 @@ function renderLookupResult(word, dict) {
   lookupResult.append(meta);
   attachWordTools(word, meta);
 }
+
+installWordUpgrades({
+  onLookup(word) {
+    lookupInput.value = word;
+    lookupInput.dispatchEvent(new Event("input", { bubbles: true }));
+    openLookup();
+    $("lookup-form").requestSubmit();
+  },
+});
 
 /* ---- sync view ---- */
 
