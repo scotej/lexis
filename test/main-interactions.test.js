@@ -47,6 +47,9 @@ globalThis.__TAURI__ = {
 const lookups = new Map();
 globalThis.fetch = (url) => {
   const target = String(url);
+  if (target.startsWith("https://api.datamuse.com/")) {
+    return Promise.resolve(new Response(JSON.stringify([{ word: "beneficial", score: 38038, tags: ["f:3"] }]), { status: 200 }));
+  }
   if (!target.startsWith("https://api.dictionaryapi.dev/")) {
     return Promise.reject(new Error("offline test asset"));
   }
@@ -121,4 +124,22 @@ test("a review card accepts one grade while saving, and lookup drops a stale ans
   lookups.get("new")(dictionary("new"));
   await until(() => document.getElementById("lookup-result").textContent.includes("new definition"));
   assert.doesNotMatch(document.getElementById("lookup-result").textContent, /obsolete/);
+});
+
+test("a stronger-word suggestion opens quick lookup without adding the simple word", async () => {
+  const savesBefore = saveCalls;
+  const input = document.getElementById("upgrade-input");
+  input.value = "good";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  document.getElementById("upgrade-form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await until(() => Boolean(document.querySelector("#upgrade-results button")));
+  document.querySelector("#upgrade-results button").click();
+  await until(() => lookups.has("beneficial"));
+  lookups.get("beneficial")(dictionary("beneficial"));
+  await until(() => document.getElementById("lookup-result").textContent.includes("beneficial definition"));
+  assert.equal(document.getElementById("lookup").hidden, false);
+  assert.equal(document.getElementById("lookup-input").value, "beneficial");
+  assert.match(document.getElementById("lookup-result").textContent, /add to bank/);
+  assert.equal(saveCalls, savesBefore);
+  assert.equal(stored.words.some(word => word.word === "good" || word.word === "beneficial"), false);
 });

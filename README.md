@@ -65,6 +65,13 @@ ranked by an on-device scorer that favours the formal register — uncommon but
 usable words, Latinate endings, some length. They're suggestions for your
 writing, deliberately *not* added to the bank.
 
+**Stronger words.** Open **find a stronger word** in the bank, enter a simple
+word such as *good*, and choose from formal alternatives ranked for essays.
+This uses Datamuse's synonym list, without an AI key. Open a suggestion to
+check its dictionary definition, then add it if it fits; neither the original
+word nor the suggestions are saved automatically. Synonyms can differ in
+meaning, so the definition matters more than how impressive a word sounds.
+
 **Today.** Every day lexis picks a batch of words — ten by default, most
 overdue first — and asks you to work them into that day's writing. Ticking a
 word counts as a successful review. If you want a different selection,

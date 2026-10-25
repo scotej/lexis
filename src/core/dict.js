@@ -107,11 +107,16 @@ const synonymCache = createRequestCache({
   limit: DEFINITION_CACHE_LIMIT,
   ttlMs: DEFINITION_CACHE_TTL_MS,
 });
+const upgradeCache = createRequestCache({
+  limit: DEFINITION_CACHE_LIMIT,
+  ttlMs: DEFINITION_CACHE_TTL_MS,
+});
 
 /** Everything remembered from this session's lookups. Exported for tests. */
 export function clearLookupCaches() {
   definitionCache.clear();
   synonymCache.clear();
+  upgradeCache.clear();
   datamuseCache.clear();
 }
 
@@ -771,6 +776,53 @@ export async function fetchSynonyms(word) {
   const key = String(word ?? "").trim().toLowerCase();
   const ranked = await synonymCache.run(key, () => rankSynonyms(word));
   return ranked.map((row) => ({ ...row })); // see fetchDefinition: never share the stored copy
+}
+
+// Corpus frequency does not label register. These familiar casual expressions
+// of praise or criticism should never be offered as formal essay upgrades.
+const CASUAL_ALTERNATIVES = new Set([
+  "awesome", "bang-up", "bully", "cool", "corking", "cracking", "crummy",
+  "dandy", "fab", "funky", "groovy", "lousy", "nifty", "peachy", "slap-up",
+  "smashing", "super", "swell",
+]);
+
+/**
+ * Formal alternatives to a simple word, without saving the source word.
+ * Unlike the broader essay suggestions, this uses only Datamuse's synonym
+ * relation: a merely related word is not a useful replacement. Keep upstream
+ * relevance in the ranking, so an obscure peripheral sense cannot win simply
+ * by being rare. The score is a heuristic, not a claim that every sense is
+ * interchangeable.
+ */
+export async function fetchWordUpgrades(word) {
+  const key = String(word ?? "").trim().toLowerCase();
+  if (!/^[\p{L}'-]+$/u.test(key) || [...key].length > 40) {
+    throw new Error("type one word, up to 40 letters");
+  }
+  const ranked = await upgradeCache.run(key, async () => {
+    // Keep service failures visible here. A valid empty synonym list and a
+    // network failure deserve different messages, and failures must be retryable.
+    const rows = await getJSON(datamuseUrl("rel_syn", key));
+    if (!Array.isArray(rows)) throw new Error("the thesaurus returned an unreadable answer; try again");
+    const bestRelevance = Math.max(0, ...rows.map(row => Number.isFinite(row?.score) ? row.score : 0));
+    const seen = new Set([key]);
+    const candidates = [];
+    for (const row of rows) {
+      const candidate = typeof row?.word === "string" ? row.word.trim().toLowerCase() : "";
+      if (!/^[\p{L}'-]+$/u.test(candidate) || [...candidate].length > 40 || seen.has(candidate) || CASUAL_ALTERNATIVES.has(candidate)) continue;
+      seen.add(candidate);
+      const freq = parseFreq(Array.isArray(row.tags) ? row.tags.filter(tag => typeof tag === "string") : []);
+      // An unknown or extremely low frequency is a poor basis for practical
+      // essay vocabulary. The relevance floor also drops fringe senses and
+      // slang that appear at the tail of a word's synonym list.
+      if (!Number.isFinite(freq) || freq < 0.5 || !Number.isFinite(row.score) || row.score <= 0 || row.score < bestRelevance * 0.15) continue;
+      const formalScore = sophisticationScore(candidate, freq);
+      const score = formalScore + 3 * row.score / bestRelevance;
+      if (formalScore >= 2) candidates.push({ word: candidate, score });
+    }
+    return candidates.sort((a, b) => b.score - a.score || a.word.localeCompare(b.word)).slice(0, 8);
+  });
+  return ranked.map(row => ({ ...row }));
 }
 
 async function rankSynonyms(word) {

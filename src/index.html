@@ -155,6 +155,16 @@
           <p id="bank-order-status" class="add-status" role="status" hidden></p>
           <button id="bank-sort-cancel" class="link-quiet" type="button" hidden>cancel sorting</button>
         </div>
+        <details class="word-upgrades">
+          <summary>find a stronger word</summary>
+          <p id="upgrade-help" class="hint">Start with a simple word to find formal alternatives for your essay. Meanings can differ; check the definition before choosing. Uses Datamuse, without an AI key.</p>
+          <form id="upgrade-form" class="upgrade-form" autocomplete="off">
+            <input id="upgrade-input" type="text" placeholder="a simple word, e.g. good" spellcheck="false" aria-label="Word to improve" aria-describedby="upgrade-help" />
+            <button id="upgrade-find" class="button-primary" type="submit">suggest words</button>
+          </form>
+          <p id="upgrade-status" class="add-status" role="status" hidden></p>
+          <ul id="upgrade-results" class="upgrade-results" aria-label="Suggested alternatives"></ul>
+        </details>
         <form id="add-form" class="add-form" autocomplete="off">
           <input id="add-input" type="text" placeholder="add words, e.g. deontic modality" spellcheck="false" aria-label="Add one or more words" />
         </form>
