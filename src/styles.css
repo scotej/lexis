@@ -983,6 +983,57 @@ main {
   color: var(--faint);
 }
 
+/* ---- stronger words ---- */
+
+.word-upgrades {
+  margin: 12px 0 24px;
+}
+
+.word-upgrades summary {
+  width: fit-content;
+  color: var(--faint);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.word-upgrades .hint {
+  margin: 12px 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.upgrade-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.upgrade-form input {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 9px 0;
+  font-family: var(--serif);
+  font-size: 18px;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.upgrade-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  padding: 0;
+  margin: 14px 0 0;
+  list-style: none;
+}
+
+.upgrade-results .headword {
+  font-size: 18px;
+}
+
 /* ---- about ---- */
 
 .about-dialog {
