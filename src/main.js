@@ -126,6 +126,12 @@ function switchView(name) {
   document.querySelectorAll(".view").forEach((v) => {
     v.classList.toggle("active", v.id === `view-${name}`);
   });
+  // Safari/WKWebView does not always focus clicked buttons on macOS. The
+  // field from the previous view must not keep swallowing keyboard shortcuts
+  // after its view disappears.
+  if (document.activeElement?.closest?.(".view:not(.active)")) {
+    document.activeElement.blur();
+  }
   // Every view shares one scrolling column, so arriving at a short view from
   // halfway down a long one used to land below everything it contains — most
   // visibly on the typing test, whose whole screen is one window high and
@@ -218,63 +224,64 @@ function entryNode(word) {
 
   const body = el("div", "entry-body");
   body.hidden = !expandedWords.has(word.word);
-  word.senses.forEach((s, i) => body.append(senseNode(s, i)));
+  head.setAttribute("aria-expanded", String(!body.hidden));
+  // A collapsed bank needs only its headwords. Definitions, synonyms, source
+  // links and AI drawers can be thousands of hidden nodes in a mature bank;
+  // build them together on first expansion instead of at startup/every sort.
+  let bodyBuilt = false;
+  const ensureBody = () => {
+    if (bodyBuilt) return;
+    bodyBuilt = true;
+    word.senses.forEach((s, i) => body.append(senseNode(s, i)));
 
-  if (word.synonyms.length) {
-    const syn = el("p", "synonyms");
-    syn.append(el("span", "syn-label", "for essays"));
-    syn.append(document.createTextNode(word.synonyms.map((s) => s.word).join(" · ")));
-    syn.append(el("span", "syn-note", "suggestions only — not saved to your bank"));
-    body.append(syn);
-  }
+    if (word.synonyms.length) {
+      const syn = el("p", "synonyms");
+      syn.append(el("span", "syn-label", "for essays"));
+      syn.append(document.createTextNode(word.synonyms.map((s) => s.word).join(" · ")));
+      syn.append(el("span", "syn-note", "suggestions only — not saved to your bank"));
+      body.append(syn);
+    }
 
-  const meta = el("div", "entry-meta");
-  meta.append(
-    el(
-      "span",
-      null,
-      `${word.source} · practised ${word.times_used}× · essay uses ${word.essay_uses ?? 0}×`
-    )
-  );
-  const src = el("button", "link-quiet", "view definition");
-  src.addEventListener("click", () => platform.openUrl(word.source_url));
-  const clarification = word.clarification_url
-    ? el("button", "link-quiet", "view clarification")
-    : null;
-  clarification?.addEventListener("click", () => platform.openUrl(word.clarification_url));
-  const del = el("button", "link-quiet", "remove");
-  del.addEventListener("click", () =>
-    mutate(async () => {
-      await app.deleteWord(word.word);
-      expandedWords.delete(word.word);
-      renderBank();
-      refreshCounts();
-    })
-  );
-  meta.append(src);
-  if (clarification) meta.append(clarification);
-  meta.append(del);
-  body.append(meta);
-
-  // Built the first time the entry is opened, not once per row: a bank of
-  // several hundred words would otherwise carry thousands of nodes for
-  // drawers nobody has looked at.
-  let toolsBuilt = false;
-  const ensureWordTools = () => {
-    if (toolsBuilt) return;
-    toolsBuilt = true;
+    const meta = el("div", "entry-meta");
+    meta.append(
+      el(
+        "span",
+        null,
+        `${word.source} · practised ${word.times_used}× · essay uses ${word.essay_uses ?? 0}×`
+      )
+    );
+    const src = el("button", "link-quiet", "view definition");
+    src.addEventListener("click", () => platform.openUrl(word.source_url));
+    const clarification = word.clarification_url
+      ? el("button", "link-quiet", "view clarification")
+      : null;
+    clarification?.addEventListener("click", () => platform.openUrl(word.clarification_url));
+    const del = el("button", "link-quiet", "remove");
+    del.addEventListener("click", () =>
+      mutate(async () => {
+        await app.deleteWord(word.word);
+        expandedWords.delete(word.word);
+        renderBank();
+        refreshCounts();
+      })
+    );
+    meta.append(src);
+    if (clarification) meta.append(clarification);
+    meta.append(del);
+    body.append(meta);
     attachWordTools(word.word, meta);
   };
-  if (!body.hidden) ensureWordTools();
+  if (!body.hidden) ensureBody();
   wrap.append(body);
 
   head.addEventListener("click", () => {
     body.hidden = !body.hidden;
+    head.setAttribute("aria-expanded", String(!body.hidden));
     if (body.hidden) {
       expandedWords.delete(word.word);
     } else {
       expandedWords.add(word.word);
-      ensureWordTools();
+      ensureBody();
     }
   });
   return wrap;
@@ -844,6 +851,7 @@ const lookupInput = $("lookup-input");
 const lookupStatus = $("lookup-status");
 const lookupResult = $("lookup-result");
 let lookupSeq = 0; // a stale response must not overwrite a newer one
+let lookupReturnFocus = null;
 
 lookupInput.addEventListener("input", () => {
   // Changing the query withdraws the old result and any request still in flight.
@@ -856,29 +864,49 @@ lookupInput.addEventListener("input", () => {
 function openLookup() {
   // Same guard as the rail: on the web the gate may still be up.
   if (!app) return;
+  if (lookupBox.hidden) lookupReturnFocus = document.activeElement;
   lookupBox.hidden = false;
-  lookupInput.select();
   lookupInput.focus();
+  lookupInput.select();
 }
 
+function closeLookup() {
+  lookupBox.hidden = true;
+  // Hiding a focused overlay otherwise leaves its input owning “/” and the
+  // view shortcuts. Restore the editor/button that opened it when possible.
+  if (lookupBox.contains(document.activeElement)) document.activeElement.blur();
+  if (lookupReturnFocus?.isConnected &&
+      !lookupReturnFocus.closest?.("[hidden], .view:not(.active)")) {
+    lookupReturnFocus.focus();
+  }
+  lookupReturnFocus = null;
+}
+
+$("rail-lookup").setAttribute("aria-keyshortcuts", "/ Meta+K Control+K");
 $("rail-lookup").addEventListener("click", openLookup);
 
 lookupBox.addEventListener("click", (e) => {
-  if (e.target === lookupBox) lookupBox.hidden = true;
+  if (e.target === lookupBox) closeLookup();
 });
 
 document.addEventListener("keydown", (e) => {
-  if (aboutDialog.open) return;
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  if (document.querySelector("dialog[open]")) return;
   const typing = isEditingTarget();
-  // Bare “/” (the classic search key), or ⌘K/Ctrl+K even while typing.
-  if (
-    (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) ||
-    (e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey) && !e.altKey)
-  ) {
+  // The Bank deliberately focuses this empty field at launch. “/” cannot be
+  // part of a bank word, so it can still open lookup there; drafts and words
+  // already being typed keep every keystroke.
+  const emptyAddField = document.activeElement === addInput && addInput.value === "";
+  const slash = e.key === "/" && (!typing || emptyAddField) &&
+    !e.metaKey && !e.ctrlKey && !e.altKey;
+  const commandK = e.key.toLowerCase() === "k" && (e.metaKey || e.ctrlKey) &&
+    !e.altKey && !e.shiftKey;
+  if ((slash || commandK) && app) {
     e.preventDefault();
-    openLookup();
+    if (!e.repeat) openLookup();
   } else if (e.key === "Escape" && !lookupBox.hidden) {
-    lookupBox.hidden = true;
+    e.preventDefault();
+    closeLookup();
   }
 });
 
