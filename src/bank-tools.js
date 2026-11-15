@@ -58,7 +58,7 @@ export function installBankTools({ document = globalThis.document, getWords, get
       const byName = new Map(words.map(word => [word.word, word]));
       return cache.names.map(name => byName.get(name));
     }
-    if (!getAiSettings()?.key && words.length > 1) throw new Error('Add your OpenRouter key in settings → ai assist first.');
+    if (!getAiSettings()?.key && words.length > 1) throw new Error('Add your OpenAI or OpenRouter key in settings → ai assist first.');
     const result = await sortRelated(words, getAiSettings(), { signal: ctl.signal, onProgress: progress });
     ctl.signal.throwIfAborted();
     // Cache only a complete permutation, even if a future sorter changes.

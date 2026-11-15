@@ -556,7 +556,7 @@ function refreshAiQueue() {
 
 async function produceAiPassages(want) {
   const ai = context?.getAiSettings?.();
-  if (!ai?.key) throw new Error("Add an OpenRouter key in settings → ai assist.");
+  if (!ai?.key) throw new Error("Add an OpenAI or OpenRouter key in settings → ai assist.");
 
   const lengths = settings.quoteLengths.length ? settings.quoteLengths : ["medium"];
   const length = lengths[Math.floor(Math.random() * lengths.length)];
@@ -597,7 +597,7 @@ function modelName(model) {
   // Through the same normalizer the request itself uses, so a model pasted as
   // an openrouter.ai URL is credited under the name it was actually called by
   // rather than as a link.
-  const id = normalizeModel(model);
+  const id = normalizeModel(model, context?.getAiSettings?.());
   if (!id || id === "openrouter/auto") return "openrouter, automatic routing";
   return id;
 }
@@ -1616,7 +1616,7 @@ function renderStatusLine() {
 
     if (wantsAi()) {
       if (!context?.aiReady?.()) {
-        notes.push("AI passages need an OpenRouter key in settings → ai assist.");
+        notes.push("AI passages need an OpenAI or OpenRouter key in settings → ai assist.");
       } else if (aiState.error) {
         notes.push(
           `AI passages paused — ${String(aiState.error.message ?? aiState.error)}${retryNote()}`
@@ -1973,7 +1973,7 @@ function emptyPoolReason() {
   }
   if (settings.quoteSource === "ai") {
     if (!context?.aiReady?.()) {
-      return "AI passages need an OpenRouter key — add one in settings → ai assist, or set quotes back to the library.";
+      return "AI passages need an OpenAI or OpenRouter key — add one in settings → ai assist, or set quotes back to the library.";
     }
     if (aiState.error) {
       return `The model couldn’t write one: ${String(aiState.error.message ?? aiState.error)}`;

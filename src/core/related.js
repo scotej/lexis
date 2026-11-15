@@ -1,3 +1,4 @@
+import { aiProvider } from "./ai-provider.js";
 import { aiEmbedWords, aiGroupWordsByTheme } from './ai.js';
 
 const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
@@ -118,12 +119,12 @@ export async function relatedWords(words, settings, { signal, onProgress = () =>
       // The swap says itself in the progress line rather than in a note of
       // its own: a note here is replaced by that line before the interface
       // has painted either, which is how a method change goes unseen.
-      if (error?.status !== 402 || start > 0) throw error;
+      if (aiProvider(settings) !== "openrouter" || error?.status !== 402 || start > 0) throw error;
       return themedWords(words, settings, { signal, onProgress });
     }
     signal?.throwIfAborted();
     if (vectors.length && vectors[0].length !== batch[0].length) {
-      throw new Error('OpenRouter returned inconsistent embedding dimensions. Try again.');
+      throw new Error('The AI provider returned inconsistent embedding dimensions. Try again.');
     }
     vectors.push(...batch);
   }

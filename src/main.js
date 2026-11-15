@@ -3,6 +3,7 @@
  * app service, and to the host (desktop or browser) through a small adapter.
  */
 
+import { aiProvider, aiProviderName, defaultAiModel } from "./core/ai-provider.js";
 import { createApp } from "./core/app.js";
 import { installBankTools } from "./bank-tools.js";
 import { installBankSearch } from "./bank-search.js";
@@ -767,7 +768,7 @@ $("essay-ai-review").addEventListener("click", async () => {
   }
   if (!aiReady()) {
     out.append(
-      el("p", "empty", "Add your OpenRouter key in settings → ai assist first.")
+      el("p", "empty", "Add your OpenAI or OpenRouter key in settings → ai assist first.")
     );
     return;
   }
@@ -1815,6 +1816,7 @@ settingsForm.addEventListener("submit", async (e) => {
 
 let aiSettings = null; // decrypted in-memory copy: { key, model }
 let aiModels = null; // the catalogue, fetched lazily for suggestions
+let aiModelsKey = null; // credential owning the cached catalogue
 let aiModelsPromise = null; // the fetch in flight, so two askers share one request
 let aiKeyInfo = null; // the last balance OpenRouter gave us, or null for "not asked"
 let aiSeq = 0; // stale-response guard for the essay review
@@ -1833,6 +1835,7 @@ function keyLabel(info) {
  * dollar balance as whatever the student happens to think in.
  */
 function keySpend(info) {
+  if (info.usage == null) return "Billing and costs: platform.openai.com/usage";
   const spent = `US$${info.usage.toFixed(2)} spent`;
   if (info.remaining == null) return `${spent} · no limit set`;
   return `${spent} of US$${info.limit.toFixed(2)} · US$${info.remaining.toFixed(2)} left`;
@@ -1882,8 +1885,9 @@ function renderAiSettings() {
   $("ai-key-note").hidden = has;
   // The key field stays empty once saved; showing even a fragment invites copying.
   $("ai-key").value = "";
-  $("ai-key").placeholder = has ? "saved — type to replace" : "sk-or-v1-…";
+  $("ai-key").placeholder = has ? "saved — type to replace" : "sk-proj-… or sk-or-v1-…";
   $("ai-model").value = aiSettings?.model ?? "";
+  renderAiProviderHints();
   // Absent reads as on: settings sealed before the option existed are covered
   // by it rather than silently exempt from it.
   $("ai-strict-privacy").checked = aiSettings?.strictPrivacy !== false;
@@ -1907,10 +1911,14 @@ function renderAiFacts() {
 async function refreshAiFacts(force = false) {
   if (!aiReady()) return;
   if (aiKeyInfo && !force) return renderAiFacts();
+  const key = aiSettings.key;
   $("ai-key-spent").textContent = "checking…";
   try {
-    aiKeyInfo = await fetchKeyInfo(aiSettings.key);
+    const info = await fetchKeyInfo(key);
+    if (aiSettings?.key !== key) return;
+    aiKeyInfo = info;
   } catch (err) {
+    if (aiSettings?.key !== key) return;
     aiKeyInfo = null;
     renderAiFacts();
     $("ai-key-spent").textContent = String(err.message ?? err);
@@ -1937,24 +1945,57 @@ function openAiPanel() {
  * forgotten rather than cached, so the next attempt may still succeed.
  */
 function loadAiModels(key) {
+  if (aiModelsKey !== key) {
+    aiModelsKey = key;
+    aiModels = null;
+    aiModelsPromise = null;
+  }
   if (aiModels) return Promise.resolve(aiModels);
   if (!aiModelsPromise) {
-    aiModelsPromise = fetchModels(key)
+    const pending = fetchModels(key)
       .then((models) => {
-        aiModels = models;
+        if (aiModelsKey === key) aiModels = models;
         return models;
       })
       .finally(() => {
-        aiModelsPromise = null;
+        if (aiModelsPromise === pending) aiModelsPromise = null;
       });
+    aiModelsPromise = pending;
   }
   return aiModelsPromise;
 }
 
+/** The destination and privacy terms are visible before a key is saved. */
+function renderAiProviderHints() {
+  const key = $("ai-key").value.trim() || aiSettings?.key || "";
+  const openai = aiProvider(key) === "openai";
+  $("ai-provider-note").textContent = key
+    ? `Detected: ${aiProviderName(key)}. Requests go directly to ${openai ? "api.openai.com" : "openrouter.ai"}.`
+    : "OpenAI and OpenRouter keys are detected automatically.";
+  $("ai-model").placeholder = defaultAiModel(key);
+  $("ai-model-note").textContent = openai
+    ? "Use an OpenAI Chat Completions model ID. Leave blank for gpt-5.4-mini."
+    : "Any chat model OpenRouter offers. Leave blank for openrouter/auto.";
+  $("ai-router-privacy").hidden = openai;
+  $("ai-openai-privacy").hidden = !openai;
+  $("ai-refresh").textContent = openai ? "check key" : "refresh balance";
+}
+
+$("ai-key").addEventListener("input", () => {
+  const key = $("ai-key").value.trim() || aiSettings?.key || "";
+  // A replacement credential must not inherit the old provider's model.
+  if (aiProvider(key) !== aiProvider(aiSettings) &&
+      $("ai-model").value === (aiSettings?.model ?? "")) $("ai-model").value = "";
+  $("ai-model-list").replaceChildren();
+  renderAiProviderHints();
+});
+
 /** Fills the model datalist quietly; never an error worth showing. */
 async function refreshModelSuggestions() {
   try {
-    const models = await loadAiModels(aiSettings.key);
+    const key = aiSettings.key;
+    const models = await loadAiModels(key);
+    if (aiSettings?.key !== key || $("ai-key").value.trim()) return;
     const options = models.slice(0, 400).map((m) => {
       const opt = document.createElement("option");
       opt.value = m.id;
@@ -1979,7 +2020,8 @@ async function refreshModelSuggestions() {
  */
 async function modelObjection(key, model) {
   if (!model) return null; // blank is legitimate: openrouter/auto routes it
-  const wanted = normalizeModel(model);
+  const wanted = normalizeModel(model, key);
+  const name = aiProviderName(key);
   let models;
   try {
     models = await loadAiModels(key);
@@ -1992,8 +2034,8 @@ async function modelObjection(key, model) {
     .slice(0, 3)
     .map((m) => m.id);
   return near.length
-    ? `OpenRouter has no model called “${wanted}”. Did you mean ${near.join(", ")}?`
-    : `OpenRouter has no model called “${wanted}”. Pick one from the list, or leave it blank for automatic routing.`;
+    ? `${name} has no model called “${wanted}”. Did you mean ${near.join(", ")}?`
+    : `${name} has no model called “${wanted}”. Pick one from the list, or leave it blank for the default model.`;
 }
 
 $("ai-settings-form").addEventListener("submit", async (e) => {
@@ -2004,7 +2046,7 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
   const typedKey = $("ai-key").value.trim();
   const model = $("ai-model").value.trim();
   if (!typedKey && !aiReady()) {
-    showAiStatus("Paste your OpenRouter key first.", true);
+    showAiStatus("Paste your OpenAI or OpenRouter key first.", true);
     return;
   }
 
@@ -2022,7 +2064,13 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
       model,
       strictPrivacy: $("ai-strict-privacy").checked,
     });
+    const keyChanged = aiSettings?.key !== next.key;
     aiSettings = next;
+    if (keyChanged) {
+      resetAiSessionUsage();
+      aiWordCache.clear();
+      aiOpenDrawers.clear();
+    }
     bankTools.reset();
     aiKeyInfo = null; // a replaced key has its own balance
     // Prove the key works before celebrating it — but a verification failure
@@ -2034,7 +2082,7 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
       console.error(verifyErr);
       renderAiSettings();
       notifyTypingAiChanged(); // the key saved even though the balance did not answer
-      showAiStatus("Saved. Couldn’t reach OpenRouter to check the balance just now.");
+      showAiStatus(`Saved, but the key check failed: ${verifyErr.message ?? verifyErr}`, true);
       return;
     }
     aiKeyInfo = verified;
@@ -2042,7 +2090,8 @@ $("ai-settings-form").addEventListener("submit", async (e) => {
     // The typing test's AI queue reads these settings; tell it now rather than
     // leaving it to notice on the next visit to that view.
     notifyTypingAiChanged();
-    showAiStatus(`Saved and working — ${describeKeyInfo(verified)}.`);
+    showAiStatus(`Saved. Key verified — ${describeKeyInfo(verified)}.`);
+    refreshModelSuggestions();
   } catch (err) {
     showAiStatus(String(err.message ?? err), true);
   } finally {
@@ -2071,6 +2120,7 @@ function forgetAiKeyInSession() {
   aiSettings = emptyAiSettings();
   bankTools.reset();
   aiModels = null;
+  aiModelsKey = null;
   aiModelsPromise = null;
   aiKeyInfo = null;
   aiWordCache.clear();

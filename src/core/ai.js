@@ -1,7 +1,7 @@
 /**
- * The OpenRouter client and the AI features built on it.
+ * The OpenAI/OpenRouter client and the AI features built on it.
  *
- * Everything here talks to https://openrouter.ai/api/v1 with a key the user
+ * Requests go directly to the provider identified by the key the user
  * pastes into settings (see ai-settings.js for where it lives at rest). No
  * request is made unless that key exists, and the only thing ever sent is
  * what a feature needs: an essay draft, a word, the bank's headwords.
@@ -17,7 +17,12 @@
  * the student's own unpublished work.
  */
 
-const API_BASE = "https://openrouter.ai/api/v1";
+import { aiProvider, aiProviderName, defaultAiModel } from "./ai-provider.js";
+
+const API_BASES = {
+  openai: "https://api.openai.com/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+};
 
 /**
  * Network-resilience knobs; tests shrink them with setAiNetworkOptions().
@@ -83,14 +88,18 @@ function transientError(message, cause) {
  * hanging forever with the interface stuck on "thinking…".
  */
 async function apiFetch(path, apiKey, init = {}) {
-  const url = `${API_BASE}${path}`;
+  const provider = aiProvider(apiKey);
+  const name = aiProviderName(apiKey);
+  const url = `${API_BASES[provider]}${path}`;
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     // The pair OpenRouter attributes an app by. X-Title alone leaves lexis
     // unlinked on their side; both together are what the docs ask for, and
     // neither carries anything about the person using it.
-    "HTTP-Referer": "https://scotej.github.io/lexis/",
-    "X-Title": "lexis",
+    ...(provider === "openrouter" ? {
+      "HTTP-Referer": "https://scotej.github.io/lexis/",
+      "X-Title": "lexis",
+    } : {}),
     ...(init.body ? { "Content-Type": "application/json" } : {}),
     ...(init.headers ?? {}),
   };
@@ -113,8 +122,8 @@ async function apiFetch(path, apiKey, init = {}) {
       if (last) {
         throw transientError(
           err?.name === "AbortError"
-            ? `OpenRouter didn’t respond within ${Math.round(timeoutMs / 1000)}s — the model may be slower than lexis waits. Try a faster one.`
-            : "Couldn’t reach OpenRouter (network problem).",
+            ? `${name} didn’t respond within ${Math.round(timeoutMs / 1000)}s — the model may be slower than lexis waits. Try a faster one.`
+            : `Couldn’t reach ${name} (network problem).`,
           err
         );
       }
@@ -126,7 +135,7 @@ async function apiFetch(path, apiKey, init = {}) {
     }
 
     // Throttling and server trouble are worth one polite retry.
-    if ((resp.status === 429 || resp.status >= 500) && !last) {
+    if ((resp.status === 429 || resp.status >= 500) && !quotaExceeded(text) && !last) {
       const wait = retryAfterMs(resp);
       if (wait == null || wait <= net.maxBackoffMs) {
         await sleep(wait ?? backoffDelay(attempt));
@@ -136,7 +145,7 @@ async function apiFetch(path, apiKey, init = {}) {
     return { ok: resp.ok, status: resp.status, text };
   }
   // Unreachable: every path above returns or throws.
-  throw transientError("Couldn’t reach OpenRouter.");
+  throw transientError(`Couldn’t reach ${name}.`);
 }
 
 /**
@@ -155,14 +164,18 @@ function noEndpointsLeft(status, detail) {
   );
 }
 
-/**
- * Turns a non-2xx response into the most specific honest message available.
- *
- * `strict` says whether this request actually carried the privacy constraint.
- * Without it an unrelated 404 would be blamed on a setting the student had
- * already turned off — sending them to uncheck a box that is not checked.
- */
-function describeError(status, text, { strict = false } = {}) {
+function quotaExceeded(text) {
+  try {
+    const error = JSON.parse(text)?.error;
+    return [error?.code, error?.type].includes("insufficient_quota");
+  } catch { return false; }
+}
+
+/** Turns a non-2xx response into a provider-specific, actionable error. */
+function describeError(status, text, { strict = false, name = "OpenRouter" } = {}) {
+  if (name === "OpenAI" && quotaExceeded(text)) {
+    return "OpenAI API quota exceeded. Check your API billing balance and project spending limit at platform.openai.com.";
+  }
   let detail = "";
   try {
     const body = JSON.parse(text ?? "");
@@ -183,15 +196,15 @@ function describeError(status, text, { strict = false } = {}) {
 
   switch (status) {
     case 401:
-      return "OpenRouter rejected the key — it may have been revoked or mistyped.";
+      return `${name} rejected the key — it may have been revoked or mistyped.`;
     case 402:
       // Two situations answer to 402 — a balance spent, and a key that never
       // had one because it only ever bought free models — and only OpenRouter
       // knows which. Its own words go first, because "add credits" is advice
       // for the first and a misdiagnosis of the second.
       return detail
-        ? `OpenRouter wouldn’t bill this request — ${detail}`
-        : "This OpenRouter key has run out of credits. Add credits at openrouter.ai/credits.";
+        ? `${name} wouldn’t bill this request — ${detail}`
+        : `This ${name} key has run out of credits. Check your API billing balance.`;
     case 403:
       return detail || "The request was refused (moderation or key restrictions).";
     case 408:
@@ -204,12 +217,12 @@ function describeError(status, text, { strict = false } = {}) {
       // A bare "429" reads as a fault. It is a queue, and the two ways out —
       // wait, or stop sharing a free model with the world — are worth saying.
       return detail
-        ? `Rate-limited by OpenRouter — ${detail}`
-        : "Rate-limited by OpenRouter. Wait a moment, or pick a model with more capacity.";
+        ? `Rate-limited by ${name} — ${detail}`
+        : `Rate-limited by ${name}. Wait a moment, or pick a model with more capacity.`;
     default:
       return detail
-        ? `OpenRouter returned ${status} — ${detail}`
-        : `OpenRouter returned ${status}.`;
+        ? `${name} returned ${status} — ${detail}`
+        : `${name} returned ${status}.`;
   }
 }
 
@@ -231,11 +244,11 @@ function apiError(status, message) {
 
 async function apiJSON(path, apiKey, init = {}, opts = {}) {
   const { ok, status, text } = await apiFetch(path, apiKey, init);
-  if (!ok) throw apiError(status, describeError(status, text, opts));
+  if (!ok) throw apiError(status, describeError(status, text, { ...opts, name: aiProviderName(apiKey) }));
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error("OpenRouter sent a reply we couldn’t read.");
+    throw new Error(`${aiProviderName(apiKey)} sent a reply we couldn’t read.`);
   }
 }
 
@@ -273,13 +286,13 @@ export function resetAiSessionUsage() {
 
 /** Semantic vectors use an embedding model, independently of the chat model. */
 export async function aiEmbedWords(settings, input, { signal } = {}) {
-  if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
+  if (!settings?.key) throw new Error("Add your OpenAI or OpenRouter key in AI assist first.");
   const provider = privacyRouting(settings);
   const data = await apiJSON("/embeddings", settings.key, {
     method: "POST",
     signal,
     body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
+      model: aiProvider(settings) === "openai" ? "text-embedding-3-small" : "openai/text-embedding-3-small",
       input,
       dimensions: 256,
       encoding_format: "float",
@@ -288,7 +301,7 @@ export async function aiEmbedWords(settings, input, { signal } = {}) {
   }, { strict: Boolean(provider) });
   recordUsage(data?.usage);
   const rows = data?.data;
-  const invalid = () => new Error("OpenRouter returned incomplete or invalid word embeddings. Try again.");
+  const invalid = () => new Error(`${aiProviderName(settings)} returned incomplete or invalid word embeddings. Try again.`);
   if (!Array.isArray(rows) || rows.length !== input.length) throw invalid();
   const vectors = new Array(input.length);
   let dimensions;
@@ -351,7 +364,7 @@ function refusalText(message) {
  * before the option existed) still counts as on.
  */
 export function privacyRouting(settings) {
-  return settings?.strictPrivacy === false
+  return aiProvider(settings) === "openai" || settings?.strictPrivacy === false
     ? null
     : { data_collection: "deny", zdr: true };
 }
@@ -375,18 +388,14 @@ export function privacyRouting(settings) {
  * the parser.
  */
 async function complete(settings, { system, prompt, temperature = 0.4, signal }) {
-  if (!settings?.key) throw new Error("Add your OpenRouter key in AI assist first.");
+  if (!settings?.key) throw new Error("Add your OpenAI or OpenRouter key in AI assist first.");
   signal?.throwIfAborted();
   const body = {
-    model: normalizeModel(settings.model),
-    temperature,
-    reasoning: { enabled: true },
-    // Usage accounting, which OpenRouter only does when asked. Without this
-    // flag a reply carries token counts but no `cost`, so the session ledger
-    // added nothing up and the panel's "what this has cost you" line was
-    // permanently, wrongly, silent. It costs no extra request — the figure
-    // rides back on the completion itself.
-    usage: { include: true },
+    model: normalizeModel(settings.model, settings),
+    // OpenAI reasoning models reject custom temperatures; use their defaults.
+    ...(aiProvider(settings) === "openai"
+      ? { store: false }
+      : { temperature, reasoning: { enabled: true }, usage: { include: true } }),
     messages: [
       ...(system ? [{ role: "system", content: system }] : []),
       { role: "user", content: prompt },
@@ -412,7 +421,7 @@ async function complete(settings, { system, prompt, temperature = 0.4, signal })
     // endpoint and cannot be disabled" is a real 400 from this pool). Neither
     // opinion is worth failing a student's request over, so the field comes
     // off and the ask goes again without it.
-    if (!/reasoning/i.test(String(err?.message ?? ""))) throw err;
+    if (!body.reasoning || !/reasoning/i.test(String(err?.message ?? ""))) throw err;
     const { reasoning, ...plain } = body;
     data = await ask(plain);
   }
@@ -420,7 +429,7 @@ async function complete(settings, { system, prompt, temperature = 0.4, signal })
   const choice = data?.choices?.[0];
   const text = messageText(choice?.message);
   if (!text.trim()) {
-    throw new Error(refusalText(choice?.message) || "OpenRouter returned an empty response.");
+    throw new Error(refusalText(choice?.message) || `${aiProviderName(settings)} returned an empty response.`);
   }
   return { text: text.trim(), truncated: choice?.finish_reason === "length" };
 }
@@ -459,6 +468,11 @@ async function chatJSON(settings, options) {
 
 /** Key facts: label, spend, and remaining credit. Cheap enough to show inline. */
 export async function fetchKeyInfo(apiKey) {
+  if (aiProvider(apiKey) === "openai") {
+    // Ordinary project keys can list models, but cannot read account billing.
+    await apiJSON("/models", apiKey);
+    return { label: "OpenAI key", usage: null, limit: null, remaining: null, freeTier: false };
+  }
   const data = await apiJSON("/key", apiKey);
   const d = data?.data ?? {};
   const usage = Number(d.usage ?? 0);
@@ -499,11 +513,12 @@ export async function fetchModels(apiKey) {
  * A blank model is not an error at request time: it means "let OpenRouter
  * route it" (their `openrouter/auto`). Only an explicit empty *setting* with
  * no default falls back here. */
-export function normalizeModel(model) {
+export function normalizeModel(model, settings) {
   const m = String(model ?? "").trim();
-  if (!m) return "openrouter/auto";
+  if (!m) return defaultAiModel(settings);
   const withoutScheme = m.replace(/^https?:\/\/openrouter\.ai\/(?:c\/)?/, "");
-  return withoutScheme.replace(/^\/+/, "");
+  const id = withoutScheme.replace(/^\/+/, "");
+  return aiProvider(settings) === "openai" ? id.replace(/^openai\//, "") : id;
 }
 
 /* ---- tolerant output parsing ----

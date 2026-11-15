@@ -41,8 +41,8 @@ coverage are printed as explicit Unicode values such as `[U+1F600]`. Desktop ope
 dialog; the web app downloads a `.pdf` file.
 
 Choose **related meanings — AI** in either the bank or export order to arrange
-words by semantic similarity. It uses your saved OpenRouter key and privacy
-setting, with the `openai/text-embedding-3-small` embedding model (independent
+words by semantic similarity. It uses your saved AI key, with the `text-embedding-3-small` embedding model
+(`openai/text-embedding-3-small` through OpenRouter) (independent
 of your chosen chat model). Words, dictionary meanings and synonyms are sent
 in batches; a local comparison links the closest remaining meanings across
 the whole bank. All words are retained. This is an approximate semantic order,
@@ -140,15 +140,30 @@ bank after all. The eight views answer to the keys `1`–`8` — except while th
 typing test has the keyboard, which it needs in order to be a typing test;
 `esc` hands it back.
 
-## AI assist (optional, via OpenRouter)
+## AI assist (optional, via OpenAI or OpenRouter)
 
 Everything above works offline and always will. On top of it, lexis offers a
 layer of AI help for the parts a dictionary can't answer — and it stays off
 until you hand it a key.
 
-Paste an [OpenRouter](https://openrouter.ai) API key into **settings → ai
-assist** (any model works; leave the model blank for OpenRouter's automatic
-routing). That unlocks these:
+Paste an [OpenAI](https://platform.openai.com/api-keys) or
+[OpenRouter](https://openrouter.ai/keys) API key into **settings → ai assist**.
+Lexis detects OpenRouter's `sk-or-` keys and OpenAI's other `sk-` keys locally;
+a failed key is never tried against another provider. Requests go directly
+to the detected provider. Leave the model blank for `gpt-5.4-mini` on OpenAI,
+or `openrouter/auto` on OpenRouter. For OpenAI, use a model that supports Chat
+Completions; related-meaning sorting uses `text-embedding-3-small` separately.
+
+OpenAI keys use the same encrypted local storage as OpenRouter keys. The key
+check reads the model catalogue, without making a paid generation request;
+it does not prove that generation permissions or billing are enabled. OpenAI
+account spending is available in its dashboard; Lexis shows session token
+counts without inventing a dollar cost. OpenRouter's strict privacy routing
+only applies to OpenRouter. OpenAI chat requests set `store: false`; this does
+not enable zero data retention. OpenAI's [data controls](https://developers.openai.com/api/docs/guides/your-data)
+explain the default abuse monitoring retention and eligible account controls.
+
+Either provider unlocks these:
 
 - **Essay feedback.** A second button beside *check essay* sends the draft
   for structured feedback: what already works, the few changes that would
@@ -199,8 +214,8 @@ routing). That unlocks these:
 
 The key is a credential like the sync token: stored only as ciphertext on the
 device that holds it, never synced to GitHub or the backup folder, never
-baked into any build, and sent nowhere except to `openrouter.ai`. Requests go
-straight from the app to OpenRouter — there is no lexis server in between.
+baked into any build, and sent only to the detected provider (`api.openai.com` or `openrouter.ai`). Requests go
+straight from the app to the selected provider — there is no lexis server in between.
 What you send is what the feature needs, and no more: essay feedback sends the
 draft along with your bank's headwords; related ordering sends headwords,
 dictionary senses and synonyms (up to 6,000 characters per word), without
@@ -215,11 +230,11 @@ review dates or anything about your essays. Nothing you type *into* the typing
 test is sent anywhere — the scoring is arithmetic, done here.
 
 **Know what leaves the device.** Everything else in lexis is analysed here;
-these features are not, and cannot be. Your draft goes to OpenRouter,
-which forwards it to whichever provider serves the model you chose — and some
+these features are not, and cannot be. With an OpenRouter key, your draft goes
+to OpenRouter, which forwards it to whichever provider serves the model you chose — and some
 providers keep what they are sent, or train on it.
 
-So **strict privacy** is on by default, and every request carries it:
+For OpenRouter, **strict privacy** is on by default, and every request carries it:
 providers that collect or retain prompts are excluded from the routing, and
 lexis would rather fail to find a model than quietly use one of them. A
 narrowly-hosted model — free ones especially — may have no provider that
@@ -229,7 +244,8 @@ fall into. Your own account settings at
 [openrouter.ai/settings/privacy](https://openrouter.ai/settings/privacy)
 still apply on top. Worth reading before you send work that is being
 assessed. The settings panel also shows what this session has spent, so the
-cost of asking never comes as a surprise either.
+reported OpenRouter costs are visible. For direct OpenAI requests, consult
+the OpenAI usage dashboard for costs; Lexis shows session token counts.
 
 ## Two ends, one app
 
@@ -384,7 +400,7 @@ uploaded; they are analysed locally and never leave the device. Neither are
 typing speeds, personal bests, or typing preferences: those stay on the
 device that made them.
 
-**With an AI key saved**, your work leaves for OpenRouter only when you ask
+**With an AI key saved**, your work leaves for the detected provider when you ask
 for essay feedback or the vocabulary tools, and only with what that feature
 needs (see *AI assist* above). Two of those asks are made as part of adding a
 word rather than at a button — the spelling rescue and the written-out
@@ -393,11 +409,10 @@ answer the question. The first sends the mistyped word alone; the second
 sends the word, the unhelpful gloss, and the dictionary's entry for the root
 it names. The typing test asks on its own account, but
 only once you have set *quotes from* to **ai**, and only ever for passages
-built from your bank's headwords — never for anything you have typed. Because that includes your draft, it is held to
-the same standard as everything else here: strict privacy is on by default,
-and every request tells OpenRouter to route only to providers that neither
-collect nor retain what they are sent. The one other request the app makes on its own account
-is a balance and model-catalogue check when you open **settings → ai assist** —
+built from your bank's headwords — never for anything you have typed.
+OpenRouter requests use strict privacy routing by default; direct OpenAI
+requests use the data controls described above. The other automatic requests
+are key and model-catalogue checks (plus a balance check for OpenRouter) when you open **settings → ai assist** —
 it carries the key and nothing else, and it happens when you open that panel,
 not when the app starts.
 

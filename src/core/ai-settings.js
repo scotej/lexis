@@ -61,7 +61,7 @@ export async function saveAiSettings(platform, settings) {
     model: String(settings?.model ?? "").trim(),
     strictPrivacy: settings?.strictPrivacy !== false,
   };
-  if (!clean.key) throw new Error("Paste your OpenRouter key first.");
+  if (!clean.key) throw new Error("Paste your OpenAI or OpenRouter key first.");
   const envelope = await encryptJSON(await platform.deviceKey(), clean);
   await storeSet(SETTINGS_KEY, envelope);
   return clean;

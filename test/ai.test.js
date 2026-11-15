@@ -166,7 +166,7 @@ test("a 400 that has nothing to do with reasoning is not retried", async () => {
 test("a missing key refuses before any request", async () => {
   await assert.rejects(
     () => chat({ key: "", model: "" }, { prompt: "x" }),
-    /Add your OpenRouter key/
+    /Add your OpenAI or OpenRouter key/
   );
   assert.equal(calls.length, 0);
 });
@@ -742,7 +742,7 @@ test("saving without a key is refused before anything is written", async () => {
   const { platform } = await seededPlatform();
   await assert.rejects(
     () => saveAiSettings(platform, { key: "  ", model: "a/b" }),
-    /Paste your OpenRouter key/
+    /Paste your OpenAI or OpenRouter key/
   );
   assert.equal(await storeGet("lexis-ai"), null, "nothing was persisted");
 });
@@ -1136,4 +1136,12 @@ test("a model that writes an essay instead of a definition is not banked", async
   assert.deepEqual(senses, [
     { pos: "", def: "In a way that holds the attention.", example: null },
   ]);
+});
+
+
+test("OpenAI settings stay encrypted and survive reload without a migration", async () => {
+  const { platform } = await seededPlatform();
+  await saveAiSettings(platform, { key: " sk-proj-private-test ", model: "gpt-5.4-mini" });
+  assert.equal((await loadAiSettings(platform)).key, "sk-proj-private-test");
+  assert.ok(!JSON.stringify(await storeGet("lexis-ai")).includes("sk-proj-private-test"));
 });

@@ -148,7 +148,7 @@
           <button id="bank-export" class="link-quiet" type="button" aria-haspopup="dialog">export PDF</button>
         </div>
         <div class="bank-ai-tools" id="bank-ai-tools" hidden>
-          <p id="bank-ai-note" class="hint">AI links words by meaning using your OpenRouter key. Sends words, definitions and synonyms. Embedding models are paid; a key that holds only free models is grouped by your chat model instead.</p>
+          <p id="bank-ai-note" class="hint">AI links words by meaning using your OpenAI or OpenRouter key. Sends words, definitions and synonyms. Embeddings are billed by your provider. OpenRouter keys limited to free models use your chat model instead.</p>
           <button id="bank-ai-refresh" class="link-quiet" type="button">refresh AI order</button>
         </div>
         <div class="bank-order-feedback">
@@ -338,7 +338,7 @@
             <small id="conflicts-ai-note" class="field-note" hidden>
               Resolving with AI sends both copies of each word listed here — the
               definitions, the synonyms, and how far each one's practice has got —
-              to OpenRouter. Your review dates and essay history stay on this device.
+              to your AI provider. Your review dates and essay history stay on this device.
               Every verdict is applied as an ordinary edit you can undo.
             </small>
           </section>
@@ -403,24 +403,25 @@
           <p id="settings-status" class="add-status" role="status" hidden></p>
         </form>
 
-        <!-- ai assist: an OpenRouter key unlocks the writing features -->
+        <!-- ai assist: a personal API key unlocks the writing features -->
         <section class="ai-block">
           <h2 class="sync-heading">ai assist</h2>
           <form id="ai-settings-form" class="gate-form sync-form" autocomplete="off">
             <label class="field">
-              <span>OpenRouter API key</span>
+              <span>OpenAI or OpenRouter API key</span>
               <input
                 id="ai-key"
                 type="password"
-                placeholder="sk-or-v1-…"
+                placeholder="sk-proj-… or sk-or-v1-…"
                 autocomplete="off"
                 spellcheck="false"
-                aria-label="OpenRouter API key"
+                aria-label="OpenAI or OpenRouter API key"
               />
               <small id="ai-key-note">
-                From <em>openrouter.ai/keys</em>. Stored encrypted on this device — never
-                synced, never baked into the build, sent only to openrouter.ai.
+                From <em>platform.openai.com/api-keys</em> or <em>openrouter.ai/keys</em>.
+                Stored encrypted on this device, never synced, and sent only to its provider.
               </small>
+              <small id="ai-provider-note">OpenAI and OpenRouter keys are detected automatically.</small>
               <small class="ai-data-note">
                 What you ask about goes with it. <em>ai feedback</em> sends the whole
                 draft and your bank's headwords; <em>example sentences</em> sends the
@@ -437,7 +438,7 @@
                 to ask what you meant; and when an entry only names another word,
                 the word, that entry, and the dictionary's entry for the root are
                 sent so the definition can be written out.
-                OpenRouter forwards that text to whichever provider serves the model,
+                With an OpenRouter key, OpenRouter forwards that text to whichever provider serves the model,
                 which is why <em>strict privacy</em> below is on by default. Your
                 account's own settings at <em>openrouter.ai/settings/privacy</em>
                 still apply on top.
@@ -454,12 +455,12 @@
                 aria-label="Model"
               />
               <datalist id="ai-model-list"></datalist>
-              <small>
+              <small id="ai-model-note">
                 Any chat model OpenRouter offers. Leave blank for
                 <em>openrouter/auto</em>, which picks a good one per request.
               </small>
             </label>
-            <div class="field">
+            <div class="field" id="ai-router-privacy">
               <label class="check-line">
                 <input id="ai-strict-privacy" type="checkbox" checked />
                 <span>strict privacy</span>
@@ -471,6 +472,13 @@
                 qualifies; those say so rather than sending it anyway.
               </small>
             </div>
+            <p class="hint" id="ai-openai-privacy" hidden>
+              OpenAI requests go directly to OpenAI. Chat storage is disabled.
+              API data is not used for training by default; abuse monitoring logs may
+              be retained for up to 30 days. Zero data retention requires an eligible
+              OpenAI account configuration; the OpenRouter privacy switch does not apply.
+              See <em>developers.openai.com/api/docs/guides/your-data</em>.
+            </p>
             <div class="form-actions">
               <button class="button-primary" type="submit" id="ai-save">save</button>
               <button class="link-quiet" type="button" id="ai-remove" hidden>remove key</button>
@@ -495,7 +503,7 @@
       <p id="export-count" class="hint"></p>
       <label class="export-order-label" for="export-order">order</label>
       <select id="export-order"></select>
-      <p id="export-ai-note" class="hint" hidden>AI links related meanings using your OpenRouter key. Sends words, definitions and synonyms. Embedding models are paid; a key that holds only free models is grouped by your chat model instead. An unchanged order is reused for this session. Add a key in settings → ai assist.</p>
+      <p id="export-ai-note" class="hint" hidden>AI links related meanings using your OpenAI or OpenRouter key. Sends words, definitions and synonyms. Embeddings are billed by your provider. OpenRouter keys limited to free models use your chat model instead. An unchanged order is reused for this session. Add a key in settings → ai assist.</p>
       <p id="export-status" class="add-status" role="status" hidden></p>
       <div class="export-actions">
         <button id="export-close" class="link-quiet" type="button">cancel</button>
